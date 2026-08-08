@@ -136,14 +136,22 @@ Worked through the whole public surface, that gives:
 - **rule 2** — `PathSegment::Index`, a position in a *result* the producer assembled;
 - **rule 3** — `Location::source`, a `u32` index into the caller's own list of inputs, which is
   what every producer of one already spells it;
-- **rule 4** — `Span` and every byte offset and length, and `Adapted::dropped_labels`.
+- **rule 4** — `Position::offset`, `Span::{new, empty, start, end, len, contains}`,
+  `LineBreak::byte_len`, `Source::{len, line_at, position}`, and the adapter's two overflow counts,
+  `Adapted::dropped_labels` and `Adapted::dropped_path_segments`.
 
-Two consequences worth stating, because they are the reason the rules are ordered rather than
+Two consequences worth stating, because they are why the rules are ordered rather than merely
 listed. A line count is *both* a count of things in memory and a line ordinal; rule 1 comes first,
 so it is a `u64`. And nothing on the path a position is built by may saturate or cast: a clamped
 ordinal is indistinguishable from a real one, which is a number that lies rather than one that
-fails. `tests/numeric_widths.rs` asserts both — every width above by ascription, and the absence of
-clamping against the source itself.
+fails.
+
+**A parameter's width is as frozen as a return's**, so both are pinned. `tests/numeric_widths.rs`
+ascribes the whole signature of every member listed above, reads the public surface back out of
+`src/` so a new member cannot go unpinned, checks that its own file list is the whole crate,
+permits `u32` at four named lines and nowhere else, and asserts the absence of clamping against the
+source. What no such check can catch is a member placed under the wrong rule — that is what the
+ordering is for, and what review is for.
 
 ## Features
 

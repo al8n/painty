@@ -1,35 +1,58 @@
-//! Every public numeric is the width the rule gives it, and no position is ever clamped.
+//! Every public numeric is the width its rule gives it, and no position is ever clamped.
 //!
 //! # Why these are assertions and not scenarios
 //!
 //! The behaviour worth guaranteeing is that painty never reports a number that has been quietly
-//! narrowed. The scenario that would exercise one needs a source with more than `u32::MAX` line
-//! breaks — over four gigabytes of text — so no test is going to construct it, and a guarantee
-//! with no test behind it decays into a comment. So the *property* is asserted instead, in the
-//! three forms it can take.
+//! narrowed, and never publishes a width it cannot change later. The scenario that would exercise
+//! a clamp needs a source with more than `u32::MAX` line breaks — over four gigabytes of text — so
+//! no test is going to construct it, and a guarantee with no test behind it decays into a comment.
+//! So the *property* is asserted instead, in five layers, each of which closes a way the one
+//! above it could be true and useless.
 //!
-//! **Every width, by ascription.** No integer type coerces to another, so binding each accessor's
-//! result to its declared type is a compile-time assertion about that member. The list below is
-//! the whole public numeric surface, not a sample — which matters, because the review that
-//! prompted this file found a member nobody had classified, and a test that pins only the members
-//! somebody thought of cannot notice that.
+//! **Every signature, by function pointer.** [`pin`] ascribes the whole signature of every public
+//! member that mentions a primitive integer. A parameter's width is as frozen as a return's —
+//! `Span::new` taking `usize` is a promise to every caller who has already written one — so
+//! pinning only returns would leave half the surface free to drift.
 //!
-//! **`u32`, by census.** Rule 3 of the numeric widths in `README.md` is the only
-//! one that yields a narrow type, so a `u32` anywhere else is a ceiling nobody justified. Checked
-//! against the source, because it has to catch a member that does not exist yet — which no
-//! ascription can.
+//! **That the list is complete, by census.** [`pin`] is a list somebody maintains, and a list
+//! nobody is forced to extend falls behind. So the public members are read out of `src/` in the
+//! three shapes a numeric can be published in — a function signature, a public enum's variant
+//! payload, a public field or associated constant — and each must appear in [`pin`]'s own source.
+//! Adding one reddens until it is pinned; removing one reddens the ascription left behind.
+//!
+//! **That the census reads the whole crate, by walking it.** A file missing from the literal list
+//! is a file no check here covers, and nothing about a green run would say so.
+//!
+//! **`u32`, by census.** Rule 3 in `README.md` is the only rule yielding a narrow type, and it
+//! justifies exactly one member. So the exemption names that member's four lines rather than its
+//! file: a file-level licence would extend to every future member of the file, which is the
+//! open-endedness this sequence of reviews has been about. `src/tokora.rs` is *in* the census for
+//! the mirror-image reason — the file where foreign widths legitimately appear is the last one to
+//! leave unchecked.
 //!
 //! **The arithmetic, by census.** No saturating operation and no `as` cast on the path a position
-//! is built by. A claim about source, checked against source, for the reason this program keeps
-//! rediscovering: prose about what code does not do is uncompiled.
+//! is built by. A claim about source, checked against source, because prose about what code does
+//! not do is uncompiled.
 //!
-//! # What the last two do not cover
+//! # What still gets through
 //!
-//! A census over text is not a census over the API. A new member spelled `u64` or `usize` that
-//! should have been something else passes all three of these; only a `syn`-based walk of the
-//! public surface would catch it, and that is a dependency and a machine for a crate with roughly
-//! thirty numeric members. The gap is recorded rather than papered over: the ordered rule in the
-//! README is what places a new member, and this file is what keeps the placed ones honest.
+//! Re-derived from what is built above rather than carried forward from an earlier draft.
+//!
+//! 1. **A member placed under the wrong rule.** A new `usize` that should have been a rule-2
+//!    ordinal is pinned, complete, `u32`-free — and wrong. No text gate reads intent. The ordered
+//!    rule in `README.md` is what places a member; review is what checks the placement. This one
+//!    is not closable by any mechanism short of understanding the domain, so it is the residual
+//!    that matters.
+//! 2. **A declaration whose integer is not on the line the census keys on.** A signature wrapped
+//!    across lines by a future edit, or a variant written multi-line. None exist: rustfmt holds
+//!    every one of them inside a hundred columns, so this is a shape the crate does not currently
+//!    produce rather than one it tolerates.
+//! 3. **A numeric reached through a re-exported foreign type.** `src/lib.rs` re-exports only
+//!    painty's own types today, so there is nothing to reach; a future `pub use` of somebody
+//!    else's type would carry that type's widths past every check here.
+//!
+//! Only a walk of the public API — `syn`, a dependency and a machine — would close 2 and 3, and it
+//! would not touch 1. Neither has occurred; 1 has, twice, and it was caught by review both times.
 //!
 //! # What "exact" rests on
 //!
@@ -39,23 +62,15 @@
 //! panics if that reasoning is ever wrong — which is the direction to fail in. A saturating
 //! increment would instead hand back a number indistinguishable from a real one.
 
-use painty::{Location, PathSegment, Source, Span};
+use painty::{Line, LineBreak, Location, PathSegment, Position, Region, RegionLine, Source, Span};
 
-/// The files a position is built by.
-const RESOLUTION: [(&str, &str); 3] = [
-  ("src/source/mod.rs", include_str!("../src/source/mod.rs")),
-  ("src/source/line.rs", include_str!("../src/source/line.rs")),
-  (
-    "src/source/region.rs",
-    include_str!("../src/source/region.rs"),
-  ),
-];
-
-/// Every file the crate is made of.
+/// Every file that declares part of the public surface.
 ///
-/// A literal list rather than a directory walk: a walk that stopped finding files would report
-/// nothing and pass, and this is the check that is supposed to notice something new.
-const CRATE: [(&str, &str); 9] = [
+/// A literal list, because `include_str!` needs one — and a literal list goes stale in silence, so
+/// [`the_file_list_is_the_whole_crate`] walks `src/` and checks it. `src/tokora.rs` is here whether
+/// or not its feature is on: `include_str!` reads the disk, not the build, which is what keeps the
+/// adapter under the same censuses as everything else.
+const CRATE: [(&str, &str); 10] = [
   ("src/lib.rs", include_str!("../src/lib.rs")),
   (
     "src/diagnostic/mod.rs",
@@ -83,41 +98,366 @@ const CRATE: [(&str, &str); 9] = [
     "src/source/region.rs",
     include_str!("../src/source/region.rs"),
   ),
+  ("src/tokora.rs", include_str!("../src/tokora.rs")),
 ];
 
-/// The one file rule 3 applies in.
-///
-/// `Location::source` is a key into the caller's own list of inputs. painty never computes it, so
-/// it has no site at which it could be narrowed, and it has to round-trip through a contract that
-/// already spells it `u32`. `src/tokora.rs` is absent from [`CRATE`] for the same reason turned
-/// around: it is nothing but conversions from a foreign contract's widths, so every integer type
-/// in it is that contract's choice rather than painty's.
-const FOREIGN_KEY: &str = "src/diagnostic/location.rs";
+/// The files a position is built by.
+const RESOLUTION: [&str; 3] = [
+  "src/source/mod.rs",
+  "src/source/line.rs",
+  "src/source/region.rs",
+];
 
-/// The integer types a cast could narrow to.
+/// This file, so the completeness census can read the ascriptions out of [`pin`].
+const SELF: &str = include_str!("numeric_widths.rs");
+
+/// The primitive integer types.
 const INTEGERS: [&str; 12] = [
   "u8", "u16", "u32", "u64", "u128", "usize", "i8", "i16", "i32", "i64", "i128", "isize",
+];
+
+/// Every line in the crate that rule 3 permits to say `u32`, named exactly.
+///
+/// `Location::source` is a key into the caller's own list of inputs: painty never computes it, so
+/// it has no site at which it could be narrowed, and it round-trips through a contract that
+/// already spells it `u32`. That licence belongs to those four lines and to nothing else — not to
+/// the rest of their file, and not to a member added to it next year.
+const RULE_THREE: [(&str, &str); 4] = [
+  ("src/diagnostic/location.rs", "source: u32,"),
+  (
+    "src/diagnostic/location.rs",
+    "pub const fn new(source: u32, span: Span) -> Self {",
+  ),
+  (
+    "src/diagnostic/location.rs",
+    "pub const fn entire(source: u32) -> Self {",
+  ),
+  (
+    "src/diagnostic/location.rs",
+    "pub const fn source(&self) -> u32 {",
+  ),
 ];
 
 /// Strips the line comments, so prose about a cast is not mistaken for one.
 ///
 /// Line comments only: this crate writes no block comments, and a stripper that handled them would
-/// be more machinery than the thing it is guarding.
+/// be more machinery than the thing it guards.
 fn code_lines(source: &str) -> impl Iterator<Item = (usize, &str)> {
   source
     .lines()
     .enumerate()
-    .map(|(index, line)| (index + 1, line))
-    .filter(|(_, line)| !line.trim_start().starts_with("//"))
+    .map(|(index, line)| (index + 1, line.trim()))
+    .filter(|(_, line)| !line.starts_with("//"))
+}
+
+/// Whether `line` mentions `integer` as a token rather than as part of a longer word.
+fn mentions(line: &str, integer: &str) -> bool {
+  let boundary = |byte: Option<u8>| !byte.is_some_and(|b| b.is_ascii_alphanumeric() || b == b'_');
+  let bytes = line.as_bytes();
+  line.match_indices(integer).any(|(at, _)| {
+    boundary(at.checked_sub(1).map(|before| bytes[before]))
+      && boundary(bytes.get(at + integer.len()).copied())
+  })
+}
+
+/// The type an `impl` line opens, or `None` if the line is not one.
+///
+/// `impl<'a> Source<'a> {` is `Source`; `impl<'a> Iterator for RegionLines<'a> {` is `RegionLines`.
+fn impl_type(line: &str) -> Option<&str> {
+  let rest = line.strip_prefix("impl")?;
+  // Skip the impl's own generics, which may nest: `impl<'a, D: Trait<'a>>`.
+  let rest = if rest.starts_with('<') {
+    let mut depth = 0usize;
+    let end = rest
+      .char_indices()
+      .find_map(|(at, character)| match character {
+        '<' => {
+          depth += 1;
+          None
+        }
+        '>' => {
+          depth -= 1;
+          (depth == 0).then_some(at + 1)
+        }
+        _ => None,
+      })?;
+    &rest[end..]
+  } else {
+    rest
+  };
+
+  // A trait impl names the trait first, so the implementing type is what follows the last `for`.
+  let subject = match rest.rfind(" for ") {
+    Some(at) => &rest[at + " for ".len()..],
+    None => rest,
+  };
+  let subject = subject.trim().trim_end_matches('{').trim();
+  let subject = subject.split(['<', ' ']).next()?;
+  subject.rsplit("::").next().filter(|name| !name.is_empty())
+}
+
+/// Every public member of the crate that mentions a primitive integer, as `Type::name` paired
+/// with the site it was read from.
+///
+/// Three declaration shapes, because a numeric can be published in three ways and pinning only
+/// the first would leave the same kind of hole this file exists to close: a function's signature,
+/// a public enum's variant payload, and a public field or associated constant.
+fn public_numeric_members() -> Vec<(String, String)> {
+  let mut found = Vec::new();
+  for (path, source) in CRATE {
+    let mut owner = "<none>";
+    let mut in_public_enum = None;
+
+    for (number, line) in code_lines(source) {
+      if let Some(name) = impl_type(line) {
+        owner = name;
+      }
+      if let Some(rest) = line.strip_prefix("pub enum ") {
+        let name = rest.split(['<', ' ', '{']).next().unwrap_or_default();
+        owner = name;
+        in_public_enum = Some(name);
+      }
+      if line == "}" {
+        in_public_enum = None;
+      }
+      if let Some(rest) = line.strip_prefix("pub struct ") {
+        owner = rest.split(['<', ' ', '{']).next().unwrap_or_default();
+      }
+
+      let mentions_integer = INTEGERS.iter().any(|integer| mentions(line, integer));
+      if !mentions_integer {
+        continue;
+      }
+
+      // A function, whose whole signature is pinned.
+      if let Some(rest) = line
+        .strip_prefix("pub const fn ")
+        .or_else(|| line.strip_prefix("pub fn "))
+      {
+        let name = rest.split(['(', '<']).next().unwrap_or_default();
+        found.push((format!("{owner}::{name}"), format!("{path}:{number}")));
+        continue;
+      }
+
+      // A variant payload of a public enum — `Index(u64),`.
+      if let Some(name) = in_public_enum
+        && line.starts_with(|c: char| c.is_ascii_uppercase())
+        && line.contains('(')
+      {
+        let variant = line.split('(').next().unwrap_or_default();
+        found.push((format!("{name}::{variant}"), format!("{path}:{number}")));
+        continue;
+      }
+
+      // A public field or associated constant — `pub offset: usize,`.
+      if let Some(rest) = line.strip_prefix("pub ")
+        && let Some(name) = rest.split(':').next()
+        && !rest.starts_with("fn ")
+      {
+        let name = name.trim_start_matches("const ").trim();
+        found.push((format!("{owner}::{name}"), format!("{path}:{number}")));
+      }
+    }
+  }
+  found
+}
+
+/// The `let _: … = …;` lines of [`pin`], which are what the completeness census reads.
+fn ascriptions() -> Vec<&'static str> {
+  code_lines(SELF)
+    .map(|(_, line)| line)
+    .filter(|line| line.starts_with("let _:"))
+    .collect()
+}
+
+/// The whole public numeric surface, one ascription per signature.
+///
+/// A function pointer rather than a typed variable per parameter: it pins the parameters and the
+/// return in one line, and it cannot be written while forgetting an argument. The lifetimes are
+/// concrete rather than higher-ranked because these methods borrow a `Self` that already carries
+/// one — a `for<'a>` annotation is *more* general than the method and does not compile.
+///
+/// The witness gives `'a` somewhere to come from. It has no other purpose, and a lifetime used
+/// only inside the body would read to clippy as an unused one.
+fn pin<'a>(_witness: &'a ()) {
+  // Rule 1 — a line or column in the resolved model.
+  let _: fn(&Position) -> u64 = Position::line;
+  let _: fn(&Position) -> u64 = Position::column;
+  let _: fn(&'a Line<'a>) -> u64 = Line::number;
+  let _: fn(&'a Line<'a>) -> u64 = Line::char_count;
+  let _: fn(&'a Line<'a>, usize) -> u64 = Line::column_at;
+  let _: fn(&'a Source<'a>) -> u64 = Source::line_count;
+  let _: fn(&'a Source<'a>, u64) -> Option<Line<'a>> = Source::line;
+  let _: fn(&'a Region<'a>) -> u64 = Region::line_count;
+  let _: fn(&'a RegionLine<'a>) -> core::ops::Range<u64> = RegionLine::columns;
+
+  // Rule 2 — an ordinal in data the producer built.
+  let _: fn(u64) -> PathSegment<'a> = PathSegment::Index;
+
+  // Rule 3 — a key into a structure painty does not own.
+  let _: fn(u32, Span) -> Location = Location::new;
+  let _: fn(u32) -> Location = Location::entire;
+  let _: fn(&Location) -> u32 = Location::source;
+
+  // Rule 4 — everything else: an index or a count of things in memory.
+  let _: fn(usize, usize) -> Span = Span::new;
+  let _: fn(usize) -> Span = Span::empty;
+  let _: fn(&Span) -> usize = Span::start;
+  let _: fn(&Span) -> usize = Span::end;
+  let _: fn(&Span) -> usize = Span::len;
+  let _: fn(&Span, usize) -> bool = Span::contains;
+  let _: fn(&Position) -> usize = Position::offset;
+  let _: fn(&LineBreak) -> usize = LineBreak::byte_len;
+  let _: fn(&'a Source<'a>) -> usize = Source::len;
+  let _: fn(&'a Source<'a>, usize) -> Line<'a> = Source::line_at;
+  let _: fn(&'a Source<'a>, usize) -> Position = Source::position;
+
+  #[cfg(feature = "tokora")]
+  {
+    use painty::tokora::Adapted;
+    let _: fn(&Adapted<'a>) -> usize = Adapted::dropped_labels;
+    let _: fn(&Adapted<'a>) -> usize = Adapted::dropped_path_segments;
+  }
+}
+
+#[test]
+fn the_file_list_is_the_whole_crate() {
+  // Every census here reads `CRATE`, so a source file missing from it is a file no census covers —
+  // and nothing about a passing run would say so. Walked at run time and compared, rather than
+  // trusted: the literal is what `include_str!` requires, and this is what keeps the literal true.
+  fn walk(directory: &std::path::Path, found: &mut Vec<String>, root: &std::path::Path) {
+    for entry in std::fs::read_dir(directory).expect("src/ is readable") {
+      let path = entry.expect("a readable directory entry").path();
+      if path.is_dir() {
+        walk(&path, found, root);
+      } else if path.extension().is_some_and(|extension| extension == "rs") {
+        let relative = path
+          .strip_prefix(root)
+          .expect("a path under the crate root");
+        found.push(relative.to_string_lossy().replace('\\', "/"));
+      }
+    }
+  }
+
+  let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+  let mut on_disk = Vec::new();
+  walk(&root.join("src"), &mut on_disk, root);
+  on_disk.sort();
+
+  // `tests.rs` files are unit tests rather than declarations, and are the one thing the list omits.
+  let mut expected: Vec<String> = CRATE.iter().map(|(path, _)| (*path).to_owned()).collect();
+  expected.extend(
+    on_disk
+      .iter()
+      .filter(|path| path.ends_with("/tests.rs"))
+      .cloned(),
+  );
+  expected.sort();
+
+  assert_eq!(
+    on_disk, expected,
+    "`src/` and the census file list disagree. A new source file is covered by no check here until \
+     it is added to CRATE; a deleted one leaves an entry that reads an empty file."
+  );
+}
+
+#[test]
+fn every_public_numeric_member_is_pinned() {
+  pin(&());
+
+  let ascribed = ascriptions();
+  let mut missing = Vec::new();
+  for (symbol, site) in public_numeric_members() {
+    if !ascribed.iter().any(|line| line.contains(&symbol)) {
+      missing.push(format!("{site}: {symbol}"));
+    }
+  }
+  assert!(
+    missing.is_empty(),
+    "a public member declares a primitive integer and nothing pins it. Place it with the ordered \
+     rule in README.md#numeric-widths, then add a `let _: fn(..) -> ..` line for it to `pin`:\n{}",
+    missing.join("\n")
+  );
+}
+
+#[test]
+fn no_ascription_outlives_the_function_it_pins() {
+  // The other direction, so the list can only be as long as the surface. Without it a removed or
+  // renamed member leaves an ascription that still compiles against nothing anybody calls, and the
+  // census above keeps passing over a list that has quietly stopped describing the crate.
+  let signatures = public_numeric_members();
+  let mut stale = Vec::new();
+  for line in ascriptions() {
+    let symbol = line
+      .rsplit(" = ")
+      .next()
+      .unwrap_or_default()
+      .trim_end_matches(';');
+    if !signatures.iter().any(|(found, _)| found == symbol) {
+      stale.push(symbol.to_string());
+    }
+  }
+  assert!(
+    stale.is_empty(),
+    "`pin` ascribes a signature the crate no longer has:\n{}",
+    stale.join("\n")
+  );
+}
+
+#[test]
+fn u32_appears_only_where_a_foreign_key_round_trips() {
+  let mut unlicensed = Vec::new();
+  let mut used = [false; RULE_THREE.len()];
+
+  for (path, source) in CRATE {
+    for (number, line) in code_lines(source) {
+      if !mentions(line, "u32") {
+        continue;
+      }
+      match RULE_THREE
+        .iter()
+        .position(|&(file, text)| file == path && text == line)
+      {
+        Some(index) => used[index] = true,
+        None => unlicensed.push(format!("{path}:{number}: {line}")),
+      }
+    }
+  }
+
+  assert!(
+    unlicensed.is_empty(),
+    "a `u32` outside the four lines rule 3 licenses is a ceiling on something painty computes. \
+     Place the member with the ordered rule in README.md#numeric-widths: only rule 3 — a key \
+     painty never computes, round-tripping through a contract that already spells it `u32` — \
+     gives a narrow type.\n{}",
+    unlicensed.join("\n")
+  );
+
+  // An allowlist entry that matches nothing has stopped licensing anything and is now just an
+  // exemption waiting to be reused by something it was never argued for.
+  let stale: Vec<_> = RULE_THREE
+    .iter()
+    .zip(used)
+    .filter(|(_, matched)| !matched)
+    .map(|((path, text), _)| format!("{path}: {text}"))
+    .collect();
+  assert!(
+    stale.is_empty(),
+    "a rule 3 exemption no longer matches any line; delete it rather than leaving it open:\n{}",
+    stale.join("\n")
+  );
 }
 
 #[test]
 fn no_position_is_built_by_a_saturating_operation() {
   let mut found = Vec::new();
-  for (path, source) in RESOLUTION {
+  for (path, source) in CRATE {
+    if !RESOLUTION.contains(&path) {
+      continue;
+    }
     for (number, line) in code_lines(source) {
       if line.contains("saturating_") {
-        found.push(format!("{path}:{number}: {}", line.trim()));
+        found.push(format!("{path}:{number}: {line}"));
       }
     }
   }
@@ -132,11 +472,14 @@ fn no_position_is_built_by_a_saturating_operation() {
 #[test]
 fn no_position_is_built_by_a_narrowing_cast() {
   let mut found = Vec::new();
-  for (path, source) in RESOLUTION {
+  for (path, source) in CRATE {
+    if !RESOLUTION.contains(&path) {
+      continue;
+    }
     for (number, line) in code_lines(source) {
       for integer in INTEGERS {
         if line.contains(&format!("as {integer}")) {
-          found.push(format!("{path}:{number}: {}", line.trim()));
+          found.push(format!("{path}:{number}: {line}"));
         }
       }
     }
@@ -149,155 +492,75 @@ fn no_position_is_built_by_a_narrowing_cast() {
   );
 }
 
-/// Rule 3 is the only rule that yields a narrow type, so `u32` outside its one site is a ceiling
-/// nobody argued for.
-///
-/// This is the only one of the three censuses that can catch a member which does not exist yet.
-/// The ascriptions below pin the widths of members somebody has already thought about; the review
-/// that prompted this file found one nobody had, and the shape of that miss was a `u32` sitting
-/// quietly in a public enum.
-#[test]
-fn u32_appears_only_where_a_foreign_key_round_trips() {
-  let mut found = Vec::new();
-  for (path, source) in CRATE {
-    if path == FOREIGN_KEY {
-      continue;
-    }
-    for (number, line) in code_lines(source) {
-      if line.contains("u32") {
-        found.push(format!("{path}:{number}: {}", line.trim()));
-      }
-    }
-  }
-  assert!(
-    found.is_empty(),
-    "a `u32` outside {FOREIGN_KEY} is a ceiling on something painty computes. Place the member \
-     with the ordered rule in README.md#numeric-widths: only rule 3 — a key painty never computes, \
-     round-tripping through a contract that already spells it `u32` — gives a narrow type.\n{}",
-    found.join("\n")
-  );
-}
-
 #[test]
 fn the_censuses_can_fail() {
-  // Each gate above is a substring search, and a substring search looking for the wrong substring
-  // passes forever. Every pattern is exercised against text that does contain it, so a change that
-  // breaks the matching itself reddens here rather than going quiet.
-  let planted = "  let n = count.saturating_add(1) as u32;";
+  // Every gate above is a text search, and a text search looking for the wrong text passes
+  // forever. Each pattern is exercised against input that does contain it, so a change breaking
+  // the matching itself reddens here rather than going quiet.
+  let planted = "pub const fn depth(&self) -> u32 { count.saturating_add(1) as u32 }";
   assert!(planted.contains("saturating_"));
   assert!(planted.contains("as u32"));
-  assert!(planted.contains("u32"));
+  assert!(mentions(planted, "u32"));
 
-  // ...and the comment stripper really does strip, so no gate can be defeated by prose, nor
-  // tripped by it.
-  let commented = "  // never write `count.saturating_add(1) as u32` here";
-  assert_eq!(code_lines(commented).count(), 0);
+  // Token matching, not substring matching: a longer word that merely contains one is not a
+  // mention, or every `u32::try_from` in a comment would read as a ceiling.
+  assert!(!mentions("let x = fu32bar;", "u32"));
+  assert!(mentions("fn f() -> u32 {", "u32"));
+
+  // The impl-type reader really does read the three shapes the crate writes.
+  assert_eq!(impl_type("impl Span {"), Some("Span"));
+  assert_eq!(impl_type("impl<'a> Source<'a> {"), Some("Source"));
+  assert_eq!(
+    impl_type("impl<'a> Iterator for RegionLines<'a> {"),
+    Some("RegionLines")
+  );
+  assert_eq!(impl_type("pub const fn len(&self) -> usize {"), None);
+
+  // And the comment stripper strips, so no gate can be defeated by prose nor tripped by it.
+  assert_eq!(code_lines("  // never write `x as u32` here").count(), 0);
   assert_eq!(code_lines(planted).count(), 1);
+
+  // The two censuses over `pin` are reading something rather than an empty list.
+  assert!(ascriptions().len() >= 20);
+  assert!(public_numeric_members().len() >= 20);
 }
 
 #[test]
-fn every_public_numeric_is_the_width_its_rule_gives_it() {
+fn the_pinned_widths_are_the_values_the_crate_produces() {
+  // The ascriptions are compile-time and touch no values, so this is what keeps them over live
+  // code rather than over accessors nobody calls.
   let text = "one\ntwo\nthree\n";
   let source = Source::new(text);
   let region = source.resolve(Span::new(2, 9));
   let line = source.line(1).expect("a source has a first line");
   let drawn = region.lines().next().expect("a region is drawn somewhere");
-  let span = Span::new(2, 9);
-  let location = Location::new(0, span);
 
-  // Ascribed, not compared. No integer type coerces to another, so each binding is a compile-time
-  // assertion about one member. This is the WHOLE public numeric surface: adding a member here is
-  // part of adding one to the crate, and a change that widens some and not others cannot pass.
-
-  // Rule 1 — a line or column in the resolved model.
-  let position_line: u64 = region.start().line();
-  let position_column: u64 = region.start().column();
-  let line_number: u64 = line.number();
-  let line_width: u64 = line.char_count();
-  let column_of: u64 = line.column_at(1);
-  let lines_in_source: u64 = source.line_count();
-  let lines_in_region: u64 = region.line_count();
-  let columns: core::ops::Range<u64> = drawn.columns();
-
-  // Rule 2 — an ordinal in data the producer built.
-  let path_index: PathSegment<'_> = PathSegment::Index(2u64);
-
-  // Rule 3 — a key into a structure painty does not own.
-  let input: u32 = location.source();
-
-  // Rule 4 — everything else: an index or a count of things in memory.
-  let position_offset: usize = region.start().offset();
-  let span_start: usize = span.start();
-  let span_end: usize = span.end();
-  let span_len: usize = span.len();
-  let break_len: usize = line
-    .line_break()
-    .expect("the first line of the fixture ends in a break")
-    .byte_len();
-  let source_len: usize = source.len();
-
-  // And the values are the right ones, so the ascriptions are over live code rather than over
-  // accessors nobody calls.
-  assert_eq!((position_line, position_column, position_offset), (1, 3, 2));
-  assert_eq!((line_number, line_width, column_of), (1, 3, 2));
+  assert_eq!(
+    (
+      region.start().line(),
+      region.start().column(),
+      region.start().offset()
+    ),
+    (1, 3, 2)
+  );
+  assert_eq!(
+    (line.number(), line.char_count(), line.column_at(1)),
+    (1, 3, 2)
+  );
   // Four lines in the source, counting the empty one the trailing break leaves; the region runs
   // from line 1 to the `h` on line 3.
-  assert_eq!((lines_in_source, lines_in_region), (4, 3));
-  assert_eq!(columns, 3..4);
-  assert_eq!(path_index.to_string(), "2");
-  assert_eq!(input, 0);
-  assert_eq!((span_start, span_end, span_len), (2, 9, 7));
-  assert_eq!((break_len, source_len), (1, text.len()));
-}
-
-/// The adapter's two counts, which only exist when its feature is on.
-#[cfg(feature = "tokora")]
-#[test]
-fn the_adapters_overflow_counts_are_rule_four() {
-  use painty::tokora::adapt;
-
-  // A `Diagnose` with nothing to place, so the adapter is exercised without a fixture type: the
-  // widths are what this test is about, not the walk, which `tokora_adapter.rs` covers.
-  struct Empty;
-  impl core::fmt::Display for Empty {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-      f.write_str("nothing to say")
-    }
-  }
-  impl tokora::diagnostic::Diagnose for Empty {
-    fn code(&self) -> tokora::diagnostic::Code {
-      tokora::diagnostic::Code::new("mylang::test::empty")
-    }
-    fn severity(&self) -> tokora::diagnostic::Severity {
-      tokora::diagnostic::Severity::Advice
-    }
-    fn primary(&self) -> tokora::diagnostic::Location {
-      tokora::diagnostic::Location::entire(0)
-    }
-    fn primary_label(&self) -> Option<&'static str> {
-      None
-    }
-    fn labels(&self) -> usize {
-      0
-    }
-    fn label(&self, _: usize) -> Option<tokora::diagnostic::Label> {
-      None
-    }
-    fn path_segments(&self) -> usize {
-      0
-    }
-    fn path_segment(&self, _: usize) -> Option<tokora::diagnostic::PathSegment<'_>> {
-      None
-    }
-    fn help(&self) -> Option<&'static str> {
-      None
-    }
-  }
-
-  let adapted = adapt(&Empty, &mut [], &mut []);
-  let dropped_labels: usize = adapted.dropped_labels();
-  let dropped_path: usize = adapted.dropped_path_segments();
-  assert_eq!((dropped_labels, dropped_path), (0, 0));
+  assert_eq!((source.line_count(), region.line_count()), (4, 3));
+  assert_eq!(drawn.columns(), 3..4);
+  assert_eq!(PathSegment::Index(2).to_string(), "2");
+  assert_eq!(Location::new(0, Span::new(2, 9)).source(), 0);
+  assert_eq!(source.len(), text.len());
+  assert_eq!(
+    line
+      .line_break()
+      .expect("the first line ends in a break")
+      .byte_len(),
+    1
+  );
 }
 
 #[test]
