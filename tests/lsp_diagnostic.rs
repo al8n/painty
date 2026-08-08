@@ -38,6 +38,13 @@ fn severity_code(severity: Severity) -> u8 {
 }
 
 /// An LSP `Position`: 0-based line, and a character counted in UTF-16 code units.
+///
+/// # The narrowing is here, and that is the right place for it
+///
+/// LSP's `uinteger` is 32 bits; painty's ordinals are `u64`. The conversion is the protocol
+/// adapter's, made where the protocol's limit is known, and it is `try_from` rather than a cast —
+/// a document too large for LSP to address is something a server has to answer for, not something
+/// a renderer should have silently clamped on its behalf several layers earlier.
 fn lsp_position(source: Source<'_>, offset: usize) -> (u32, u32) {
   let at = source.position(offset);
   let line = source.line_at(offset);
@@ -49,7 +56,10 @@ fn lsp_position(source: Source<'_>, offset: usize) -> (u32, u32) {
   let byte_in_line = at.offset() - content.start();
   let character = line.text()[..byte_in_line].encode_utf16().count();
 
-  (at.line() - 1, character as u32)
+  (
+    u32::try_from(at.line() - 1).expect("the fixture is addressable by LSP"),
+    u32::try_from(character).expect("the fixture is addressable by LSP"),
+  )
 }
 
 /// An LSP `Range` for a span, resolved against the text it points into.
@@ -144,7 +154,7 @@ fn utf16_and_character_columns_part_company_on_an_astral_character() {
   // would place every LSP position after an emoji one unit early.
   let (line, character) = lsp_position(source, quote);
   assert_eq!((line, character), (0, 12));
-  assert_ne!(character, at.column() - 1);
+  assert_ne!(u64::from(character), at.column() - 1);
 }
 
 #[test]

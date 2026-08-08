@@ -65,9 +65,9 @@ fn generate(rng: &mut Rng) -> String {
 /// Walks characters and accumulates, where painty walks bytes and seeks. `offset` must be an
 /// offset [`floor`] or [`ceil`] produced: at or before the end of `text`, on a character boundary,
 /// and not between the two bytes of a CRLF.
-fn oracle(text: &str, offset: usize) -> (u32, u32) {
-  let mut line = 1u32;
-  let mut column = 1u32;
+fn oracle(text: &str, offset: usize) -> (u64, u64) {
+  let mut line = 1u64;
+  let mut column = 1u64;
   let mut characters = text.char_indices().peekable();
 
   while let Some((index, character)) = characters.next() {
@@ -219,7 +219,7 @@ fn check_region(text: &str, requested: Span) {
   for (step, line) in drawn.iter().enumerate() {
     assert_eq!(
       line.line().number(),
-      region.start().line() + step as u32,
+      region.start().line() + step as u64,
       "{context}: consecutive lines"
     );
   }
