@@ -575,6 +575,23 @@ jobs:
             exit 1
           fi
           echo "ok: the rendered front page is painty's README"
+      # docs.rs builds all features, so every step above is the configuration a READER sees — and
+      # it is the only one that can resolve a link into a feature-gated module. Such a link is
+      # broken for the consumer who runs `cargo doc` on the primary configuration, and nothing in
+      # an all-features job can see it. Two of them were written here and neither reddened anything
+      # until this leg existed. Last in the job so the checks above keep reading the page they were
+      # written against.
+      - name: cargo doc -p painty --no-default-features --no-deps
+        run: |
+          set -euo pipefail
+          TD="${CARGO_TARGET_DIR:-target}"
+          rm -rf "$TD/doc"
+          cargo doc -p painty --no-default-features --no-deps
+          if [ ! -f "$TD/doc/painty/index.html" ]; then
+            echo "::error::cargo doc -p painty exited 0 but wrote no page at $TD/doc/painty/index.html"
+            exit 1
+          fi
+          echo "ok: the primary configuration documents cleanly too"
 
   # ── Gate: the crate can actually be published ───────────────────────────────
   #

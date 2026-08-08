@@ -9,11 +9,11 @@
 ///
 /// # Why painty declares its own rather than borrowing one
 ///
-/// This is the same ladder [`tokora`](crate::tokora)'s diagnostic contract publishes, and the
-/// duplication is deliberate: a crate whose whole job is to draw an underline must not require its
-/// caller to adopt a parser-combinator library first. The `tokora` feature supplies a
-/// [`From`] between the two, and a conversion is a function — when the two ladders diverge it
-/// stops compiling, which is the failure direction a second *trait* would not have given.
+/// This is the same ladder `tokora`'s diagnostic contract publishes, and the duplication is
+/// deliberate: a crate whose whole job is to draw an underline must not require its caller to
+/// adopt a parser-combinator library first. The `tokora` feature supplies a [`From`] between the
+/// two, and a conversion is a function — when the two ladders diverge it stops compiling, which is
+/// the failure direction a second *trait* would not have given.
 ///
 /// ```
 /// use painty::Severity;
