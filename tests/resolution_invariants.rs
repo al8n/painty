@@ -224,6 +224,28 @@ fn check_region(text: &str, requested: Span) {
     );
   }
 
+  // And they stop on the line holding the region's LAST BYTE — not the line its exclusive end
+  // reaches, which for a region that swallowed its own trailing newline is the one after.
+  //
+  // The tiling check below is blind to that difference on its own: an extra trailing line covers
+  // nothing, so adding it breaks no coverage rule and leaves every byte still accounted for. Not
+  // hypothetical — the defect was planted, and until this assertion existed only the hand-written
+  // cases reddened.
+  let expected_last_line = if span.is_empty() {
+    region.start().line()
+  } else {
+    oracle(text, floor(text, span.end() - 1)).0
+  };
+  assert_eq!(
+    drawn
+      .last()
+      .expect("a region is drawn somewhere")
+      .line()
+      .number(),
+    expected_last_line,
+    "{context}: last drawn line"
+  );
+
   // Every byte of the region is covered by exactly one of those lines, unless it is part of a line
   // break — which is the whole of what "the lines a region is drawn on" means.
   let mut covered = vec![false; span.len()];
