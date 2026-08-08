@@ -18,15 +18,21 @@
 //! same moment, so one worked example proves almost nothing about its precision. A parser has no
 //! such blind spot: it either accepts Rust or it does not.
 //!
-//! # The four layers
+//! # The five layers
 //!
 //! **Every signature, by function pointer.** [`pin`] ascribes the whole signature of every public
-//! member that mentions a primitive integer. A parameter's width is as frozen as a return's, and
-//! the receiver's borrow is written `for<'s>` rather than tied to the source lifetime — see
+//! member that mentions a primitive integer, and a binding only counts as a pin when its declared
+//! type really is a function pointer — see [`ascribed`]. A parameter's width is as frozen as a
+//! return's, and the receiver's borrow is elided rather than tied to the source lifetime; see
 //! [`pin`] for why that distinction is load-bearing rather than pedantic.
 //!
 //! **That the list is complete, and no longer than the surface.** The public members are read out
 //! of `src/` and matched against the ascriptions by *exact* path, in both directions.
+//!
+//! **That no spelling hides a primitive.** Every check above recognises an integer by *name*,
+//! which rests on a frame nobody was checking: that a primitive in a public signature is spelled
+//! like one. Type aliases, renamed imports, item macros and unparsed items break that frame, and
+//! [`no_spelling_can_hide_a_primitive_integer`] refuses all of them with no allowlist.
 //!
 //! **`u32`, by exact member.** Rule 3 in `README.md` is the only rule yielding a narrow type, and
 //! it justifies exactly four occurrences. The exemption names those four members and requires each
@@ -38,20 +44,22 @@
 //! # What still gets through
 //!
 //! 1. **A member placed under the wrong rule.** A new `usize` that should have been a rule-2
-//!    ordinal is pinned, complete, `u32`-free — and wrong. A parser does not read intent, so this
-//!    is untouched by everything above and is the residual that matters. It is also the only one
-//!    that has happened: twice, and review caught it both times.
+//!    ordinal is pinned, complete, `u32`-free, spelled plainly — and wrong. No parser reads
+//!    intent, so this is untouched by every layer above and is the residual that matters. It is
+//!    also the only one that has happened: twice, and review caught it both times.
 //! 2. **A width painty does not choose.** A method of `impl Iterator for RegionLines` takes its
 //!    signature from the trait, and `src/tokora.rs`'s conversions take theirs from tokora. Those
 //!    are excluded from the *completeness* census on purpose — painty cannot pick them — but they
-//!    are inside the `u32` census, so a narrow type still has to be argued for.
-//! 3. **A public numeric reached through a re-exported foreign type.** `src/lib.rs` re-exports
-//!    only painty's own types today, so there is nothing to reach; a future `pub use` of somebody
-//!    else's type would carry its widths past every check here, because the parser is pointed at
-//!    painty's files rather than at a resolved API graph.
+//!    are inside the `u32` census, and an associated type painty *binds* to a primitive is
+//!    refused outright, so the part that is painty's choice is still covered.
+//! 3. **A foreign type that is secretly an integer alias.** `libc::c_uint` in a public signature
+//!    would read to this scan as an ordinary named type. Nothing foreign appears in painty's
+//!    public API today, and the checks above make painty's *own* spellings closed; what remains is
+//!    a spelling somebody else owns.
 //!
-//! Item 1 needs a reader. Item 3 needs the compiler's own view of the public surface rather than a
-//! parse of the crate's text, which is a different and much larger machine than this one.
+//! Item 1 needs a reader. Item 3 needs the compiler's resolved view of the surface rather than a
+//! parse of the crate's text — priced in
+//! [`no_spelling_can_hide_a_primitive_integer`] and declined, with the reason.
 //!
 //! # What "exact" rests on
 //!
@@ -152,6 +160,8 @@ struct Surface {
   narrows: Vec<Site>,
   saturating: Vec<Site>,
   casts: Vec<Site>,
+  /// Constructs that can dress a primitive integer in a name this scan cannot see through.
+  spellings: Vec<Site>,
 }
 
 fn type_name(ty: &Type) -> String {
@@ -170,6 +180,16 @@ fn is_public(visibility: &Visibility) -> bool {
   matches!(visibility, Visibility::Public(_))
 }
 
+/// The primitive integer a path names, if it names one.
+///
+/// Keyed on the LAST segment, so `core::primitive::u32` is the same answer as `u32`. Matching only
+/// a single-segment path — which this did — let the qualified spelling walk past every check while
+/// compiling to exactly the same type.
+fn primitive(path: &syn::Path) -> Option<String> {
+  let last = path.segments.last()?.ident.to_string();
+  INTEGERS.contains(&last.as_str()).then_some(last)
+}
+
 /// Collects the primitive integers named anywhere inside one syntax node.
 #[derive(Default)]
 struct Integers(Vec<String>);
@@ -177,10 +197,9 @@ struct Integers(Vec<String>);
 impl<'ast> Visit<'ast> for Integers {
   fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
     if node.qself.is_none()
-      && let Some(ident) = node.path.get_ident()
-      && INTEGERS.contains(&ident.to_string().as_str())
+      && let Some(found) = primitive(&node.path)
     {
-      self.0.push(ident.to_string());
+      self.0.push(found);
     }
     visit::visit_type_path(self, node);
   }
@@ -216,6 +235,11 @@ impl Scan<'_> {
   fn member(&mut self, path: String, span: proc_macro2::Span) {
     let site = self.site(span);
     self.out.members.push(Member { path, site });
+  }
+
+  fn spelling(&mut self, what: String, span: proc_macro2::Span) {
+    let site = self.site(span);
+    self.out.spellings.push(Site { owner: what, site });
   }
 
   /// Runs `body` with `owner` in scope, then restores the previous one.
@@ -335,20 +359,9 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     self.scoped(path, |scan| visit::visit_item_const(scan, node));
   }
 
-  fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
-    let path = node.ident.to_string();
-    if is_public(&node.vis) && !integers_in_type(&node.ty).is_empty() {
-      self.member(path.clone(), node.ident.span());
-    }
-    self.scoped(path, |scan| visit::visit_item_type(scan, node));
-  }
-
   fn visit_type_path(&mut self, node: &'ast syn::TypePath) {
-    if node.qself.is_none()
-      && let Some(ident) = node.path.get_ident()
-      && ident == "u32"
-    {
-      let site = self.site(ident.span());
+    if node.qself.is_none() && primitive(&node.path).as_deref() == Some("u32") {
+      let site = self.site(node.path.span());
       self.out.narrows.push(Site {
         owner: self.owner.clone(),
         site,
@@ -366,6 +379,79 @@ impl<'ast> Visit<'ast> for Scan<'_> {
       });
     }
     visit::visit_expr_method_call(self, node);
+  }
+
+  // ── Fail closed on the spellings a primitive can hide behind ──────────────────────────────
+  //
+  // Everything above recognises `u32`, `usize` and their siblings by name. That recognition rests
+  // on a frame nobody was checking: that a primitive integer in a public signature is *spelled*
+  // like one. Four constructs break the frame, and painty uses none of them, so the honest state
+  // is an empty set with no allowlist to grant an exception through.
+
+  fn visit_item_type(&mut self, node: &'ast syn::ItemType) {
+    let path = node.ident.to_string();
+    if is_public(&node.vis) && !integers_in_type(&node.ty).is_empty() {
+      self.member(path.clone(), node.ident.span());
+    }
+    self.spelling(format!("type alias `{path}`"), node.ident.span());
+    self.scoped(path, |scan| visit::visit_item_type(scan, node));
+  }
+
+  fn visit_impl_item_type(&mut self, node: &'ast syn::ImplItemType) {
+    // An INHERENT associated type is a name painty invented, so it is a hazard whatever it is
+    // bound to today. One in a TRAIT impl is a foreign name painty is filling in — `Iterator::Item`
+    // — so the name is not painty's and only the binding matters. `type Item = Line<'a>` is
+    // nothing; `type Item = usize` would make `next` hand back a public integer that no
+    // `pub fn` line declares and no function pointer can pin, which is exactly the shape this
+    // check exists to refuse.
+    let invented = self.inherent;
+    let bound_to_a_primitive = !integers_in_type(&node.ty).is_empty();
+    if invented || bound_to_a_primitive {
+      self.spelling(
+        format!("associated type `{}::{}`", self.owner, node.ident),
+        node.ident.span(),
+      );
+    }
+    visit::visit_impl_item_type(self, node);
+  }
+
+  fn visit_trait_item_type(&mut self, node: &'ast syn::TraitItemType) {
+    // An associated type in a trait painty declares is an open name an implementor fills, so this
+    // scan cannot know what it will be bound to. painty declares no traits; if it ever does, that
+    // is a decision to make deliberately rather than one to inherit.
+    self.spelling(
+      format!("open associated type `{}::{}`", self.owner, node.ident),
+      node.ident.span(),
+    );
+    visit::visit_trait_item_type(self, node);
+  }
+
+  fn visit_use_rename(&mut self, node: &'ast syn::UseRename) {
+    self.spelling(
+      format!("renamed import `{} as {}`", node.ident, node.rename),
+      node.rename.span(),
+    );
+    visit::visit_use_rename(self, node);
+  }
+
+  fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
+    let name = node
+      .mac
+      .path
+      .segments
+      .last()
+      .map_or_else(String::new, |segment| segment.ident.to_string());
+    self.spelling(format!("item macro `{name}!`"), node.mac.path.span());
+    visit::visit_item_macro(self, node);
+  }
+
+  fn visit_item(&mut self, node: &'ast Item) {
+    // Tokens syn accepted as an item without understanding them. Whatever they declare is outside
+    // every check here, which is the definition of a spelling this scan cannot see through.
+    if let Item::Verbatim(tokens) = node {
+      self.spelling("an item syn could not parse".to_owned(), tokens.span());
+    }
+    visit::visit_item(self, node);
   }
 
   fn visit_expr_cast(&mut self, node: &'ast syn::ExprCast) {
@@ -402,12 +488,22 @@ fn surface() -> Surface {
 }
 
 /// The paths [`pin`] ascribes, read out of this file's own syntax rather than its text.
+///
+/// # A binding only counts when it is a function pointer
+///
+/// Requiring `let _: fn(..) -> ..` and not merely `let _ = ..` is the difference between a check
+/// and a formality. A plain `let _ = Span::new;` names the same path, so it would satisfy the
+/// completeness census while constraining no parameter, no return and no receiver borrow — the
+/// gate would pass over a member whose widths nothing holds. So the local's declared type has to
+/// be a bare function pointer, and anything else is not a pin.
 fn ascribed() -> Vec<String> {
   #[derive(Default)]
   struct Locals(Vec<String>);
   impl<'ast> Visit<'ast> for Locals {
     fn visit_local(&mut self, node: &'ast syn::Local) {
-      if let Some(init) = &node.init
+      if let syn::Pat::Type(typed) = &node.pat
+        && matches!(&*typed.ty, Type::BareFn(_))
+        && let Some(init) = &node.init
         && let syn::Expr::Path(path) = &*init.expr
       {
         let joined = path
@@ -497,12 +593,10 @@ fn pin<'a>(_witness: &'a ()) {
   let _: fn(&Source<'a>, usize) -> Line<'a> = Source::line_at;
   let _: fn(&Source<'a>, usize) -> Position = Source::position;
 
-  #[cfg(feature = "tokora")]
-  {
-    use painty::tokora::Adapted;
-    let _: fn(&Adapted<'a>) -> usize = Adapted::dropped_labels;
-    let _: fn(&Adapted<'a>) -> usize = Adapted::dropped_path_segments;
-  }
+  // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and
+  // buying that exactness meant walking a caller's `Diagnose` impl to exhaustion, so they are
+  // booleans now and leave the width rule entirely. Recorded here rather than silently absent,
+  // because an empty `#[cfg]` block would read as an oversight.
 }
 
 #[test]
@@ -626,6 +720,38 @@ fn u32_appears_only_where_a_foreign_key_round_trips() {
     miscounted.is_empty(),
     "a rule 3 exemption is not single-use:\n{}",
     miscounted.join("\n")
+  );
+}
+
+#[test]
+fn no_spelling_can_hide_a_primitive_integer() {
+  // Every other check here recognises an integer by name, which rests on the assumption that a
+  // primitive in a public signature is spelled like one. These four constructs break that
+  // assumption, painty uses none of them, and there is deliberately no allowlist: an exception
+  // has to be argued for by editing this test, not granted by adding a row.
+  //
+  // A type alias or a renamed import can put any name on `u32`. An item macro can declare members
+  // this scan never sees, because it reads the invocation and not the expansion. Tokens `syn`
+  // accepts as an item without understanding are outside every check by definition.
+  //
+  // The alternative is the compiler's own view of the resolved surface — rustdoc JSON, or a crate
+  // built on it. That is the decider the way `syn` was the decider over line scanning, and at this
+  // crate's size it costs more than it buys: it is nightly-only (verified — stable rejects
+  // `-Z unstable-options`), its schema is unstable across nightlies while this repository's weekly
+  // schedule build picks up a new one, and reaching it from a test means a nested `cargo`
+  // invocation contending for the same build lock. Against that: twenty-six numeric members and
+  // zero aliases. What it would additionally close is a FOREIGN type that is secretly an integer
+  // alias, which is residual item 3 and needs painty to put somebody else's type in a public
+  // signature first.
+  let found: Vec<_> = surface()
+    .spellings
+    .into_iter()
+    .map(|site| format!("{}: {}", site.site, site.owner))
+    .collect();
+  assert!(
+    found.is_empty(),
+    "this can dress a primitive integer in a name the surface scan cannot see through. Resolve it      here — teach the scan to follow it — or remove it; there is no allowlist on purpose:\n{}",
+    found.join("\n")
   );
 }
 
