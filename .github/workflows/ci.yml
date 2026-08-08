@@ -443,7 +443,11 @@ jobs:
           set -euo pipefail
           TD="${CARGO_TARGET_DIR:-target}"
           rm -f "$TD/doc/painty.json"
-          cargo +nightly rustdoc -p painty --all-features -- -Z unstable-options --output-format json
+          # `--document-hidden-items`, because `#[doc(hidden)] pub` is still callable and its width
+          # is still a commitment. Without it such an item is absent from the JSON entirely —
+          # verified — so the surface check would never see it while a local pin passed.
+          cargo +nightly rustdoc -p painty --all-features -- \
+            -Z unstable-options --output-format json --document-hidden-items
           if [ ! -f "$TD/doc/painty.json" ]; then
             echo "::error::rustdoc exited 0 and wrote no JSON, so the check below would read nothing"
             exit 1

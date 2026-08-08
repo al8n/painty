@@ -95,13 +95,24 @@ def primitives(node, found):
 
 
 def type_of(inner):
-    """A best-effort name for an impl's self type, for reporting only."""
-    target = (inner.get("impl") or {}).get("for_") or {}
+    """The name of an impl's self type.
+
+    The key is `for`, not `for_`. Reading the wrong one returned `"?"` for every impl and went
+    unnoticed for a round, because the caller at the time already had the name from elsewhere and
+    only fell back to this. It surfaced the moment that caller was removed, which is the argument
+    for the unnamed check in `walk`: a label this file cannot build is now a failure.
+    """
+    holder = inner.get("impl") or {}
+    target = holder.get("for") or holder.get("for_") or {}
     return (target.get("resolved_path") or {}).get("path", "?")
 
 
 def children(item):
-    """The ids an item owns: nesting links, plus the target of a re-export."""
+    """The ids an item owns: nesting links, plus the target of a re-export.
+
+    NAMING ONLY. Nothing here decides whether an item is public — see `walk`. A gap in this list
+    costs a label, not a member, and `walk` fails when it cannot label something.
+    """
     inner = item.get("inner")
     if not isinstance(inner, dict):
         return []
@@ -109,9 +120,6 @@ def children(item):
     for body in inner.values():
         if not isinstance(body, dict):
             continue
-        # A `pub use` is how every one of painty's types reaches the root: they are declared in
-        # private modules and re-exported flat. Not following it finds nothing at all, which is
-        # what the empty-surface guard below caught on the first run.
         target = body.get("id")
         if isinstance(target, int):
             out.append(target)
@@ -127,60 +135,75 @@ def children(item):
     return out
 
 
+def qualify(ident, index, parent):
+    """`Owner::name` for an item, walking the whole ownership chain.
+
+    All the way up, not to the first named ancestor: `PathSegment::Index`'s payload is a tuple
+    field owned by a variant owned by an enum, and stopping early named it `Index`.
+    """
+    item = index.get(ident) or {}
+    inner = item.get("inner") if isinstance(item.get("inner"), dict) else {}
+    if next(iter(inner), "") == "impl":
+        return f"impl {type_of(inner)}", True
+
+    parts, hops = [], ident
+    while hops is not None:
+        node = index.get(hops) or {}
+        held = node.get("inner") if isinstance(node.get("inner"), dict) else {}
+        kind = next(iter(held), "")
+        if kind == "module":
+            break
+        if kind == "impl":
+            parts.append(type_of(held))
+            break
+        name = node.get("name")
+        # A tuple field has no name of its own; whatever owns it supplies one.
+        if not (kind == "struct_field" and str(name).isdigit()) and name:
+            parts.append(str(name))
+        hops = parent.get(hops)
+
+    return "::".join(reversed(parts)), bool(parts)
+
+
+def implementing_trait(ident, index, parent):
+    """The trait an item is implementing, if it sits inside a trait impl."""
+    holder = index.get(parent.get(ident, -1)) or {}
+    inner = holder.get("inner") if isinstance(holder.get("inner"), dict) else {}
+    return ((inner.get("impl") or {}).get("trait") or {}).get("path")
+
+
 def walk(doc):
-    """Every public item, as `path -> sorted primitives`, plus the ones a foreign trait owns."""
+    """Every item rustdoc kept, as `path -> sorted primitives`.
+
+    PUBLICNESS IS NOT COMPUTED HERE, and that is the whole design.
+
+    It used to be. The walk queued a public container's children and applied its own inheritance
+    rules: variants and struct fields inherit, everything else must say `pub`. That rule was
+    incomplete — a trait's members inherit the trait's publicness too — which is a *second* place
+    the same recogniser-versus-decider mistake had hidden, one level in from the source scanner
+    this file replaced. Reimplementing rustdoc's visibility semantics is recognising; asking is
+    deciding.
+
+    So it asks. Run without `--document-private-items`, rustdoc has already dropped every private
+    item: painty's `Source::floor`, `Source::ceil`, `fill` and the private `Location::source` field
+    are simply not in `index`, verified. What is left is the public API, and it is walked flat —
+    no queue, no visibility test, no inheritance to get wrong, and no traversal of children, which
+    is where the previous round's category hid.
+
+    Over-reporting is the safe direction and is what the residue of this design costs: an item that
+    is somehow in `index` without being public would have to be recorded rather than being missed.
+    """
     index = {int(k): v for k, v in doc["index"].items()}
-    surface, skipped = {}, []
-    seen = set()
-    # (id, owner name, the trait this item is implementing, if any)
-    queue = [(doc["root"], None, None)]
 
-    while queue:
-        ident, owner, via_trait = queue.pop()
-        if (ident, owner) in seen:
-            continue
-        seen.add((ident, owner))
-        item = index.get(ident)
-        if item is None:
-            continue
+    parent = {}
+    for holder, item in index.items():
+        for child in children(item):
+            parent.setdefault(child, holder)
 
+    surface, skipped, unnamed = {}, [], []
+    for ident, item in index.items():
         inner = item.get("inner") if isinstance(item.get("inner"), dict) else {}
         kind = next(iter(inner), "")
-        name = item.get("name")
-
-        if kind == "impl":
-            trait = (inner["impl"].get("trait") or {}).get("path")
-            for child in children(item):
-                queue.append((child, owner, trait))
-            # An impl carries its own generics — `impl<const N: usize> T for U<N>` — which belong
-            # to no child. Falling straight through to the children was the traversal-shaped hole.
-            found = set()
-            primitives(inner, found)
-            if found:
-                surface.setdefault(f"impl {owner or type_of(inner)}", set()).update(found)
-            continue
-
-        # A variant is as public as its enum; everything else states its own visibility.
-        public = item.get("visibility") == "public" or kind in ("variant", "struct_field")
-        if not public:
-            continue
-
-        # A variant owns its fields, so `PathSegment::Index`'s payload is attributed to the
-        # variant and not to the enum. Without this the tuple field reports as `PathSegment::0`.
-        if kind == "variant":
-            inherited = f"{owner}::{name}" if owner else str(name)
-        elif kind in ("struct", "enum", "trait"):
-            inherited = str(name)
-        else:
-            inherited = owner
-        for child in children(item):
-            queue.append((child, inherited, None))
-
-        # SCAN THE CONTAINER TOO. Its children are queued above and are separate items, so nothing
-        # is counted twice — but a const-generic parameter, a type-parameter default, a supertrait
-        # bound and a where-clause predicate all live on the CONTAINER, and skipping it here is how
-        # the R6 category survived the move from a source reader to this one. The recursion matches
-        # no syntactic position; the traversal did, and "children" was that position.
         if kind in ("module", "use"):
             continue
 
@@ -189,16 +212,31 @@ def walk(doc):
         if not found:
             continue
 
-        # A tuple field has no name of its own — `0`, `1` — so it reports as the variant or
-        # struct that owns it, which is what a caller writes.
-        if kind == "struct_field" and str(name).isdigit():
-            path = str(owner)
-        else:
-            path = f"{owner}::{name}" if owner else str(name)
-        if via_trait and (via_trait, name) in FOREIGN:
-            skipped.append(f"{path} (from `{via_trait}`)")
+        path, named = qualify(ident, index, parent)
+
+        # A member of a TRAIT IMPL takes its signature from the trait, so its widths are not
+        # painty's to choose — `Iterator::size_hint` is `(usize, Option<usize>)` because `Iterator`
+        # says so. Skipped by the rule rather than by a list of names, and reported, so the
+        # exclusion is visible instead of assumed.
+        #
+        # An associated TYPE is the exception: `type Item = usize` is painty picking a width inside
+        # somebody else's shape, so it stays in the surface.
+        trait = implementing_trait(ident, index, parent)
+        if trait and kind != "assoc_type":
+            skipped.append(f"{path} (signature belongs to `{trait}`)")
+            continue
+        if not named:
+            unnamed.append(f"{path} carrying {sorted(found)}")
             continue
         surface.setdefault(path, set()).update(found)
+
+    if unnamed:
+        # A label this walk cannot build is a member a reader cannot act on, and silently dropping
+        # it would be the under-reporting this design is arranged to avoid.
+        raise RuntimeError(
+            "the walk found a public numeric it could not attribute to a member:\n  "
+            + "\n  ".join(sorted(unnamed))
+        )
 
     return {k: sorted(v) for k, v in surface.items()}, sorted(skipped)
 
@@ -214,14 +252,19 @@ def walk(doc):
 # losing one is a failure rather than a smaller number.
 POSITIONS = {
     "Page": ["usize"],            # a const-generic parameter
+    "impl Page": ["usize"],       # ...and the impl that inherits it
     "Defaulted": ["u16"],         # a defaulted type parameter
     "Bounded": ["u64"],           # a where-clause predicate
+    "Fielded::width": ["i64"],    # a public struct field
     "Rows": ["i8"],               # a supertrait binding
+    "Rows::STRIDE": ["usize"],    # a TRAIT associated constant — inherits the trait's publicness
+    "Rows::rows": ["u16"],        # a trait method
+    "Rows::Index": ["u32"],       # a trait associated type's bound
     "Holder::LIMIT": ["u128"],    # an inherent associated constant
-    "Grid": ["isize"],            # a const generic reached through its own impl
+    "Grid": ["isize"],            # a const generic on a generic type
     "impl Grid": ["isize"],       # an impl's own generics
-    "impl Page": ["usize"],
     "Kind::Wide": ["i16"],        # a tuple payload on a public enum
+    "hidden_width": ["u128"],     # `#[doc(hidden)]`, still callable and still a commitment
     "neighbour": ["u16"],         # an ordinary signature, so "found only this" is distinguishable
 }
 
