@@ -251,8 +251,9 @@ impl<'a> Source<'a> {
   /// [`Region::span`] reports what it settled on:
   ///
   /// - an offset past the end of the text becomes the end of the text;
-  /// - an end before its own start is taken to that start, so a resolved region is never
-  ///   inverted;
+  /// - an end before its own start is taken to that start — **before** either end is moved to an
+  ///   atom boundary, so an inverted span resolves exactly where the empty span at its start would,
+  ///   and never to less than that;
   /// - a boundary inside an **atom** moves outwards — the start back to the atom's first byte, the
   ///   end on past its last. Widening rather than narrowing, because half an atom is not something
   ///   a reader can be shown, and a region that grew by one is repairable where one that silently
@@ -280,8 +281,22 @@ impl<'a> Source<'a> {
   /// assert_eq!(source.resolve(Span::new(99, 120)).span(), Span::new(6, 6));
   /// ```
   pub fn resolve(&self, span: Span) -> Region<'a> {
+    // ORDER MATTERS, and getting it wrong erased the character the caller asked about.
+    //
+    // The inversion is repaired against the REQUESTED start, before either end is moved to an atom
+    // boundary. Repairing it against the *floored* start instead lets the atom clamp run first and
+    // hand the repair a smaller number to catch up to: in `"🎨"`, `Span::new(3, 0)` floors the
+    // start to 0, the end then repairs to 0 rather than to 3, and the glyph the span pointed into
+    // resolves to an empty range — while `Span::empty(3)`, which asks a strictly weaker question,
+    // correctly resolves to the whole glyph.
+    //
+    // Repairing first cannot invert the result. `requested_end >= requested_start`; `floor` only
+    // moves back and `ceil` only moves forward, and where either clamps to the text's length it
+    // clamps to the same length. A non-inverted span is unaffected either way, since its end
+    // already dominates both its own start and that start's floor.
+    let requested_end = span.end().max(span.start());
     let start = self.floor(span.start());
-    let end = self.ceil(span.end().max(start));
+    let end = self.ceil(requested_end);
 
     let (start_position, cursor) = self.position_from(Cursor::START, start);
     let first_line_start = cursor.line_start;

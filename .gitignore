@@ -17,3 +17,6 @@
 # trailing slash alone does not anchor anything. `/docs/` is the spelling that means "the top-level
 # tree, and only that one". Aligned with smear's `.gitignore`, which carries the same finding.
 /docs/
+
+# Python bytecode from the CI helpers, which are run rather than imported.
+**__pycache__/

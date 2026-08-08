@@ -94,6 +94,12 @@ def primitives(node, found):
             primitives(value, found)
 
 
+def type_of(inner):
+    """A best-effort name for an impl's self type, for reporting only."""
+    target = (inner.get("impl") or {}).get("for_") or {}
+    return (target.get("resolved_path") or {}).get("path", "?")
+
+
 def children(item):
     """The ids an item owns: nesting links, plus the target of a re-export."""
     inner = item.get("inner")
@@ -146,6 +152,12 @@ def walk(doc):
             trait = (inner["impl"].get("trait") or {}).get("path")
             for child in children(item):
                 queue.append((child, owner, trait))
+            # An impl carries its own generics — `impl<const N: usize> T for U<N>` — which belong
+            # to no child. Falling straight through to the children was the traversal-shaped hole.
+            found = set()
+            primitives(inner, found)
+            if found:
+                surface.setdefault(f"impl {owner or type_of(inner)}", set()).update(found)
             continue
 
         # A variant is as public as its enum; everything else states its own visibility.
@@ -164,7 +176,12 @@ def walk(doc):
         for child in children(item):
             queue.append((child, inherited, None))
 
-        if kind in ("module", "struct", "enum", "trait", "use"):
+        # SCAN THE CONTAINER TOO. Its children are queued above and are separate items, so nothing
+        # is counted twice — but a const-generic parameter, a type-parameter default, a supertrait
+        # bound and a where-clause predicate all live on the CONTAINER, and skipping it here is how
+        # the R6 category survived the move from a source reader to this one. The recursion matches
+        # no syntactic position; the traversal did, and "children" was that position.
+        if kind in ("module", "use"):
             continue
 
         found = set()
@@ -186,7 +203,50 @@ def walk(doc):
     return {k: sorted(v) for k, v in surface.items()}, sorted(skipped)
 
 
+# Every position a public numeric can occupy that is not an ordinary signature, and the width each
+# one carries in `ci/fixtures/positions.json`. That fixture is real rustdoc output from a scratch
+# crate written to hold one of each, pruned to the items this walk reaches.
+#
+# WHY A FIXTURE AND NOT A CANARY. The previous guard here only fired when the walk found *nothing*,
+# and the traversal defect it was meant to notice — containers skipped, so const generics, defaults,
+# supertraits and where clauses were invisible — left every other member findable. A guard that
+# trips only on total emptiness cannot see a category-shaped gap. This one names the categories, so
+# losing one is a failure rather than a smaller number.
+POSITIONS = {
+    "Page": ["usize"],            # a const-generic parameter
+    "Defaulted": ["u16"],         # a defaulted type parameter
+    "Bounded": ["u64"],           # a where-clause predicate
+    "Rows": ["i8"],               # a supertrait binding
+    "Holder::LIMIT": ["u128"],    # an inherent associated constant
+    "Grid": ["isize"],            # a const generic reached through its own impl
+    "impl Grid": ["isize"],       # an impl's own generics
+    "impl Page": ["usize"],
+    "Kind::Wide": ["i16"],        # a tuple payload on a public enum
+    "neighbour": ["u16"],         # an ordinary signature, so "found only this" is distinguishable
+}
+
+
+def self_test() -> int:
+    """Check the traversal still reaches every position we know a width can occupy."""
+    fixture = Path(__file__).parent / "fixtures" / "positions.json"
+    doc = json.loads(fixture.read_text())
+    surface, _ = walk(doc)
+    missing = {k: v for k, v in POSITIONS.items() if surface.get(k) != v}
+    extra = {k: v for k, v in surface.items() if k not in POSITIONS}
+    for name, want in sorted(missing.items()):
+        print(f"::error::the walk no longer reaches {name} ({want}); it reports {surface.get(name)}")
+    for name, got in sorted(extra.items()):
+        print(f"::error::the walk reports {name} ({got}), which the fixture does not describe")
+    if missing or extra:
+        print("::error::the traversal has stopped reaching a position a public numeric can occupy")
+        return 1
+    print(f"ok: the traversal reaches all {len(POSITIONS)} known positions")
+    return 0
+
+
 def main() -> int:
+    if len(sys.argv) > 1 and sys.argv[1] == "--self-test":
+        return self_test()
     path = Path(sys.argv[1] if len(sys.argv) > 1 else "target/doc/painty.json")
     doc = json.loads(path.read_text())
 
@@ -206,6 +266,9 @@ def main() -> int:
     for name in skipped:
         print(f"  (a foreign trait's width, not painty's) {name}")
 
+    # Superseded by `--self-test`, which names the categories rather than counting them, and is run
+    # first by the `public-surface` job. Kept because it costs nothing and a walk that returns
+    # nothing here means something changed about painty rather than about the traversal.
     if not surface:
         print("::error::the walk found no public numeric at all, which cannot be right")
         return 1

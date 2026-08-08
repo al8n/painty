@@ -178,10 +178,24 @@ fn check_region(text: &str, requested: Span) {
     floor(text, requested.start()),
     "{context}: start"
   );
+  // `requested.start()`, not `span.start()`. Keying the repair off the RESOLVED start is exactly
+  // the production defect this suite failed to catch for four rounds: the assertion was derived
+  // from the implementation rather than from the rule, so the two agreed and the generator's
+  // inverted spans over `"🎨"` and `"\r\n"` — which it did produce — passed.
   assert_eq!(
     span.end(),
-    ceil(text, requested.end().max(span.start())),
+    ceil(text, requested.end().max(requested.start())),
     "{context}: end"
+  );
+
+  // Stated as a property in its own right, because the equation above can only ever agree with
+  // whatever it is written to expect: an inverted span asks a weaker question than the empty span
+  // at its start, so it must never resolve to less.
+  let degenerate = source.resolve(Span::empty(requested.start()));
+  assert!(
+    span.start() <= degenerate.span().start() && span.end() >= degenerate.span().end(),
+    "{context}: resolved to less than the empty span at its own start, {:?}",
+    degenerate.span()
   );
 
   // The excerpt is the source re-sliced by the offsets the region reported.
