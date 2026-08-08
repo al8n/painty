@@ -152,17 +152,25 @@ ordinal is indistinguishable from a real one, which is a number that lies rather
 fails.
 
 **A parameter's width is as frozen as a return's**, so both are pinned — and so is the lifetime a
-borrow comes back on. `tests/numeric_widths.rs` ascribes the whole signature of every member listed
-above, and counts a binding as a pin only when its declared type is genuinely a function pointer;
-parses `src/` with `syn` to read the public surface back out, so a new member cannot go unpinned
-and a stale pin cannot linger; checks that its own file list is the whole crate; refuses the
-constructs that could dress a primitive in another name — type aliases, renamed imports, item
-macros — with no allowlist; permits `u32` on four named members and nowhere else, each exactly
-once; and asserts the absence of clamping. `tests/source_borrows.rs` covers the other half:
-everything resolution returns borrows the source text rather than the `&Source` it came through.
+borrow comes back on. Three things enforce this, and it is worth knowing which one decides.
 
-What no such check can catch is a member placed under the **wrong rule**. No parser reads intent.
-That is what the ordering above is for, and what review is for.
+`ci/public_numeric_surface.py`, run by the `public-surface` CI job, **is the decider**. It asks
+rustdoc for the *resolved* public API and recurses over it looking for primitive integers, so it
+names no syntactic position and there is no case in it to forget: a width in a const-generic
+parameter, behind a type alias, or produced by a macro expansion is found by the same three lines
+that find one in a return type. Every member above is recorded there with its widths.
+
+`tests/numeric_widths.rs` is a **fast early warning** that says so in its own header, and it is
+also where each member is pinned by function pointer under the rule that placed it — so the rule is
+a fact in the code, and a member carrying a width its rule does not give fails mechanically.
+
+`tests/source_borrows.rs` covers the other half: everything resolution returns borrows the source
+text rather than the `&Source` it came through.
+
+What is left is a member placed under a rule that gives the *same* width — rules 1 and 2 both give
+`u64`, and they differ in where the number came from rather than in what it is — and the rule set
+itself being wrong. No check reads intent. That is what the ordering above is for, and what review
+is for.
 
 ## Features
 

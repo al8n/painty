@@ -408,6 +408,49 @@ jobs:
       - name: cargo test -p painty --no-default-features --features html,model,tokora
         run: cargo test -p painty --no-default-features --features html,model,tokora
 
+  # ── Gate: the public numeric surface is the one that was decided ────────────
+  #
+  # `tests/numeric_widths.rs` reads painty's source and RECOGNISES the places a public numeric can
+  # appear. Three consecutive reviews each found another place it did not recognise, and changing
+  # its mechanism partway through — line scanning to a `syn` parse — made it better without making
+  # it closed. The holes all had one shape: a check establishing its conclusion relative to a frame
+  # it never established, that frame being the set of syntactic positions a width can occupy.
+  #
+  # A reader of source text cannot close that, because the set of positions is whatever the grammar
+  # allows. Something that ENUMERATES the public API can, and rustdoc is the only thing that does:
+  # it has already resolved aliases, expanded macros, applied visibility and dropped private
+  # fields. `ci/public_numeric_surface.py` then recurses over arbitrary JSON for primitive nodes, so
+  # it names no syntactic position at all and there is no case to add.
+  #
+  # THIS IS THE DECIDER; the test is a fast local early warning that says so in its own header.
+  #
+  # A JOB AND NOT A TEST, which is the thing that was mispriced when this was declined a review
+  # ago. As a dev-dependency it would have cost nightly on every `cargo test`, an unstable schema in
+  # every developer's build, and a nested cargo contending for the build lock. As a job it costs a
+  # toolchain this workflow already installs elsewhere and one `python3` script, which is the shape
+  # the `manifest` job already uses.
+  public-surface:
+    name: public-surface
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        # Nightly, and only here: rustdoc's JSON output is unstable and there is no stable route to
+        # a resolved public API. Confirmed by trying — stable rejects `-Z unstable-options`.
+        run: rustup toolchain install nightly --profile minimal --no-self-update
+      - name: cargo +nightly rustdoc -p painty --all-features --output-format json
+        run: |
+          set -euo pipefail
+          TD="${CARGO_TARGET_DIR:-target}"
+          rm -f "$TD/doc/painty.json"
+          cargo +nightly rustdoc -p painty --all-features -- -Z unstable-options --output-format json
+          if [ ! -f "$TD/doc/painty.json" ]; then
+            echo "::error::rustdoc exited 0 and wrote no JSON, so the check below would read nothing"
+            exit 1
+          fi
+      - name: The public numeric surface is the one that was decided
+        run: python3 ci/public_numeric_surface.py "${CARGO_TARGET_DIR:-target}/doc/painty.json"
+
   # ── Gate: tokora is optional, and the graph says so ─────────────────────────
   #
   # painty's central design claim is that a project with its own error type can render a
