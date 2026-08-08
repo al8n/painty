@@ -144,9 +144,9 @@ impl<'a> Line<'a> {
   /// assert_eq!(line.column_at(99), 6); // one past the last of five characters
   /// ```
   pub fn column_at(&self, offset: usize) -> u64 {
-    // Clamped into the line first, then measured from its start. Spelled with `max`/`min` rather
+    // Clamped into the line first, then measured from its start. Spelled with `clamp` rather
     // than a saturating subtraction so that nothing on the path a column is built by is a
-    // saturating operation — see `tests/exact_positions.rs`, which asserts exactly that.
+    // saturating operation — see `tests/numeric_widths.rs`, which asserts exactly that.
     let mut relative = offset.clamp(self.start, self.start + self.text.len()) - self.start;
     while !self.text.is_char_boundary(relative) {
       relative -= 1;

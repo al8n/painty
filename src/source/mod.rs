@@ -20,27 +20,24 @@ mod tests;
 /// cells, which need a Unicode width table and a medium to be a width *of* — the renderer that has
 /// one converts, and that is what keeps this layer dependency-free.
 ///
-/// # Two units, and the rule for telling them apart
+/// # Two units, placed by [the numeric widths](crate#numeric-widths)
 ///
-/// A **byte offset** is a `usize`, because it is an index into the caller's `&str` and that is
-/// what Rust slices with. It is exact: the widening to `u64` an FFI export needs is lossless from
-/// every `usize` Rust has.
+/// [`line`](Self::line) and [`column`](Self::column) are ordinals in the resolved model, so rule 1
+/// makes them `u64`. [`offset`](Self::offset) is an index into the caller's `&str`, so rule 4
+/// makes it a `usize` — the type Rust slices with, exact, and lossless to widen for an FFI export
+/// from every `usize` Rust has.
 ///
-/// A **line or column ordinal** is a `u64`, and neither `u32` nor `usize`.
+/// The ordinals are worth one more sentence, because this is the type the rule was written for. A
+/// position is what every renderer and every FFI consumer touches, so its width is unchangeable
+/// once published; `u32` would be a bet that no source has more than 4,294,967,295 lines, and
+/// losing that bet means wrapping or clamping — a clamped ordinal is indistinguishable from a real
+/// one, so it is a number that *lies* rather than one that fails.
 ///
-/// - Not `u32`. A position type is the one thing every renderer and every FFI consumer touches, so
-///   its width is unchangeable once published, and `u32` is a bet that no source has more than
-///   4,294,967,295 lines. The bet would very probably be won. It is still the wrong shape to
-///   publish, because losing it means either wrapping or clamping, and a clamped ordinal is
-///   indistinguishable from a real one — a value that *lies* rather than one that fails.
-/// - Not `usize`, because it is platform-dependent, and the resolved model is meant to cross a C
-///   ABI unchanged.
-///
-/// `u64` is what makes the whole question disappear rather than move. A line ordinal is at most
-/// one more than the text's length in bytes, Rust caps a single object at `isize::MAX`, so on the
-/// widest target this crate can be built for an ordinal cannot exceed 2^63. There is no clamping
-/// anywhere on this path and no arithmetic here can overflow — which `tests/exact_positions.rs`
-/// asserts against the source rather than leaving to this paragraph.
+/// `u64` makes the question disappear rather than move it. An ordinal is at most one more than the
+/// text's length in bytes and Rust caps a single object at `isize::MAX`, so on the widest target
+/// this crate builds for it cannot exceed 2^63. Nothing on this path clamps and no arithmetic here
+/// can overflow — which `tests/numeric_widths.rs` asserts against the source rather than leaving
+/// to this paragraph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Position {
   offset: usize,

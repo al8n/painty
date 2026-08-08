@@ -30,7 +30,12 @@ pub enum PathSegment<'a> {
   /// A response key — a field's alias where it has one, otherwise its name.
   Field(&'a str),
   /// A zero-based index into a list.
-  Index(u32),
+  ///
+  /// `u64` by rule 2 of [the numeric widths](crate#numeric-widths): an ordinal in data the
+  /// *producer* built, which painty neither computes nor bounds. There is no cap to point at
+  /// either — a result path entry is "an integer" in the specification and a number in JSON — so
+  /// a narrower type here would be a ceiling invented to justify itself.
+  Index(u64),
 }
 
 impl core::fmt::Display for PathSegment<'_> {
