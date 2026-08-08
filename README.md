@@ -114,6 +114,37 @@ Grouping labels by line and eliding distant ones are layer 2's too, and are deli
 yet: whether elision stays allocation-free is a measurement, and it is taken when the first
 renderer can say what shape it needs.
 
+## Numeric widths
+
+A published model's integer widths cannot be changed later without breaking every consumer, and
+this one is meant to cross a C ABI as well as a Rust API. So the width of a numeric member is not
+a local choice — it follows from what the number *is*, by four rules read in order. The first that
+matches wins, and the last matches everything, so there is no member the rule fails to place.
+
+| # | what the number is | width | why |
+| - | ------------------ | ----- | --- |
+| 1 | a line or column in the resolved model — including a count of lines, which is the last line's own number | `u64` | it crosses a C ABI, so not `usize`; and it must not imply a ceiling the domain does not have, so not `u32` |
+| 2 | an ordinal in data the **producer** built, that painty neither computes nor bounds | `u64` | same ceiling argument, and there is no protocol cap to point at instead |
+| 3 | a key into a structure painty does not own and never computes | that contract's width | it has to round-trip; matching the width is what makes it lossless in both directions |
+| 4 | anything else — an index or a count of things in memory | `usize` | exactly as `slice::len` is |
+
+Worked through the whole public surface, that gives:
+
+- **rule 1** — `Position::line`, `Position::column`, `Line::number`, `Line::char_count`,
+  `Line::column_at`, `Source::line_count`, `Source::line`, `Region::line_count`,
+  `RegionLine::columns`;
+- **rule 2** — `PathSegment::Index`, a position in a *result* the producer assembled;
+- **rule 3** — `Location::source`, a `u32` index into the caller's own list of inputs, which is
+  what every producer of one already spells it;
+- **rule 4** — `Span` and every byte offset and length, and `Adapted::dropped_labels`.
+
+Two consequences worth stating, because they are the reason the rules are ordered rather than
+listed. A line count is *both* a count of things in memory and a line ordinal; rule 1 comes first,
+so it is a `u64`. And nothing on the path a position is built by may saturate or cast: a clamped
+ordinal is indistinguishable from a real one, which is a number that lies rather than one that
+fails. `tests/numeric_widths.rs` asserts both — every width above by ascription, and the absence of
+clamping against the source itself.
+
 ## Features
 
 Every output is independently selectable, and the default configuration selects none of them — the

@@ -113,7 +113,10 @@ impl<'a> From<::tokora::diagnostic::PathSegment<'a>> for PathSegment<'a> {
   fn from(segment: ::tokora::diagnostic::PathSegment<'a>) -> Self {
     match segment {
       ::tokora::diagnostic::PathSegment::Field(name) => Self::Field(name),
-      ::tokora::diagnostic::PathSegment::Index(index) => Self::Index(index),
+      // Widening, so nothing can be lost. painty's index is deliberately wider than tokora's:
+      // painty's model is not shaped by tokora's — that is what makes this an adapter rather than
+      // a re-export — and a result path entry has no 32-bit cap in any specification.
+      ::tokora::diagnostic::PathSegment::Index(index) => Self::Index(u64::from(index)),
     }
   }
 }
