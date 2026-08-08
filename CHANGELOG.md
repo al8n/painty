@@ -1,7 +1,4 @@
 # UNRELEASED
 
-# 0.1.2 (January 6th, 2022)
-
-FEATURES
-
-
+Nothing has been released. The repository holds the crate's identity, its feature surface and its
+CI gates; the renderer itself is not written yet.

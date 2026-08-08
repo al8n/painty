@@ -1,38 +1,41 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
+#
+# Miri under STACKED BORROWS. The Tree Borrows twin is `ci/miri_tb.sh`, whose header carries the
+# reasoning the two share: why Miri is installed before there is any `unsafe` to check, and why
+# every cell can run on a Linux host regardless of the target it interprets.
+#
+# The two files differ by exactly one `MIRIFLAGS` entry — this one omits `-Zmiri-tree-borrows` —
+# and are kept apart so a failure names which aliasing model rejected the program.
+#
+# Run by the `miri-sb` matrix in `.github/workflows/miri.yml`, one cell per target.
+#
+#     ci/miri_sb.sh x86_64-unknown-linux-gnu
+set -euo pipefail
 
-if [ -z "$1" ]; then
-  echo "Error: TARGET is not provided"
+if [ -z "${1:-}" ]; then
+  echo "Error: TARGET is not provided" >&2
   exit 1
 fi
 
 TARGET="$1"
 
-# Install cross-compilation toolchain on Linux
+# Only the targets this matrix actually names; see the note in `ci/miri_tb.sh`.
 if [ "$(uname)" = "Linux" ]; then
   case "$TARGET" in
-    aarch64-unknown-linux-gnu)
-      sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu
-      ;;
     i686-unknown-linux-gnu)
       sudo apt-get update && sudo apt-get install -y gcc-multilib
       ;;
     powerpc64-unknown-linux-gnu)
       sudo apt-get update && sudo apt-get install -y gcc-powerpc64-linux-gnu
       ;;
-    s390x-unknown-linux-gnu)
-      sudo apt-get update && sudo apt-get install -y gcc-s390x-linux-gnu
-      ;;
-    riscv64gc-unknown-linux-gnu)
-      sudo apt-get update && sudo apt-get install -y gcc-riscv64-linux-gnu
-      ;;
   esac
 fi
 
 rustup toolchain install nightly --component miri
 rustup override set nightly
-cargo miri setup
+cargo miri setup --target "$TARGET"
 
 export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
 
-cargo miri test --all-targets --target "$TARGET"
+# `-p painty` names the package; see the note in `ci/miri_tb.sh`.
+cargo miri test -p painty --all-targets --all-features --target "$TARGET"

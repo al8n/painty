@@ -1,71 +1,405 @@
 name: CI
 
+# ── THE FAST LANE ───────────────────────────────────────────────────────────────────────────
+#
+# Every job here runs on `ubuntu-latest` or `windows-latest`. Two kinds of leg are deliberately
+# NOT in this file, and each has its own workflow:
+#
+#   * `.github/workflows/macos.yml` — the macOS legs. They are fast once they start and slow
+#     only because they queue: macOS runner concurrency is an account-wide constraint shared
+#     with every other repository, and in the sibling `smear` repository it produced waits of
+#     six to nine hours for jobs that then ran in seconds. A run's conclusion is a property of
+#     the WHOLE run, so a single queued macOS cell makes every other verdict in the run
+#     unreadable — smear merged two pull requests with no CI verdict at all because of it.
+#
+#   * `.github/workflows/miri.yml` — Miri. Not a queue problem but a clock one: Miri sets its
+#     own wall time regardless of how free the runners are.
+#
+# The contract is therefore: this workflow's conclusion is the one a merge waits for, and it is
+# answerable in tens of minutes. Adding a `runs-on: macos-*` or a Miri cell here gives that up.
+# `painty` starts with the split already made rather than discovering it later.
+
 on:
   push:
+    # A LITERAL list, and it has to be: `on:` is resolved before any context exists, so
+    # `${{ github.event.repository.default_branch }}` cannot be written here and there is no
+    # expression that stands in for a branch name. A literal list goes stale silently and the only
+    # symptom is an absence — `gh run list --branch <name>` printing nothing — so the list is
+    # asserted rather than trusted: `ci/check_workflow_triggers.sh`, run by the `triggers` job
+    # below, checks that every workflow with this filter carries the SAME list, that every name in
+    # it still exists on origin, that the default branch is in it, and that a pull request's base
+    # is either in it or itself the head of an open pull request.
+    #
+    #   * `main` is the repository's DEFAULT branch — what `schedule` runs and where a fresh clone
+    #     lands.
+    #   * `dev` is the live integration branch this repository is being built on. It takes commits
+    #     and merges directly, and a merge writes a commit no pull request ever built, so without a
+    #     lane the integrated result is never tested at all. Drop this entry when `dev` retires —
+    #     and drop it from every workflow BEFORE deleting the ref, or invariant 2 reddens CI
+    #     repository-wide over a branch nobody is working on any more.
     branches:
       - main
+      - dev
+    # No blanket `**.md`, deliberately. `src/lib.rs` is `#![doc = include_str!("../README.md")]`,
+    # so the README IS the crate's rustdoc front page: a change to it can break the `docs` job
+    # under `RUSTDOCFLAGS="-D warnings"`, and ignoring markdown would suppress the one job that
+    # catches it. `docs/` is git-ignored in this repository, so no entry is needed for it.
     paths-ignore:
-      - 'README'
       - 'COPYRIGHT'
       - 'LICENSE-*'
-      - '**.md'
       - '**.txt'
   pull_request:
     paths-ignore:
-      - 'README'
       - 'COPYRIGHT'
       - 'LICENSE-*'
-      - '**.md'
       - '**.txt'
   workflow_dispatch:
-  schedule: 
-    - cron: "0 1 1 * *"
+  # KEPT here and dropped from `macos.yml` and `miri.yml` — the one deliberate difference between
+  # the three trigger blocks, and the reason `ci/check_workflow_triggers.sh` locks
+  # `on.push.branches` across them rather than the whole `on:` block.
+  #
+  # A weekly build of unchanged code earns its runner time on THIS lane: it is where a new
+  # nightly, a new clippy lint or a yanked dependency shows up between merges. It does not earn it
+  # on a lane whose cost is a multi-hour macOS queue or a Miri wall clock, re-proving what the
+  # push that produced the code already proved.
+  schedule: [cron: "0 1 */7 * *"]
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  # One in-flight run per workflow per ref, so a branch's CI reflects its tip rather than a
+  # backlog of superseded commits.
+  #
+  # A push is the exception: the group is keyed on the commit SHA so that every commit landing on
+  # an integration branch gets its own group and its own verdict. Do NOT collapse that back to one
+  # group per ref — `cancel-in-progress: false` does not protect such a run on its own, because a
+  # run queued into a group that already has one in progress cancels whichever run was PENDING
+  # there regardless of that setting, and a cancelled run reads as `fail` in `gh pr checks` while
+  # being no verdict at all.
+  #
+  # `github.event_name == 'push'` IS the integration-branch test, exactly, without naming a
+  # branch: `on.push.branches` above is the only way a push event reaches this workflow, so a push
+  # run is by construction a run on a branch in that list. Keyed on the event it cannot drift at
+  # the next rename. `${{ github.workflow }}` leading the group is what keeps the three lanes
+  # apart, so no lane can cancel another's run.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+# ── EVERY `run:` IN THIS FILE IS BASH ───────────────────────────────────────────────────────
+#
+# GitHub picks the shell from the HOST when a step does not say: `bash -e {0}` on ubuntu and
+# macOS, but `pwsh` on Windows. So a `run:` block is written once and parsed by two different
+# languages, and the ubuntu cell of a matrix cannot tell you that the windows cell will not even
+# lex. That is a build failure, not a Rust failure, and it has happened in this family: a
+# backslash line continuation — bash syntax, which PowerShell does not have — killed both windows
+# cells of two jobs before cargo started.
+#
+# The file-wide default rather than `shell: bash` on the steps that need it: the per-step form
+# fixes today's and leaves the trap armed for the next multi-line `run:` added to any
+# windows-hosted job here. A default cannot go stale; a step has to opt OUT to get host
+# behaviour.
+#
+# The one thing this changes on ubuntu: naming bash explicitly selects
+# `bash --noprofile --norc -eo pipefail {0}` where the host default is `bash -e {0}`, so
+# `pipefail` is on everywhere. The only pipe in this file is the `msrv` job's `grep | sed`, which
+# is guarded at that step with a note.
+defaults:
+  run:
+    shell: bash
 
 env:
   CARGO_TERM_COLOR: always
-  RUSTFLAGS: -Dwarnings
+  RUSTFLAGS: -Dwarnings -C debuginfo=0 -C codegen-units=16
   RUST_BACKTRACE: 1
 
 jobs:
-  # Check formatting (platform-independent, one OS is enough)
-  rustfmt:
-    name: rustfmt
+  # ── Gate: the post-merge lanes point at the branch merges actually go to ────
+  #
+  # A workflow cannot detect its own non-execution, so the assertion has to be made by the runs
+  # that do happen. Ten seconds on ubuntu, in no `needs:` chain, so it blocks nothing and costs
+  # this lane's conclusion nothing; the four invariants are documented in the script.
+  triggers:
+    name: triggers
+    runs-on: ubuntu-latest
+    # Spelled out because the script's fourth invariant asks the API whether the base branch is
+    # itself the head of an open pull request — the test that tells a renamed trunk from a stacked
+    # PR. Without `pull-requests: read` that query can fail depending on the repository's default
+    # token permissions, and the script would then warn and skip rather than fail, which is the
+    # quiet outcome this job exists to prevent.
+    permissions:
+      contents: read
+      pull-requests: read
+    steps:
+      - uses: actions/checkout@v7
+      - name: Check workflow trigger coverage
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          PR_BASE: ${{ github.base_ref }}
+          GH_TOKEN: ${{ github.token }}
+        run: bash ci/check_workflow_triggers.sh
+
+  # ── Gate: the manifest still says what the design decided ───────────────────
+  #
+  # Two claims that every other job in this repository quietly rests on, asserted here rather
+  # than left to a comment. Both read `cargo metadata`, so neither builds anything and the job
+  # finishes in seconds.
+  #
+  # THE FEATURE SET. The design fixes it exactly — three independently selectable outputs over a
+  # dependency-free core — and a rendering surface is easy to grow by accident. Pinning it means
+  # adding, renaming or re-wiring a feature fails here until the design and the gate move
+  # together. It is also what keeps the `no-std` job's four literal legs complete: that job names
+  # the std-free feature points one per step, and a fifth one appearing without a leg would
+  # otherwise be covered by nothing.
+  #
+  # THE PACKAGE COUNT. `cross`, `msrv`, `no-std`, `publish-dry-run`, both Miri scripts and the
+  # sanitizer script all name `-p painty`. That is only as good as the claim that `painty` is the
+  # whole shipping surface, and a second publishable member would simply never be built by any of
+  # them, under a full page of green ticks. Keyed on the `publish` field cargo reports as `[]` for
+  # `publish = false` and null otherwise.
+  manifest:
+    name: manifest
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v7
-    - name: Install Rust
-      run: rustup update stable && rustup default stable && rustup component add rustfmt
-    - name: Check formatting
-      run: cargo fmt --all -- --check
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: The declared feature set is the one the design fixed
+        run: |
+          set -euo pipefail
+          WANT='{"default": [], "html": [], "model": [], "std": [], "terminal": ["dep:anstyle", "dep:unicode-width", "std"]}'
+          GOT="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; p=[x for x in json.load(sys.stdin)["packages"] if x["name"]=="painty"][0]; print(json.dumps({k: sorted(v) for k, v in p["features"].items()}, sort_keys=True))')"
+          echo "declared: $GOT"
+          if [ "$GOT" != "$WANT" ]; then
+            echo "::error::painty's feature set has changed."
+            echo "::error::want: $WANT"
+            echo "::error::got:  $GOT"
+            echo "::error::the design fixes this set; update it there, then update this step, then check that the no-std job still names every std-free feature point"
+            exit 1
+          fi
+      - name: painty is still the only publishable package
+        run: |
+          set -euo pipefail
+          PUBLISHABLE="$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(",".join(sorted(p["name"] for p in json.load(sys.stdin)["packages"] if p.get("publish") != [])))')"
+          echo "publishable packages: $PUBLISHABLE"
+          if [ "$PUBLISHABLE" != "painty" ]; then
+            echo "::error::every -p in this repository names 'painty', but the publishable packages are now: $PUBLISHABLE"
+            echo "::error::add the new one to each of those jobs and scripts, or mark it publish = false if it does not ship"
+            exit 1
+          fi
 
-  # Apply clippy lints
-  clippy:
-    name: clippy
+  # ── Gate: formatting ────────────────────────────────────────────────────────
+  #
+  # Windows is here and not in `macos.yml`'s set for a reason that is about line endings, not
+  # about rustfmt: `rustfmt.toml` sets `newline_style = "Auto"`, which resolves per file against
+  # what is already in it, so a file first written on Windows can carry CRLF that a Linux-only
+  # check would never see.
+  rustfmt:
+    name: rustfmt
     strategy:
+      fail-fast: false
       matrix:
+        # `macos-latest` is deliberately absent — see this file's header. It is also absent from
+        # `macos.yml`, unlike the other three legs: `cargo fmt --all -- --check` is decided by the
+        # rustfmt version and `rustfmt.toml`, not by the host, so a third copy of it would be
+        # seconds of work behind a multi-hour queue with nothing new to say.
         os:
           - ubuntu-latest
-          - macos-latest
           - windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-    - uses: actions/checkout@v7
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable && rustup component add clippy
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
-    - name: Apply clippy lints
-      run: cargo hack clippy --each-feature --exclude-no-default-features
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
+        run: rustup update stable --no-self-update && rustup default stable && rustup component add rustfmt
+      - name: Check formatting
+        run: cargo fmt --all -- --check
 
-  # Run tests on some extra platforms
+  # ── Gate: clippy over every feature combination ─────────────────────────────
+  #
+  # `--feature-powerset` rather than `--each-feature`, and no `--exclude-no-default-features`.
+  # `default = []` here, so the no-features build is not an edge case to be skipped — it is the
+  # PRIMARY configuration, the `no_std` dependency-free core every other build is an addition to.
+  # Four optional features is sixteen legs, which is cheap and stays cheap because the feature set
+  # is pinned by the `manifest` job.
+  clippy:
+    name: clippy
+    strategy:
+      fail-fast: false
+      matrix:
+        # `macos-latest` is deliberately absent — it lives in `.github/workflows/macos.yml`.
+        os:
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable && rustup component add clippy
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: cargo hack clippy -p painty --feature-powerset --all-targets
+        run: cargo hack clippy -p painty --feature-powerset --all-targets
+
+  build:
+    name: build
+    strategy:
+      fail-fast: false
+      matrix:
+        # `macos-latest` is deliberately absent — it lives in `.github/workflows/macos.yml`.
+        os:
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-build-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: cargo hack build -p painty --feature-powerset
+        run: cargo hack build -p painty --feature-powerset
+
+  test:
+    name: test
+    strategy:
+      fail-fast: false
+      matrix:
+        # `macos-latest` is deliberately absent — it lives in `.github/workflows/macos.yml`.
+        os:
+          - ubuntu-latest
+          - windows-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-test-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: cargo hack test -p painty --feature-powerset
+        run: cargo hack test -p painty --feature-powerset
+
+  # ── Gate: the declared MSRV is the one that builds ──────────────────────────
+  #
+  # Every other job runs `rustup update stable`, so without this one the declared floor is never
+  # exercised by anything and drifts upward silently — surfacing as a hard `cargo` failure for a
+  # user pinned to it. The toolchain is READ from `Cargo.toml` rather than hardcoded here, so the
+  # declared value and the tested value cannot disagree.
+  msrv:
+    name: msrv
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Read declared MSRV from Cargo.toml
+        id: msrv
+        run: |
+          # `|| true` inside the group because `defaults.run.shell: bash` at the top of this file
+          # turns `pipefail` on and `grep` exits 1 when it matches nothing. Without the guard a
+          # missing `rust-version` would kill the step at this line under `-e`, so the diagnostic
+          # three lines down — the one that names what is actually wrong — could never be reached.
+          version=$( { grep -m1 '^rust-version' Cargo.toml || true; } | sed -E 's/^rust-version *= *"([^"]+)".*/\1/')
+          if [ -z "$version" ]; then
+            echo "::error::could not read rust-version from Cargo.toml"
+            exit 1
+          fi
+          echo "Declared MSRV: $version"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+      - name: Install Rust ${{ steps.msrv.outputs.version }}
+        run: rustup toolchain install ${{ steps.msrv.outputs.version }} --profile minimal --no-self-update
+      # Exit 0 from the check below is not by itself proof that the MSRV was exercised: if the
+      # named toolchain silently resolved to something else, the job would build on that and pass.
+      # Asserted rather than assumed, and cheap.
+      - name: The toolchain really is ${{ steps.msrv.outputs.version }}
+        run: |
+          set -euo pipefail
+          got=$(rustc +${{ steps.msrv.outputs.version }} --version)
+          echo "$got"
+          case "$got" in
+            "rustc ${{ steps.msrv.outputs.version }} "* | "rustc ${{ steps.msrv.outputs.version }}."*) ;;
+            *)
+              echo "::error::asked rustup for ${{ steps.msrv.outputs.version }} and got '$got'; this job is not testing the declared floor"
+              exit 1
+              ;;
+          esac
+      - name: cargo +${{ steps.msrv.outputs.version }} check -p painty --all-features --all-targets
+        run: cargo +${{ steps.msrv.outputs.version }} check -p painty --all-features --all-targets
+
+  # ── Gate: no-std, on a bare-metal target ────────────────────────────────────
+  #
+  # The contract this crate renders is `no_std`-reachable and allocation-free, and the default
+  # feature set is what makes that true here: `default = []` means the resolution layer compiles
+  # against `core` alone. A host build cannot check that — `std` is linkable on the host whether
+  # or not the crate reaches for it — so the claim needs a target where `std` does not exist.
+  # `thumbv6m-none-eabi` is also CAS-less, which will matter the day anything here reaches for an
+  # atomic.
+  #
+  # ONE NAMED STEP PER FEATURE POINT rather than a loop over a derived list: a leg that stops
+  # running should disappear from the CI UI where somebody can see it, not from a `::group::`
+  # inside a passing step. `std` and `terminal` are absent because they require the standard
+  # library by construction and could only ever be red here. The `manifest` job is what keeps this
+  # list complete — it pins the feature set, so a new std-free feature cannot appear without
+  # reddening there first and sending whoever added it back to this job.
+  no-std:
+    name: no-std (thumbv6m)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-nostd-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-nostd-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Add the bare-metal target
+        run: rustup target add thumbv6m-none-eabi
+      - name: cargo check -p painty --target thumbv6m-none-eabi --no-default-features
+        run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features
+      - name: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html
+        run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html
+      - name: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features model
+        run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features model
+      - name: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html,model
+        run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html,model
+      # Compile-only reaches only the crate. These two run the no-std tiers on the host, where the
+      # harness may link `std` but the crate paths under test do not — which is where a `Vec` or a
+      # `format!` that slipped into a test, rather than into the library, actually shows up.
+      - name: cargo test -p painty --no-default-features
+        run: cargo test -p painty --no-default-features
+      - name: cargo test -p painty --no-default-features --features html,model
+        run: cargo test -p painty --no-default-features --features html,model
+
+  # ── Gate: it builds for the targets consumers actually ship to ──────────────
   cross:
     name: cross
     strategy:
+      # A missing cross toolchain in one cell must not cancel the other, unrelated cells: a
+      # mostly-red matrix that is really one failure plus fail-fast collateral is unreadable.
+      fail-fast: false
       matrix:
         target:
           - aarch64-unknown-linux-gnu
@@ -93,118 +427,78 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-cross-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-cross-${{ matrix.target }}-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-cross-
+            ${{ runner.os }}-cross-${{ matrix.target }}-
       - name: Install Rust
-        run: rustup update stable && rustup default stable
-      - name: cargo build --target ${{ matrix.target }}
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: cargo build -p painty --all-features --target ${{ matrix.target }}
         run: |
           rustup target add ${{ matrix.target }}
-          cargo build --target ${{ matrix.target }}
+          cargo build -p painty --all-features --target ${{ matrix.target }}
 
-  build:
-    name: build
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
+  # ── Gate: the documentation builds, and it is the real front page ───────────
+  docs:
+    name: docs
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: -D warnings
     steps:
-    - uses: actions/checkout@v7
-    - name: Cache cargo build and registry
-      uses: actions/cache@v6
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-build-
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
-    - name: Run build
-      run: cargo hack build --feature-powerset --exclude-no-default-features
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: cargo doc -p painty --all-features --no-deps
+        run: |
+          set -euo pipefail
+          TD="${CARGO_TARGET_DIR:-target}"
+          rm -rf "$TD/doc"
+          cargo doc -p painty --all-features --no-deps
+          # `cargo doc` can exit 0 having rendered nothing for the package that was asked for.
+          # Naming the page turns that from a green tick over no documentation into a failure.
+          if [ ! -f "$TD/doc/painty/index.html" ]; then
+            echo "::error::cargo doc -p painty exited 0 but wrote no page at $TD/doc/painty/index.html"
+            exit 1
+          fi
+      # `src/lib.rs` is `#![doc = include_str!("../README.md")]`, so the crate's front page and
+      # the repository's landing page are one document by construction. The failure this guards
+      # against is the other direction: the include silently rendering something that is not the
+      # README — an empty file, or a stub left by a checkout that did not materialise it. A
+      # sentinel from the README's own prose is the cheapest check that the bytes arrived.
+      #
+      # The sibling `pql` repository is why this is here rather than assumed: its `lib.rs` carries
+      # exactly this include over an unmodified template README, so the crate's front page is
+      # boilerplate and every gate is green.
+      - name: The rendered front page is the README and not a template
+        run: |
+          set -euo pipefail
+          TD="${CARGO_TARGET_DIR:-target}"
+          page="$TD/doc/painty/index.html"
+          for sentinel in 'Three layers' 'Minimum supported Rust version'; do
+            if ! grep -qF "$sentinel" "$page"; then
+              echo "::error::'$sentinel' is in README.md but not in the rendered page; the include is not delivering the README"
+              exit 1
+            fi
+          done
+          if grep -qiF 'template for creating Rust open-source repo' "$page"; then
+            echo "::error::the rendered front page still contains the repository template's text"
+            exit 1
+          fi
+          echo "ok: the rendered front page is painty's README"
 
-  test:
-    name: test
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-    - uses: actions/checkout@v7
-    - name: Cache cargo build and registry
-      uses: actions/cache@v6
-      with:
-        path: |
-          ~/.cargo/registry
-          ~/.cargo/git
-          target
-        key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.lock') }}
-        restore-keys: |
-          ${{ runner.os }}-test-
-    - name: Install Rust
-      # --no-self-update is necessary because the windows environment cannot self-update rustup.exe.
-      run: rustup update stable --no-self-update && rustup default stable
-    - name: Install cargo-hack
-      run: cargo install cargo-hack
-    - name: Run test
-      run: cargo hack test --feature-powerset --exclude-no-default-features --exclude-features loom
-
-  sanitizer:
-    name: sanitizer
+  # ── Gate: the crate can actually be published ───────────────────────────────
+  #
+  # Worth a job on an empty crate because most of what it checks is metadata, and metadata is
+  # exactly what a repository template leaves behind: `cargo publish` refuses a package with no
+  # description, no license and no repository, and it refuses one whose `readme` points at a file
+  # that is not there. Those are the fields a template ships filled in with somebody else's
+  # answers.
+  publish-dry-run:
+    name: publish-dry-run
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - name: Cache cargo build and registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-sanitizer-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-sanitizer-
       - name: Install Rust
-        run: rustup update nightly && rustup default nightly
-      - name: Install rust-src
-        run: rustup component add rust-src
-      - name: ASAN / LSAN / MSAN / TSAN
-        run: bash ci/sanitizer.sh
-
-  miri-tb:
-    name: miri-tb-${{ matrix.target }}
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: i686-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: powerpc64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: s390x-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: riscv64gc-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
+        run: rustup update stable --no-self-update && rustup default stable
       - name: Cache cargo build and registry
         uses: actions/cache@v6
         with:
@@ -212,33 +506,49 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-publish-dry-run-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-miri-
-      - name: Miri
+            ${{ runner.os }}-publish-dry-run-
+      - name: cargo publish --dry-run -p painty
+        run: cargo publish --dry-run -p painty
+      # The dry run passing is necessary and not sufficient: it proves the package builds from the
+      # extracted tree, not that the README travelled with it. `readme = "README.md"` is what
+      # docs.rs and crates.io render, and `include_str!` compiles just as happily against a
+      # twelve-byte stub as against the real thing.
+      - name: The packaged README is the real one
         run: |
-          bash ci/miri_tb.sh "${{ matrix.target }}"
+          set -euo pipefail
+          TD="${CARGO_TARGET_DIR:-target}"
+          version=$(cargo metadata --no-deps --format-version 1 \
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"]=="painty"))')
+          packaged="$TD/package/painty-$version/README.md"
+          if [ ! -f "$packaged" ]; then
+            echo "::error::the dry run exited 0 but left no packaged README at $packaged, so this gate proved nothing"
+            exit 1
+          fi
+          want=$(sha256sum README.md | cut -d' ' -f1)
+          got=$(sha256sum "$packaged" | cut -d' ' -f1)
+          if [ "$want" != "$got" ]; then
+            echo "::error::the packaged README is not the repository's README"
+            echo "::error::root sha256=$want, packaged sha256=$got, packaged size=$(wc -c < "$packaged") bytes"
+            exit 1
+          fi
+          echo "ok: packaged README is byte-identical to the repository README ($(wc -c < "$packaged") bytes)"
 
-  miri-sb:
-    name: miri-sb-${{ matrix.target }}
+  # ── Gate: sanitizers ────────────────────────────────────────────────────────
+  #
+  # One sanitizer per cell with `fail-fast: false`, so an unsupported sanitizer reports as one red
+  # cell rather than aborting the run. `address` is the only entry, and `ci/sanitizer.sh`'s header
+  # carries the reasoning for each of the three that are not: `leak` and `memory` are unsupported
+  # on some targets, and `thread` would rebuild an instrumented `std` on every push to watch a
+  # crate that by design spawns nothing.
+  sanitizer:
+    name: sanitizer (${{ matrix.san }})
+    runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        include:
-          - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: aarch64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: i686-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: powerpc64-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: s390x-unknown-linux-gnu
-          - os: ubuntu-latest
-            target: riscv64gc-unknown-linux-gnu
-          - os: macos-latest
-            target: aarch64-apple-darwin
-    runs-on: ${{ matrix.os }}
+        san: [address]
     steps:
       - uses: actions/checkout@v7
       - name: Cache cargo build and registry
@@ -248,68 +558,25 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-miri-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-san-${{ matrix.san }}-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
-            ${{ runner.os }}-miri-
-      - name: Miri
+            ${{ runner.os }}-san-${{ matrix.san }}-
+      - name: Install Rust (nightly + rust-src for -Zbuild-std)
         run: |
-          bash ci/miri_sb.sh "${{ matrix.target }}"
+          rustup toolchain install nightly --no-self-update --component rust-src
+          rustup default nightly
+      - name: ci/sanitizer.sh
+        run: bash ci/sanitizer.sh x86_64-unknown-linux-gnu ${{ matrix.san }}
 
-  loom:
-    name: loom
-    strategy:
-      matrix:
-        os:
-          - ubuntu-latest
-          - macos-latest
-          - windows-latest
-    runs-on: ${{ matrix.os }}
-    steps:
-      - uses: actions/checkout@v7
-      - name: Cache cargo build and registry
-        uses: actions/cache@v6
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-loom-${{ hashFiles('**/Cargo.lock') }}
-          restore-keys: |
-            ${{ runner.os }}-loom-
-      - name: Install Rust
-        run: rustup update nightly --no-self-update && rustup default nightly
-      - name: Loom tests
-        run: cargo test --tests --features loom
-
-  # valgrind:
-  #   name: valgrind
-  #   runs-on: ubuntu-latest
-  #   steps:
-  #     - uses: actions/checkout@v7
-  #     - name: Cache cargo build and registry
-  #       uses: actions/cache@v6
-  #       with:
-  #         path: |
-  #           ~/.cargo/registry
-  #           ~/.cargo/git
-  #           target
-  #         key: ubuntu-latest-valgrind-${{ hashFiles('**/Cargo.lock') }}
-  #         restore-keys: |
-  #           ubuntu-latest-valgrind-
-  #     - name: Install Rust
-  #       run: rustup update stable && rustup default stable
-  #     - name: Install Valgrind
-  #       run: |
-  #         sudo apt-get update -y
-  #         sudo apt-get install -y valgrind
-  #     # Uncomment and customize when you have binaries to test:
-  #     # - name: cargo build foo
-  #     #   run: cargo build --bin foo
-  #     #   working-directory: integration
-  #     # - name: Run valgrind foo
-  #     #   run: valgrind --error-exitcode=1 --leak-check=full --show-leak-kinds=all ./target/debug/foo
-  #     #   working-directory: integration
-
+  # ── Coverage ────────────────────────────────────────────────────────────────
+  #
+  # The GATE is tarpaulin running and producing a report; that step is unconditional and its
+  # output is asserted, so it reddens if coverage collection breaks.
+  #
+  # The UPLOAD is a publishing step and depends on a credential this repository does not yet
+  # have. It is conditional on the token, and when the token is absent the job says so with a
+  # warning annotation on every run rather than skipping quietly. `secrets` is not available in a
+  # step `if:`, which is why the token is mirrored into a job-level `env` first.
   coverage:
     name: coverage
     runs-on: ubuntu-latest
@@ -317,16 +584,13 @@ jobs:
       - rustfmt
       - clippy
       - build
-      - cross
       - test
-      - sanitizer
-      - loom
+    env:
+      CODECOV_TOKEN: ${{ secrets.CODECOV_TOKEN }}
     steps:
       - uses: actions/checkout@v7
       - name: Install Rust
-        run: rustup update nightly && rustup default nightly
-      - name: Install cargo-tarpaulin
-        run: cargo install cargo-tarpaulin
+        run: rustup update nightly --no-self-update && rustup default nightly
       - name: Cache cargo build and registry
         uses: actions/cache@v6
         with:
@@ -334,16 +598,32 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.lock') }}
+          key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.toml') }}
           restore-keys: |
             ${{ runner.os }}-coverage-
-      - name: Run tarpaulin
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin
+      - name: cargo tarpaulin
         env:
           RUSTFLAGS: "--cfg tarpaulin"
-        run: cargo tarpaulin --engine llvm --all-features --run-types lib --run-types tests --run-types doctests --workspace --out xml
+        run: cargo tarpaulin -p painty --engine llvm --all-features --run-types lib --run-types tests --run-types doctests --out xml
+      - name: A report was actually written
+        run: |
+          set -euo pipefail
+          if [ ! -s cobertura.xml ]; then
+            echo "::error::tarpaulin exited 0 but wrote no cobertura.xml, so this job measured nothing"
+            exit 1
+          fi
+          echo "ok: cobertura.xml is $(wc -c < cobertura.xml) bytes"
       - name: Upload to codecov.io
+        if: env.CODECOV_TOKEN != ''
         uses: codecov/codecov-action@v7
         with:
           token: ${{ secrets.CODECOV_TOKEN }}
           slug: ${{ github.repository }}
           fail_ci_if_error: true
+      - name: Say so when the upload could not happen
+        if: env.CODECOV_TOKEN == ''
+        run: |
+          echo "::warning::CODECOV_TOKEN is not set on this repository, so the report above was measured and then discarded."
+          echo "::warning::Add it under Settings -> Secrets and variables -> Actions to start publishing coverage."

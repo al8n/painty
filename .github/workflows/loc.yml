@@ -1,29 +1,46 @@
-name: loc 
+name: loc
 
 on:
   push:
+    # Kept identical to `ci.yml`'s list, whose comment carries the full reasoning; the identity is
+    # enforced by `ci/check_workflow_triggers.sh`. This lane matters for the same reason as the
+    # others: it publishes a line count for the branch that merges land on, and a lane naming the
+    # wrong branch fails by absence — the gist simply stops refreshing and nothing says so.
     branches:
       - main
+      - dev
+    # This `paths-ignore` list is deliberately NOT the one the other three carry. This workflow
+    # counts lines of Rust, so markdown genuinely cannot change its result, whereas in `ci.yml` a
+    # blanket `**.md` would suppress the `docs` job — and the README is that crate's rustdoc front
+    # page. Only the push-branch list is required to match.
     paths-ignore:
-      - 'README.md'
       - 'COPYRIGHT'
       - 'LICENSE*'
       - '**.md'
       - '**.txt'
-      - 'art'
   pull_request:
     paths-ignore:
-      - 'README.md'
       - 'COPYRIGHT'
       - 'LICENSE*'
       - '**.md'
       - '**.txt'
-      - 'art'
   workflow_dispatch:
+
+# Every `run:` here is bash — the same block the other three workflows carry, and `ci.yml`'s has
+# the full account. This is the weakest of the four instances: one ubuntu job whose `run:` blocks
+# any shell would take. It is stated anyway so that "every workflow in this repository declares
+# its shell" is a property somebody can check by reading the four files, rather than a rule with
+# one silent exception in the file nobody looks at.
+defaults:
+  run:
+    shell: bash
 
 jobs:
   loc:
     runs-on: ubuntu-latest
+    # Mirrored into `env` because the `secrets` context is not available in a step `if:`.
+    env:
+      GIST_PAT: ${{ secrets.GIST_PAT }}
     steps:
       - uses: actions/checkout@v7
 
@@ -32,15 +49,22 @@ jobs:
           rustup update stable && rustup default stable
           rustup component add clippy
           rustup component add rustfmt
-      
+
       - name: Install tokeit
-        run: |
-          cargo install tokeit --force
-      
+        run: cargo install tokeit --force
+
       - name: Count total lines of code
-        run: |
-          tokeit --lang rust
+        run: tokeit --lang rust
+
+      # The gist is shared across this family of repositories and keyed by FILE NAME — `smear`,
+      # `tokora` and now `painty` are three files in one gist, each holding that repository's
+      # count. The template shipped this step writing a file called `template-rs`, which would
+      # have added a fourth, meaningless entry to a gist two other repositories depend on.
+      #
+      # Conditional on the credential, and loud about its absence on the next step: the count
+      # above is the part that can fail on the code, and it runs unconditionally.
       - name: Upload total loc to GitHub Gist
+        if: env.GIST_PAT != ''
         uses: actions/github-script@v9
         with:
           github-token: ${{ secrets.GIST_PAT }}
@@ -51,8 +75,14 @@ jobs:
             await github.rest.gists.update({
               gist_id: gistId,
               files: {
-                "template-rs": {
+                "painty": {
                   content: output
                 }
               }
             });
+
+      - name: Say so when the upload could not happen
+        if: env.GIST_PAT == ''
+        run: |
+          echo "::warning::GIST_PAT is not set on this repository, so the line count above was measured and then discarded."
+          echo "::warning::Add it under Settings -> Secrets and variables -> Actions to start publishing the LoC badge."

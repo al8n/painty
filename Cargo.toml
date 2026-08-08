@@ -1,39 +1,72 @@
 [package]
-name = "template-rs"
+name = "painty"
 version = "0.0.0"
-edition = "2021"
-repository = "https://github.com/al8n/template-rs"
-homepage = "https://github.com/al8n/template-rs"
-documentation = "https://docs.rs/template-rs"
-description = "A template for creating Rust open-source repo on GitHub"
+edition = "2024"
+# MSRV policy, and where this number comes from.
+#
+# It is NOT derived from what painty's own code needs. The crate is empty, and the colour
+# detection the design calls for wants `std::io::IsTerminal`, stable since 1.70 — so nothing
+# here forces a floor above edition 2024's own 1.85.
+#
+# It is set by the CONSUMER side instead. painty exists to render `tokora`'s diagnostic
+# contract, and tokora declares `rust-version = "1.95"`; smear, the first producer, declares
+# 1.95 as well. A renderer whose floor sits BELOW its contract's is a floor nobody can stand
+# on — a caller pinned to 1.90 could compile painty and not the trait it renders — so the
+# lower number would be a claim no consumer is able to exercise. Matching tokora keeps the
+# declared floor reachable and keeps the family on one number rather than three.
+#
+# As in tokora, this is a floor maintainers set rather than the bare minimum, it is what the
+# `msrv` CI job actually builds against — that job reads this field instead of hardcoding a
+# toolchain, so the two cannot drift — and raising it is not treated as a breaking change.
+rust-version = "1.95"
+repository = "https://github.com/al8n/painty"
+homepage = "https://github.com/al8n/painty"
+documentation = "https://docs.rs/painty"
+description = "Renders a diagnostic and its source text to a terminal, to HTML, or to an exportable model."
 license = "MIT OR Apache-2.0"
-rust-version = "1.73"
+readme = "README.md"
+keywords = ["diagnostics", "error", "renderer", "terminal", "no-std"]
+categories = [
+  "command-line-interface",
+  "development-tools::debugging",
+  "no-std",
+  "text-processing",
+]
+# The published artifact is the crate, not the repository. Without this the `.crate` for an empty
+# skeleton is 92 KiB, two thirds of which is CI machinery that every consumer would download and
+# no consumer can run. Root-anchored so the patterns cannot start matching something nested later.
+exclude = ["/.github/", "/ci/", "/.codecov.yml"]
 
-[[bench]]
-path = "benches/foo.rs"
-name = "foo"
-harness = false
-
+# The feature set is fixed by the design and is asserted by the `manifest` job in
+# `.github/workflows/ci.yml`, which reads it back out of `cargo metadata` and compares it to a
+# literal. Adding, renaming or re-wiring a feature therefore fails CI until the design and the
+# gate are updated together — the point being that a rendering surface is easy to grow by
+# accident and the three outputs are meant to stay independently selectable.
+#
+# `default = []` is deliberate and is the primary configuration: the crate is `no_std` and
+# dependency-free unless a caller asks for an output. There is no `alloc` feature — the
+# resolution layer borrows from the source and is meant to stay allocation-free, so a feature
+# that hands it a heap would be answering an open question by default.
 [features]
-default = ["std"]
-alloc = []
+default = []
 std = []
+terminal = ["std", "dep:unicode-width", "dep:anstyle"]
+html = []
+model = []
 
+# Both are DECLARED AND NOT YET USED, which is the honest state of a skeleton: the `terminal`
+# feature is the design's decision about what that renderer will cost, recorded now so the
+# decision is reviewable before any code depends on it. Neither is referenced from `src/`, and
+# nothing here fakes a reference to quiet a lint — `unused_crate_dependencies` is allow-by-default
+# and stays that way until the renderer lands.
+#
+# Default features are left ON for both, on purpose. `unicode-width`'s default is `cjk`, and CJK
+# being two cells wide is the entire reason the dependency is taken; `anstyle`'s default is `std`,
+# which `terminal` already implies. Turning either off would produce a build that compiles and
+# renders wrongly.
 [dependencies]
-
-[dev-dependencies]
-criterion = "0.8"
-tempfile = "3"
-
-[profile.bench]
-opt-level = 3
-debug = false
-codegen-units = 1
-lto = 'thin'
-incremental = false
-debug-assertions = false
-overflow-checks = false
-rpath = false
+anstyle = { version = "1", optional = true }
+unicode-width = { version = "0.2", optional = true }
 
 [package.metadata.docs.rs]
 all-features = true
@@ -43,6 +76,9 @@ rustdoc-args = ["--cfg", "docsrs"]
 rust_2018_idioms = "warn"
 single_use_lifetimes = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
-  'cfg(all_tests)',
+  # Set by rustdoc on docs.rs via the `rustdoc-args` above, and by nothing else.
+  'cfg(docsrs)',
+  # Set by `build.rs` when it detects cargo-tarpaulin, and by the `coverage` CI job through
+  # `RUSTFLAGS`.
   'cfg(tarpaulin)',
 ] }

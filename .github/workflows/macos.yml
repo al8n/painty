@@ -1,0 +1,153 @@
+name: macOS
+
+# ── THE QUEUE-BOUND LANE ────────────────────────────────────────────────────────────────────
+#
+# These legs would ordinarily be the `macos-latest` row of `CI`'s `clippy`, `build` and `test`
+# matrices. They are in their own workflow from this repository's first commit, on measured
+# evidence from the sibling `smear` repository rather than on a guess.
+#
+# There, macOS-bound jobs are FAST once they start and slow only because they wait: in the last
+# `CI` run that concluded at all, `clippy (macos-latest)` waited 6h08m to run 7m24s, `build`
+# waited 9h17m to run 6m05s and `test` waited 9h26m to run 18m12s. A run's conclusion is a
+# property of the WHOLE run, so those queues made every other verdict in the run unreadable —
+# `CI` failed to conclude on four consecutive pull requests and two of them merged with no
+# verdict at all. The binding constraint is the ACCOUNT's macOS runner concurrency, shared with
+# every other repository, so a brand-new repository inherits the queue on day one and gains
+# nothing by discovering it the same way.
+#
+# This is a scheduling split, not a coverage decision: every step below is what `CI` would have
+# run on `macos-latest`, and it reports separately so that a macOS-only failure is readable on
+# its own.
+#
+# `rustfmt` is deliberately NOT here, and that is the one place this file's job set differs from
+# `CI`'s. `cargo fmt --all -- --check` is decided by the rustfmt version and `rustfmt.toml`, not
+# by the host, so a macOS copy is seconds of work behind a multi-hour queue with nothing to add.
+# `CI` runs it on ubuntu and windows, which covers the one host-shaped difference that exists —
+# line endings.
+
+# `push`/`pull_request` triggers and `paths-ignore` are deliberately identical to
+# `.github/workflows/ci.yml` and `.github/workflows/miri.yml`; read the comment there for why the
+# ignore list carries no blanket `**.md`. `schedule` is the one deliberate difference — see below.
+# `ci/check_workflow_triggers.sh` enforces that the `on.push.branches` lists stay identical across
+# every workflow that has one, because that is the part where a divergence is silent.
+on:
+  push:
+    # Kept identical to `ci.yml`'s list, whose comment carries the full reasoning: why a literal
+    # name is unavoidable in an `on:` block, what each entry is for, and the order an entry has to
+    # be removed in when its branch retires.
+    branches:
+      - main
+      - dev
+    paths-ignore:
+      - 'COPYRIGHT'
+      - 'LICENSE-*'
+      - '**.txt'
+  pull_request:
+    paths-ignore:
+      - 'COPYRIGHT'
+      - 'LICENSE-*'
+      - '**.txt'
+  workflow_dispatch:
+  # NO `schedule`, deliberately. A weekly run over unchanged source re-proves what the push that
+  # produced the source already proved, and on this lane that costs a multi-hour macOS queue.
+  # `CI` keeps its weekly run because that is where a new nightly, a new clippy lint or a yanked
+  # dependency shows up between merges, for ubuntu and windows time.
+
+concurrency:
+  # Same expression as `CI`'s and `Miri`'s, and `${{ github.workflow }}` leading it is what keeps
+  # the three lanes independent: `CI-...`, `Miri-...` and `macOS-...` are different groups, so no
+  # lane can cancel another's run. See `ci.yml`'s concurrency comment for why a push is keyed on
+  # the commit SHA and why that must not be collapsed back to one group per ref.
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+# Every `run:` here is bash — the same block the other three workflows carry, and `ci.yml`'s has
+# the full account of what it is for. Every host in this file happens to be macOS, where bash is
+# already the default, so this block changes nothing today. It is stated anyway so that "every
+# workflow in this repository declares its shell" is a property somebody can check by reading the
+# four files rather than a rule with one silent exception, and so that adding a windows cell here
+# does not quietly arm the trap.
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings -C debuginfo=0 -C codegen-units=16
+  RUST_BACKTRACE: 1
+
+jobs:
+  # The single-entry `os` matrix is deliberate: it keeps these reporting as
+  # `clippy (macos-latest)` and friends, the same check names they would have had as a row of
+  # `CI`'s matrices, so a branch protection rule or a reader's habit does not have to change if
+  # they ever move back.
+  clippy:
+    name: clippy
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable && rustup component add clippy
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: cargo hack clippy -p painty --feature-powerset --all-targets
+        run: cargo hack clippy -p painty --feature-powerset --all-targets
+
+  build:
+    name: build
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-build-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-build-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: cargo hack build -p painty --feature-powerset
+        run: cargo hack build -p painty --feature-powerset
+
+  test:
+    name: test
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - macos-latest
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Cache cargo build and registry
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-test-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: |
+            ${{ runner.os }}-test-
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: Install cargo-hack
+        run: cargo install cargo-hack
+      - name: cargo hack test -p painty --feature-powerset
+        run: cargo hack test -p painty --feature-powerset

@@ -5,4 +5,15 @@
 **/*.rs.bk
 **.DS_Store
 **.claude/
-**docs/
+
+# Local design docs, plans and investigation reports. Never committed: the issue tracker is for
+# defects and measurable optimisations, and docs/ is for everything else.
+#
+# Root-anchored on purpose — a leading "/" with no "**" prefix, unlike every pattern above. Those
+# are meant to match at any depth (a build `target/` or a stray `.DS_Store` can turn up anywhere);
+# this one must not, or a future `assets/docs/` of rendered example output would vanish from the
+# index without a word. Verified with `git check-ignore -v`: bare `docs/` and `**docs/` both match
+# at ANY depth, because git only anchors a pattern that has a leading or a middle slash and a
+# trailing slash alone does not anchor anything. `/docs/` is the spelling that means "the top-level
+# tree, and only that one". Aligned with smear's `.gitignore`, which carries the same finding.
+/docs/
