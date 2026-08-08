@@ -3,10 +3,14 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![deny(missing_docs)]
 
-// Empty on purpose. The repository is the scaffold — manifest, feature surface, CI gates — and
-// the renderer is not written yet; see the three layers in README.md for what lands here first.
-//
-// There is deliberately no `extern crate alloc` and no `alloc` feature. Layer 2 borrows from the
-// source and is meant to stay allocation-free, and whether elision can hold that in a
-// caller-provided buffer is a measurement still to be taken, not a question to pre-answer by
-// making a heap available.
+// The test harness is a `std` program whatever the crate under it is, so a `--no-default-features`
+// build still needs the crate to link it before `#[test]` can be expanded. Only under `cfg(test)`,
+// and only when the feature that would have brought it is off: nothing in `src/` may reach for it.
+#[cfg(all(test, not(feature = "std")))]
+extern crate std;
+
+mod diagnostic;
+mod source;
+
+pub use diagnostic::{Diagnostic, Label, Location, PathSegment, Severity, Span};
+pub use source::{Line, LineBreak, Lines, Position, Region, RegionLine, RegionLines, Source};
