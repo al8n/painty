@@ -31,8 +31,8 @@ use core::fmt;
 /// parser-combinator library either, and requiring one would reproduce the defect one level up.
 ///
 /// So the input is plain borrowed data painty defines itself, over nothing but [`core`]. Producing
-/// one from a foreign contract is a *conversion*, and conversions live behind features:
-/// [`crate::tokora`] is the first, and it is one small module.
+/// one from a foreign contract is a *conversion*, and conversions live behind features: the
+/// `tokora` feature's `painty::tokora` is the first, and it is one small module.
 ///
 /// **Not a second `Diagnose`-shaped trait, blanket-implemented for tokora's.** Coherence would
 /// allow it and it is the wrong answer: two structurally identical traits maintained in two
