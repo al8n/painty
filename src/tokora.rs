@@ -61,7 +61,7 @@
 //! assert_eq!(primary.text(), "width");
 //! ```
 
-use ::tokora::diagnostic::{Diagnose, DiagnoseExt};
+use ::tokora::diagnostic::Diagnose;
 
 use crate::{Diagnostic, Label, Location, PathSegment, Severity, Span};
 
@@ -195,24 +195,36 @@ impl<'a> Adapted<'a> {
 /// expected shape. Anything past the end of either buffer is dropped, and
 /// [`Adapted::is_complete`] says so. A caller with no labels to place passes `&mut []`.
 ///
-/// The buffers are **not** sized from [`Diagnose::labels`], deliberately. That count comes from the
-/// implementor and nothing in the type system makes it true; tokora's own iterators refuse to
-/// forward it for the same reason, having measured a safe impl that declares a million labels
-/// behind one real one. Reading the count and reserving from it reproduces exactly that hazard.
-/// What arrives here is what tokora's adapters would actually yield, which stops at the first
-/// index the accessor does not answer.
+/// # No number the caller supplies decides anything here
+///
+/// [`Diagnose::labels`] and [`Diagnose::path_segments`] are **never called**. Not to size a buffer,
+/// not to bound a walk, not to decide whether anything was dropped. The accessors are driven
+/// directly, from index zero, stopping at the first `None`.
+///
+/// That is stricter than it first appears, and it is deliberate rather than stylistic. Reading the
+/// counts through [`DiagnoseExt`](::tokora::diagnostic::DiagnoseExt)'s iterators — which is what
+/// this did — snapshots `labels()` when the iterator is *constructed* and yields nothing once the
+/// cursor reaches it. An impl answering `0` there while `label(0)` returns `Some` therefore handed
+/// this function an empty walk, and [`Adapted::is_complete`] said the diagnostic had arrived whole
+/// while its labels were silently gone. A count that cannot be trusted to be large enough cannot be
+/// trusted to be small enough either, and the second direction corrupts a flag rather than merely
+/// wasting time.
+///
+/// So the accessor is the only authority. Where it and the count disagree, the count is not
+/// consulted, which also means this can yield more than tokora's own iterators would.
 ///
 /// # The work is bounded by YOUR buffer, not by the diagnostic
 ///
-/// A [`Diagnose`] impl is caller-written code, so it is untrusted input to this function even
-/// though it is safe Rust. Reading each collection stops at one item past the buffer's capacity:
-/// `capacity` items to fill it, and one more to learn whether there was anything else. An impl
-/// declaring [`usize::MAX`] labels and answering every index therefore costs `capacity + 1` calls
-/// rather than `usize::MAX` of them.
+/// A [`Diagnose`] impl is caller-written code, so it is untrusted input even though it is safe
+/// Rust. Each collection costs at most `capacity + 1` accessor calls: `capacity` to fill the
+/// buffer, and one more to learn whether there was anything else. An impl with a billion labels
+/// costs the same as one with five.
 ///
-/// That bound is the reason [`Adapted`] reports *whether* rather than *how many*, and its
-/// documentation carries the trade. `tests/tokora_adapter.rs` counts the calls rather than
-/// trusting this paragraph.
+/// What this does **not** buy is totality. `code`, `severity`, `primary` and the accessors are all
+/// caller code, and any one of them may take as long as it likes; dropping the count removes one
+/// such call and one such *decision*, not the possibility that a caller hangs in a method this
+/// function has to call. `tests/tokora_adapter.rs` counts the calls rather than trusting this
+/// paragraph, and asserts that the counts are never called at all.
 pub fn adapt<'a, 'buffer>(
   diagnose: &'a dyn Diagnose,
   labels: &'buffer mut [Label<'a>],
@@ -221,18 +233,22 @@ pub fn adapt<'a, 'buffer>(
 where
   'a: 'buffer,
 {
-  // The return type is spelled out because a `&mut [T]` is invariant in `T`. tokora's label text
-  // is `&'static str`, so `Label::from` produces a `Label<'static>` and the buffer's element type
+  // Indexed accessors, not `DiagnoseExt`'s iterators: those read the declared count when they are
+  // constructed, and a count of zero over an accessor that has data made this report a complete
+  // diagnostic with its labels missing.
+  //
+  // The return type is spelled out because a `&mut [T]` is invariant in `T`. tokora's label text is
+  // `&'static str`, so `Label::from` produces a `Label<'static>` and the buffer's element type
   // would have to equal that exactly — which would demand `'a: 'static` of the diagnostic. Naming
   // the closure's result puts the (perfectly ordinary) shortening coercion on the value instead.
-  let (labels, labels_dropped) = fill(
-    labels,
+  let (labels, labels_dropped) = fill(labels, |index| {
     diagnose
-      .labels_iter()
-      .map(|label| -> Label<'a> { Label::from(label) }),
-  );
-  let (path, path_segments_dropped) =
-    fill(path, diagnose.path_segments_iter().map(PathSegment::from));
+      .label(index)
+      .map(|label| -> Label<'a> { label.into() })
+  });
+  let (path, path_segments_dropped) = fill(path, |index| {
+    diagnose.path_segment(index).map(PathSegment::from)
+  });
 
   let mut diagnostic = Diagnostic::new(
     diagnose.code().as_str(),
@@ -257,25 +273,27 @@ where
   }
 }
 
-/// Writes as much of `items` into `buffer` as fits, and says whether there was more.
+/// Reads `item` from index zero into `buffer`, and says whether there was more.
 ///
-/// Pulls at most `buffer.len() + 1` items, and that ceiling is the whole point: `items` reads a
-/// caller's [`Diagnose`] impl, so every pull runs code this function does not control and cannot
-/// bound. Draining it to count the remainder — which is what an exact overflow count costs — lets
-/// a small buffer and a large declared count turn one adapter call into an unbounded one.
+/// Calls `item` at most `buffer.len() + 1` times, and that ceiling is the whole point: `item` runs
+/// a caller's [`Diagnose`] accessor, which this function does not control and cannot bound.
+/// Draining it to count the remainder — what an exact overflow count costs — lets a small buffer
+/// and a large diagnostic turn one adapter call into an unbounded one.
 ///
-/// The final pull is the probe. It is the least this can ask and still tell a full buffer that
-/// happened to fit everything from one that did not.
-fn fill<T>(buffer: &mut [T], mut items: impl Iterator<Item = T>) -> (&[T], bool) {
+/// The final call is the probe, and it is the least that can distinguish a buffer that happened to
+/// fit everything from one that did not. Nothing else decides that: no declared count is read, so
+/// an implementation that under-reports cannot make this report a complete view over a truncated
+/// one.
+fn fill<T>(buffer: &mut [T], mut item: impl FnMut(usize) -> Option<T>) -> (&[T], bool) {
   let mut written = 0;
   while written < buffer.len() {
-    let Some(item) = items.next() else {
+    let Some(value) = item(written) else {
       return (&buffer[..written], false);
     };
-    buffer[written] = item;
+    buffer[written] = value;
     written += 1;
   }
 
-  let dropped = items.next().is_some();
+  let dropped = item(written).is_some();
   (&buffer[..written], dropped)
 }

@@ -357,6 +357,127 @@ impl Diagnose for Endless {
   }
 }
 
+/// An impl whose declared counts are ZERO and whose accessors have data.
+///
+/// The shape that made the completeness flag lie. `DiagnoseExt`'s iterators snapshot the count when
+/// they are built and yield nothing once the cursor reaches it, so a count of zero produced an
+/// empty walk over an accessor with labels behind it — and `is_complete` said the diagnostic had
+/// arrived whole. It also counts every call, so "the counts are never read" is asserted rather
+/// than argued.
+struct UnderReports {
+  counts_read: Cell<usize>,
+  labels_read: Cell<usize>,
+  path_read: Cell<usize>,
+}
+
+impl UnderReports {
+  fn new() -> Self {
+    Self {
+      counts_read: Cell::new(0),
+      labels_read: Cell::new(0),
+      path_read: Cell::new(0),
+    }
+  }
+}
+
+impl fmt::Display for UnderReports {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("a diagnostic that under-reports its own size")
+  }
+}
+
+impl Diagnose for UnderReports {
+  fn code(&self) -> Code {
+    Code::new("mylang::test::under-reports")
+  }
+  fn severity(&self) -> tokora::diagnostic::Severity {
+    tokora::diagnostic::Severity::Error
+  }
+  fn primary(&self) -> tokora::diagnostic::Location {
+    tokora::diagnostic::Location::entire(0)
+  }
+  fn primary_label(&self) -> Option<&'static str> {
+    None
+  }
+  fn labels(&self) -> usize {
+    self.counts_read.set(self.counts_read.get() + 1);
+    0
+  }
+  fn label(&self, index: usize) -> Option<tokora::diagnostic::Label> {
+    self.labels_read.set(self.labels_read.get() + 1);
+    (index < 3).then(|| {
+      tokora::diagnostic::Label::new(
+        tokora::diagnostic::Location::new(0, SimpleSpan::new(0, 1)),
+        "real, and behind a zero",
+      )
+    })
+  }
+  fn path_segments(&self) -> usize {
+    self.counts_read.set(self.counts_read.get() + 1);
+    0
+  }
+  fn path_segment(&self, index: usize) -> Option<tokora::diagnostic::PathSegment<'_>> {
+    self.path_read.set(self.path_read.get() + 1);
+    (index < 3).then_some(tokora::diagnostic::PathSegment::Index(7))
+  }
+  fn help(&self) -> Option<&'static str> {
+    None
+  }
+}
+
+#[test]
+fn a_count_of_zero_does_not_hide_data_the_accessor_has() {
+  let error = UnderReports::new();
+  let mut labels = empty_labels::<2>();
+  let mut path: [PathSegment<'_>; 2] = [PathSegment::Index(0); 2];
+
+  let adapted = adapt(&error, &mut labels, &mut path);
+
+  // The accessor has three of each and the buffers hold two, so both truncated — and the flag has
+  // to say so. Reading the declared zero instead reported a complete view over nothing.
+  assert_eq!(adapted.diagnostic().labels().len(), 2);
+  assert_eq!(adapted.diagnostic().path().len(), 2);
+  assert!(adapted.labels_dropped());
+  assert!(adapted.path_segments_dropped());
+  assert!(!adapted.is_complete());
+
+  // And the declared counts were never asked for at all.
+  assert_eq!(
+    error.counts_read.get(),
+    0,
+    "the adapter read a count it is not allowed to trust"
+  );
+}
+
+#[test]
+fn a_zero_capacity_buffer_still_reports_the_data_it_could_not_take() {
+  let error = UnderReports::new();
+  let adapted = adapt(&error, &mut [], &mut []);
+
+  assert!(adapted.labels_dropped());
+  assert!(adapted.path_segments_dropped());
+  assert!(!adapted.is_complete());
+  // One probe each, and no count.
+  assert_eq!((error.labels_read.get(), error.path_read.get()), (1, 1));
+  assert_eq!(error.counts_read.get(), 0);
+}
+
+#[test]
+fn the_accessor_is_called_capacity_plus_one_times_and_no_more() {
+  let error = UnderReports::new();
+  let mut labels = empty_labels::<2>();
+  let mut path: [PathSegment<'_>; 1] = [PathSegment::Index(0)];
+
+  let adapted = adapt(&error, &mut labels, &mut path);
+  assert!(!adapted.is_complete());
+
+  // Two slots plus a probe; one slot plus a probe. Asserted rather than argued, because the bound
+  // is the whole reason the overflow report is a boolean.
+  assert_eq!(error.labels_read.get(), 3);
+  assert_eq!(error.path_read.get(), 2);
+  assert_eq!(error.counts_read.get(), 0);
+}
+
 #[test]
 fn the_work_is_bounded_by_the_buffer_and_not_by_the_diagnostic() {
   let error = Endless {
