@@ -121,16 +121,43 @@ impl<'a> From<::tokora::diagnostic::PathSegment<'a>> for PathSegment<'a> {
   }
 }
 
-/// What [`adapt`] produced, and what it could not fit.
+/// What [`adapt`] produced, and whether anything did not fit.
 ///
 /// [`is_complete`](Self::is_complete) is the question worth asking before rendering: a `false`
-/// means the buffers were too small and part of the diagnostic is missing from the view.
+/// means a buffer was too small and part of the diagnostic is missing from the view.
+///
+/// # Why "whether" and not "how many"
+///
+/// This reported exact counts until the walk behind them was priced. An exact count of what was
+/// dropped can only be had by looking at everything that was dropped, and the things being looked
+/// at are answers from a **caller-implemented trait**. A safe [`Diagnose`] impl may declare a
+/// billion labels and go on answering `Some` for every index; counting the overflow then means
+/// invoking that code a billion times to fill a buffer that stopped accepting items at four. A
+/// caller passing a small array — the shape this adapter recommends — would have bought a hang.
+///
+/// So the counts became booleans, and [`adapt`] asks for exactly one item beyond what it can
+/// store. The information given up is real and small: a renderer can say "and more labels" but no
+/// longer "and three more".
+///
+/// Three alternatives were considered and are recorded so they are not re-proposed:
+///
+/// - **Read the count from [`Diagnose::labels`]** and subtract. That is the one number tokora
+///   documents as untrustworthy — see [`adapt`] — so it would trade an unbounded walk for a
+///   wrong answer.
+/// - **Walk a bounded number past the end** and report "at least *n*". A bound nobody can choose
+///   is a knob, and the honest value of it is one.
+/// - **Report nothing.** A caller cannot then tell a complete render from a truncated one, which
+///   is the only thing this type exists to say.
+///
+/// The precision was also worth less than it looked. What an "exact" count is exact *about* is one
+/// walk of an impl that is free to answer differently on the next one, so it was never a stable
+/// quantity to begin with.
 #[derive(Debug, Clone, Copy)]
 #[must_use = "the view is inside this; `diagnostic()` takes it out"]
 pub struct Adapted<'a> {
   diagnostic: Diagnostic<'a>,
-  dropped_labels: usize,
-  dropped_path_segments: usize,
+  labels_dropped: bool,
+  path_segments_dropped: bool,
 }
 
 impl<'a> Adapted<'a> {
@@ -140,22 +167,22 @@ impl<'a> Adapted<'a> {
     self.diagnostic
   }
 
-  /// Returns how many secondary labels did not fit in the buffer they were given.
+  /// Returns whether a secondary label did not fit in the buffer it was given.
   #[inline]
-  pub const fn dropped_labels(&self) -> usize {
-    self.dropped_labels
+  pub const fn labels_dropped(&self) -> bool {
+    self.labels_dropped
   }
 
-  /// Returns how many result-path segments did not fit in the buffer they were given.
+  /// Returns whether a result-path segment did not fit in the buffer it was given.
   #[inline]
-  pub const fn dropped_path_segments(&self) -> usize {
-    self.dropped_path_segments
+  pub const fn path_segments_dropped(&self) -> bool {
+    self.path_segments_dropped
   }
 
   /// Returns whether the whole diagnostic reached the view.
   #[inline]
   pub const fn is_complete(&self) -> bool {
-    self.dropped_labels == 0 && self.dropped_path_segments == 0
+    !self.labels_dropped && !self.path_segments_dropped
   }
 }
 
@@ -165,8 +192,8 @@ impl<'a> Adapted<'a> {
 /// # Sizing the buffers
 ///
 /// A diagnostic carries nought to five labels in practice, so a small array on the stack is the
-/// expected shape. Anything past the end of either buffer is dropped and counted — see
-/// [`Adapted::is_complete`]. A caller with no labels to place passes `&mut []`.
+/// expected shape. Anything past the end of either buffer is dropped, and
+/// [`Adapted::is_complete`] says so. A caller with no labels to place passes `&mut []`.
 ///
 /// The buffers are **not** sized from [`Diagnose::labels`], deliberately. That count comes from the
 /// implementor and nothing in the type system makes it true; tokora's own iterators refuse to
@@ -174,6 +201,18 @@ impl<'a> Adapted<'a> {
 /// behind one real one. Reading the count and reserving from it reproduces exactly that hazard.
 /// What arrives here is what tokora's adapters would actually yield, which stops at the first
 /// index the accessor does not answer.
+///
+/// # The work is bounded by YOUR buffer, not by the diagnostic
+///
+/// A [`Diagnose`] impl is caller-written code, so it is untrusted input to this function even
+/// though it is safe Rust. Reading each collection stops at one item past the buffer's capacity:
+/// `capacity` items to fill it, and one more to learn whether there was anything else. An impl
+/// declaring [`usize::MAX`] labels and answering every index therefore costs `capacity + 1` calls
+/// rather than `usize::MAX` of them.
+///
+/// That bound is the reason [`Adapted`] reports *whether* rather than *how many*, and its
+/// documentation carries the trade. `tests/tokora_adapter.rs` counts the calls rather than
+/// trusting this paragraph.
 pub fn adapt<'a, 'buffer>(
   diagnose: &'a dyn Diagnose,
   labels: &'buffer mut [Label<'a>],
@@ -186,13 +225,13 @@ where
   // is `&'static str`, so `Label::from` produces a `Label<'static>` and the buffer's element type
   // would have to equal that exactly — which would demand `'a: 'static` of the diagnostic. Naming
   // the closure's result puts the (perfectly ordinary) shortening coercion on the value instead.
-  let (labels, dropped_labels) = fill(
+  let (labels, labels_dropped) = fill(
     labels,
     diagnose
       .labels_iter()
       .map(|label| -> Label<'a> { Label::from(label) }),
   );
-  let (path, dropped_path_segments) =
+  let (path, path_segments_dropped) =
     fill(path, diagnose.path_segments_iter().map(PathSegment::from));
 
   let mut diagnostic = Diagnostic::new(
@@ -213,25 +252,30 @@ where
 
   Adapted {
     diagnostic,
-    dropped_labels,
-    dropped_path_segments,
+    labels_dropped,
+    path_segments_dropped,
   }
 }
 
-/// Writes as much of `items` into `buffer` as fits, returning the filled prefix and the overflow.
-fn fill<T>(buffer: &mut [T], items: impl Iterator<Item = T>) -> (&[T], usize) {
+/// Writes as much of `items` into `buffer` as fits, and says whether there was more.
+///
+/// Pulls at most `buffer.len() + 1` items, and that ceiling is the whole point: `items` reads a
+/// caller's [`Diagnose`] impl, so every pull runs code this function does not control and cannot
+/// bound. Draining it to count the remainder — which is what an exact overflow count costs — lets
+/// a small buffer and a large declared count turn one adapter call into an unbounded one.
+///
+/// The final pull is the probe. It is the least this can ask and still tell a full buffer that
+/// happened to fit everything from one that did not.
+fn fill<T>(buffer: &mut [T], mut items: impl Iterator<Item = T>) -> (&[T], bool) {
   let mut written = 0;
-  let mut dropped = 0;
-
-  for item in items {
-    match buffer.get_mut(written) {
-      Some(slot) => {
-        *slot = item;
-        written += 1;
-      }
-      None => dropped += 1,
-    }
+  while written < buffer.len() {
+    let Some(item) = items.next() else {
+      return (&buffer[..written], false);
+    };
+    buffer[written] = item;
+    written += 1;
   }
 
+  let dropped = items.next().is_some();
   (&buffer[..written], dropped)
 }

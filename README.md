@@ -137,8 +137,13 @@ Worked through the whole public surface, that gives:
 - **rule 3** — `Location::source`, a `u32` index into the caller's own list of inputs, which is
   what every producer of one already spells it;
 - **rule 4** — `Position::offset`, `Span::{new, empty, start, end, len, contains}`,
-  `LineBreak::byte_len`, `Source::{len, line_at, position}`, and the adapter's two overflow counts,
-  `Adapted::dropped_labels` and `Adapted::dropped_path_segments`.
+  `LineBreak::byte_len`, and `Source::{len, line_at, position}`.
+
+The adapter's overflow reports used to be here, as exact `usize` counts. They are booleans now and
+have left the numeric surface entirely: an exact count of what did not fit can only be had by
+looking at everything that did not fit, and those are answers from a caller-implemented trait, so
+the count was buying an unbounded walk through somebody else's code to fill a four-element array.
+`painty::tokora::Adapted` documents the trade.
 
 Two consequences worth stating, because they are why the rules are ordered rather than merely
 listed. A line count is *both* a count of things in memory and a line ordinal; rule 1 comes first,
@@ -148,14 +153,16 @@ fails.
 
 **A parameter's width is as frozen as a return's**, so both are pinned — and so is the lifetime a
 borrow comes back on. `tests/numeric_widths.rs` ascribes the whole signature of every member listed
-above; parses `src/` with `syn` to read the public surface back out, so a new member cannot go
-unpinned and a stale pin cannot linger; checks that its own file list is the whole crate; permits
-`u32` on four named members and nowhere else, each exactly once; and asserts the absence of
-clamping. `tests/source_borrows.rs` covers the other half: everything resolution returns borrows
-the source text rather than the `&Source` it came through.
+above, and counts a binding as a pin only when its declared type is genuinely a function pointer;
+parses `src/` with `syn` to read the public surface back out, so a new member cannot go unpinned
+and a stale pin cannot linger; checks that its own file list is the whole crate; refuses the
+constructs that could dress a primitive in another name — type aliases, renamed imports, item
+macros — with no allowlist; permits `u32` on four named members and nowhere else, each exactly
+once; and asserts the absence of clamping. `tests/source_borrows.rs` covers the other half:
+everything resolution returns borrows the source text rather than the `&Source` it came through.
 
-What no such check can catch is a member placed under the **wrong rule**. A parser reads
-declarations, not intent. That is what the ordering above is for, and what review is for.
+What no such check can catch is a member placed under the **wrong rule**. No parser reads intent.
+That is what the ordering above is for, and what review is for.
 
 ## Features
 

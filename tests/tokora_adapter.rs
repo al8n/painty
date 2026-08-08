@@ -178,7 +178,7 @@ fn a_result_path_crosses_intact() {
 }
 
 #[test]
-fn overflow_is_counted_rather_than_dropped_in_silence() {
+fn overflow_is_reported_rather_than_dropped_in_silence() {
   let error = Redefined {
     labels: 5,
     path: &[
@@ -192,10 +192,26 @@ fn overflow_is_counted_rather_than_dropped_in_silence() {
 
   let adapted = adapt(&error, &mut labels, &mut path);
   assert!(!adapted.is_complete());
-  assert_eq!(adapted.dropped_labels(), 3);
-  assert_eq!(adapted.dropped_path_segments(), 1);
+  assert!(adapted.labels_dropped());
+  assert!(adapted.path_segments_dropped());
   assert_eq!(adapted.diagnostic().labels().len(), 2);
   assert_eq!(adapted.diagnostic().path().len(), 1);
+}
+
+#[test]
+fn a_buffer_that_exactly_fits_is_not_reported_as_overflowing() {
+  // The boundary the probe exists for. Two labels declared, two slots: the probe is what tells
+  // this apart from three labels in two slots, and it must not itself invent an overflow.
+  let error = Redefined {
+    labels: 2,
+    ..Redefined::default()
+  };
+  let mut labels = empty_labels::<2>();
+
+  let adapted = adapt(&error, &mut labels, &mut []);
+  assert!(adapted.is_complete());
+  assert!(!adapted.labels_dropped());
+  assert_eq!(adapted.diagnostic().labels().len(), 2);
 }
 
 #[test]
@@ -284,8 +300,97 @@ fn a_declared_count_is_not_believed() {
   // One real label, and the walk stopped at the hole rather than reading a million indices or
   // reserving for them.
   assert_eq!(adapted.diagnostic().labels().len(), 1);
-  assert_eq!(adapted.dropped_labels(), 0);
+  assert!(!adapted.labels_dropped());
   assert_eq!(error.answered.get(), 2, "the walk should stop at the hole");
+}
+
+/// An impl that declares a huge count and then **answers every index**.
+///
+/// [`Lying`]'s hole is what tokora's iterators stop at; this one has none, so nothing upstream
+/// stops the walk and the adapter's own ceiling is the only thing that can. It is the shape a
+/// caller's safe code can take by accident — a generated `label` that recomputes rather than
+/// indexing — and before the ceiling existed it turned a four-slot buffer into a million calls.
+struct Endless {
+  answered: Cell<usize>,
+}
+
+impl fmt::Display for Endless {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("a diagnostic with no end of labels")
+  }
+}
+
+impl Diagnose for Endless {
+  fn code(&self) -> Code {
+    Code::new("mylang::test::endless")
+  }
+  fn severity(&self) -> tokora::diagnostic::Severity {
+    tokora::diagnostic::Severity::Warning
+  }
+  fn primary(&self) -> tokora::diagnostic::Location {
+    tokora::diagnostic::Location::entire(0)
+  }
+  fn primary_label(&self) -> Option<&'static str> {
+    None
+  }
+  fn labels(&self) -> usize {
+    // Not `usize::MAX`, only because a run against a regressed adapter has to finish in order to
+    // report the regression. The hazard this guards is `usize::MAX`, and the assertion below is
+    // the same either way.
+    1_000_000
+  }
+  fn label(&self, _: usize) -> Option<tokora::diagnostic::Label> {
+    self.answered.set(self.answered.get() + 1);
+    Some(tokora::diagnostic::Label::new(
+      tokora::diagnostic::Location::new(0, SimpleSpan::new(0, 1)),
+      "another one",
+    ))
+  }
+  fn path_segments(&self) -> usize {
+    1_000_000
+  }
+  fn path_segment(&self, _: usize) -> Option<tokora::diagnostic::PathSegment<'_>> {
+    Some(tokora::diagnostic::PathSegment::Index(0))
+  }
+  fn help(&self) -> Option<&'static str> {
+    None
+  }
+}
+
+#[test]
+fn the_work_is_bounded_by_the_buffer_and_not_by_the_diagnostic() {
+  let error = Endless {
+    answered: Cell::new(0),
+  };
+  let mut labels = empty_labels::<3>();
+  let mut path: [PathSegment<'_>; 2] = [PathSegment::Index(0); 2];
+
+  let adapted = adapt(&error, &mut labels, &mut path);
+
+  // Three slots filled and one probe to learn there was more: four calls into caller code, not a
+  // million. This is the assertion the API decision was made for — counting the overflow exactly
+  // is what would require all million.
+  assert_eq!(
+    error.answered.get(),
+    4,
+    "the adapter asked the diagnostic more than capacity + 1 times"
+  );
+  assert!(adapted.labels_dropped());
+  assert!(adapted.path_segments_dropped());
+  assert!(!adapted.is_complete());
+  assert_eq!(adapted.diagnostic().labels().len(), 3);
+  assert_eq!(adapted.diagnostic().path().len(), 2);
+}
+
+#[test]
+fn an_empty_buffer_costs_exactly_one_question() {
+  let error = Endless {
+    answered: Cell::new(0),
+  };
+  let adapted = adapt(&error, &mut [], &mut []);
+
+  assert_eq!(error.answered.get(), 1, "zero slots, one probe");
+  assert!(adapted.labels_dropped());
 }
 
 /// The view is `Copy`, so it outlives the [`Adapted`] it came out of only through the buffers.
