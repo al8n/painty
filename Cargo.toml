@@ -47,26 +47,51 @@ exclude = ["/.github/", "/ci/", "/.codecov.yml"]
 # dependency-free unless a caller asks for an output. There is no `alloc` feature — the
 # resolution layer borrows from the source and is meant to stay allocation-free, so a feature
 # that hands it a heap would be answering an open question by default.
+#
+# `tokora` is an INPUT, not an output, and it is the one feature whose absence is itself gated:
+# painty takes a borrowed data view it defines itself, so a project with its own error type never
+# has to adopt a parser-combinator library to draw an underline. The `no-tokora` job in
+# `.github/workflows/ci.yml` proves the dependency really is absent from every other
+# configuration's graph, and `tests/` carries consumers built on a hand-rolled error type so the
+# claim is exercised rather than asserted.
 [features]
 default = []
 std = []
 terminal = ["std", "dep:unicode-width", "dep:anstyle"]
 html = []
 model = []
+tokora = ["dep:tokora"]
 
-# Both are DECLARED AND NOT YET USED, which is the honest state of a skeleton: the `terminal`
-# feature is the design's decision about what that renderer will cost, recorded now so the
-# decision is reviewable before any code depends on it. Neither is referenced from `src/`, and
-# nothing here fakes a reference to quiet a lint — `unused_crate_dependencies` is allow-by-default
-# and stays that way until the renderer lands.
+# `anstyle` and `unicode-width` are DECLARED AND NOT YET USED, which is the honest state of a
+# crate whose resolution layer has landed and whose renderers have not: the `terminal` feature is
+# the design's decision about what that renderer will cost, recorded now so the decision is
+# reviewable before any code depends on it. Neither is referenced from `src/`, and nothing here
+# fakes a reference to quiet a lint — `unused_crate_dependencies` is allow-by-default and stays
+# that way until the renderer lands.
 #
 # Default features are left ON for both, on purpose. `unicode-width`'s default is `cjk`, and CJK
 # being two cells wide is the entire reason the dependency is taken; `anstyle`'s default is `std`,
 # which `terminal` already implies. Turning either off would produce a build that compiles and
 # renders wrongly.
+#
+# `tokora` is the opposite: `default-features = false` and no feature list at all. The adapter
+# reads `tokora::diagnostic`, which is `core` plus `SimpleSpan` and is not behind any feature, so
+# every one tokora ships would be graph painty made a consumer pay for. In particular NOT `std` —
+# painty's own `tokora` feature does not imply `std`, and enabling tokora's would silently take
+# that choice away from a `--no-default-features` build.
 [dependencies]
 anstyle = { version = "1", optional = true }
+tokora = { version = "0.9", default-features = false, optional = true }
 unicode-width = { version = "0.2", optional = true }
+
+# Named so the target is ABSENT rather than empty when the feature is off. `#![cfg(feature =
+# "tokora")]` inside the file would compile a target with nothing in it, which reads as a passing
+# test suite and proves nothing; `required-features` makes cargo skip building it at all. That is
+# the sharp half of the no-hard-binding claim — the adapter and everything that exercises it leave
+# the build together.
+[[test]]
+name = "tokora_adapter"
+required-features = ["tokora"]
 
 [package.metadata.docs.rs]
 all-features = true
