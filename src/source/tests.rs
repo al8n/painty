@@ -133,6 +133,34 @@ fn resolution_clamps_a_span_that_the_text_cannot_express() {
 }
 
 #[test]
+fn an_inverted_span_resolves_where_its_own_empty_span_would() {
+  // The regression. Repairing the inversion after clamping the start to an atom let the repaired
+  // end land BEFORE the requested start, so the character the span pointed into vanished. An
+  // inverted span asks a weaker question than the empty span at its start, and must never get a
+  // narrower answer than that one.
+  let emoji = Source::new("🎨");
+  let whole = emoji.resolve(Span::empty(3)).span();
+  assert_eq!(whole, Span::new(0, 4));
+  for inverted in [Span::new(3, 0), Span::new(3, 1), Span::new(3, 2)] {
+    assert_eq!(emoji.resolve(inverted).span(), whole, "{inverted:?}");
+    assert_eq!(emoji.resolve(inverted).text(), "🎨", "{inverted:?}");
+  }
+
+  // The same on the other atom, where the split is a character boundary and only the CRLF rule
+  // catches it.
+  let crlf = Source::new("a\r\nb");
+  assert_eq!(crlf.resolve(Span::empty(2)).span(), Span::new(1, 3));
+  assert_eq!(crlf.resolve(Span::new(2, 0)).span(), Span::new(1, 3));
+  assert_eq!(crlf.resolve(Span::new(2, 1)).span(), Span::new(1, 3));
+
+  // And the mirror: an inverted span whose END is mid-atom. The end is taken to the start, so the
+  // end's own position stops mattering — what is left is the empty span at the start.
+  assert_eq!(emoji.resolve(Span::new(4, 1)).span(), Span::empty(4));
+  assert_eq!(emoji.resolve(Span::new(0, 2)).span(), Span::new(0, 4));
+  assert_eq!(crlf.resolve(Span::new(3, 2)).span(), Span::empty(3));
+}
+
+#[test]
 fn a_span_covering_the_final_byte_of_a_source_with_no_trailing_break() {
   let source = Source::new("one\ntwo");
   let region = source.resolve(Span::new(6, 7));

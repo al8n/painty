@@ -39,8 +39,8 @@
 //! the `public-surface` job as "checked".
 //!
 //! Two things here are NOT early warnings and do decide, because they are compile-time and the
-//! compiler is the authority: [`pin_rule_1`] and its siblings, which refuse a signature or a
-//! returned borrow that has changed shape, and `tests/source_borrows.rs`.
+//! compiler is the authority: [`pin`], which refuses a signature, a rule or a returned borrow that
+//! has changed shape, and `tests/source_borrows.rs`.
 //!
 //! # Why these are assertions and not scenarios
 //!
@@ -51,15 +51,16 @@
 //!
 //! # The layers
 //!
-//! **Every signature, by function pointer.** [`pin_rule_1`] and its siblings ascribe the whole
-//! signature of every public member that mentions a primitive integer, and a binding only counts
-//! as a pin when its declared type really is a function pointer. A parameter's width is as frozen
-//! as a return's, and the receiver's borrow is elided rather than tied to the source lifetime.
+//! **Every signature, by function pointer.** [`pin`] ascribes the whole signature of every public
+//! member that mentions a primitive integer, and a binding only counts as a pin when its declared
+//! type really is a function pointer. A parameter's width is as frozen as a return's, and the
+//! receiver's borrow is elided rather than tied to the source lifetime.
 //!
-//! **Which rule placed it.** One function per rule, so the rule a member was placed under is a
-//! fact in the code rather than a comment beside it, and
-//! [`every_pin_carries_the_width_its_rule_gives_it`] checks the width against the rule. This is the
-//! only layer aimed at the residual that has actually occurred.
+//! **Which rule placed each number.** Every occurrence is spelled through its rule's alias in
+//! [`rule`], so the claim is single-valued per *number* rather than per member — a member does not
+//! have one rule, `Line::column_at` returns a rule 1 column and takes a rule 4 count — and the
+//! compiler checks it, because a transparent alias for the wrong rule is the wrong width. This is
+//! the only layer aimed at the residual that has actually occurred.
 //!
 //! **That the list is complete, and no longer than the surface** — early warning; the
 //! `public-surface` job decides.
@@ -77,9 +78,9 @@
 //!
 //! # What still gets through
 //!
-//! 1. **A member placed under a rule that shares its width.** Rules 1 and 2 both give `u64`, so
-//!    the check above cannot separate them; they differ in where the number came from, not in what
-//!    it is. Every other misplacement changes the width and fails. This is what is left of the
+//! 1. **A number placed under a rule that shares its width.** Rules 1 and 2 both give `u64`, so
+//!    naming either compiles; they differ in where the number came from, not in what it is. Every
+//!    other misplacement is now a type error at the occurrence itself. This is what is left of the
 //!    residual that had been uncaught entirely.
 //! 2. **The rule set itself being wrong.** No check can find a category nobody has thought of;
 //!    rule 4 exists because two members turned out to fit none of the first three.
@@ -173,19 +174,12 @@ struct Member {
   site: String,
 }
 
-/// One ascription, and the rule the function it lives in places it under.
+/// One ascription, and any primitive it spells directly instead of through its rule.
 #[derive(Debug, Clone)]
 struct Pin {
   path: String,
-  rule: u8,
-  widths: Vec<String>,
+  bare: Vec<String>,
 }
-
-/// The width each rule in `README.md` gives a member it places.
-///
-/// Rules 1 and 2 agree on `u64`, so this cannot tell those two apart — they differ in provenance
-/// and not in outcome. Every other confusion between rules changes the width, and therefore fails.
-const RULE_WIDTH: [(u8, &str); 4] = [(1, "u64"), (2, "u64"), (3, "u32"), (4, "usize")];
 
 /// Somewhere a rule or a discipline could be broken, named by the member that owns it.
 #[derive(Debug, Clone)]
@@ -595,7 +589,7 @@ fn surface() -> Surface {
 /// be a bare function pointer, and anything else is not a pin.
 fn ascribed() -> Vec<Pin> {
   #[derive(Default)]
-  struct Locals(Vec<(String, Vec<String>)>);
+  struct Locals(Vec<Pin>);
   impl<'ast> Visit<'ast> for Locals {
     fn visit_local(&mut self, node: &'ast syn::Local) {
       if let syn::Pat::Type(typed) = &node.pat
@@ -610,102 +604,105 @@ fn ascribed() -> Vec<Pin> {
           .map(|segment| segment.ident.to_string())
           .collect::<Vec<_>>()
           .join("::");
-        let mut widths = Integers::default();
-        widths.visit_type_bare_fn(signature);
-        self.0.push((joined, widths.0));
+        let mut bare = Integers::default();
+        bare.visit_type_bare_fn(signature);
+        self.0.push(Pin {
+          path: joined,
+          bare: bare.0,
+        });
       }
       visit::visit_local(self, node);
     }
   }
 
   let parsed = syn::parse_file(SELF).expect("this test file parses");
-  let mut found = Vec::new();
+  let mut locals = Locals::default();
   for item in &parsed.items {
     if let Item::Fn(function) = item
-      && let Some(rule) = function.sig.ident.to_string().strip_prefix("pin_rule_")
-      && let Ok(rule) = rule.parse::<u8>()
+      && function.sig.ident == "pin"
     {
-      let mut locals = Locals::default();
       locals.visit_item_fn(function);
-      found.extend(
-        locals
-          .0
-          .into_iter()
-          .map(|(path, widths)| Pin { path, rule, widths }),
-      );
     }
   }
-  found
+  locals.0
 }
 
-/// The whole public numeric surface, one ascription per member.
+/// The width each rule in `README.md#numeric-widths` gives a number it places.
+///
+/// # Why an alias per rule, and not a function per rule
+///
+/// The previous shape grouped pins into `pin_rule_1` … `pin_rule_4` and checked that the rule's
+/// width appeared *somewhere* in the signature. That is a presence test, and a mixed signature
+/// defeats it: `Line::column_at` returns a rule 1 column and takes a rule 4 byte offset, so its pin
+/// satisfied rule 1 and rule 4 equally and could have been filed under either.
+///
+/// A member does not have one rule. Each *number* does. Spelling each occurrence through its rule's
+/// alias makes the claim single-valued and hands the checking to the compiler: the aliases are
+/// transparent, so naming the wrong rule names the wrong width and the ascription stops compiling.
+/// Nothing here has to be trusted or re-derived.
+///
+/// Rules 1 and 2 are both `u64` and remain indistinguishable — they differ in where the number came
+/// from, not in what it is. That is now visible at each occurrence rather than hidden in a grouping.
+mod rule {
+  /// Rule 1 — a line or column in the resolved model.
+  pub type Ordinal = u64;
+  /// Rule 2 — an ordinal in data the producer built.
+  pub type DomainOrdinal = u64;
+  /// Rule 3 — a key into a structure painty does not own, at that contract's width.
+  pub type ForeignKey = u32;
+  /// Rule 4 — an index or a count of things in memory.
+  pub type Count = usize;
+}
+
+/// The whole public numeric surface, one ascription per member, every number spelled by its rule.
 ///
 /// # Why a function pointer
 ///
 /// It fixes the parameters and the return in one line and cannot be written while forgetting an
-/// argument. A parameter's width is as frozen as a return's: `Span::new` taking `usize` is a
+/// argument. A parameter's width is as frozen as a return's: `Span::new` taking a count is a
 /// promise to every caller who has already written one.
 ///
-/// # Why the receiver's borrow is `for<'s>` and not `'a`
+/// # Why the receiver's borrow is elided
 ///
 /// This is subtler than it looks, and getting it wrong left a real hole. Writing
-/// `fn(&'a Source<'a>, u64) -> Option<Line<'a>>` looks stricter than it is: it lets the receiver
+/// `fn(&'a Source<'a>, …) -> Option<Line<'a>>` looks stricter than it is: it lets the receiver
 /// borrow *absorb* the source lifetime, so a regression to `-> Option<Line<'_>>` — returning a line
-/// tied to the temporary `&self` borrow instead of to the text — instantiates `'s := 'a` and
-/// satisfies the pin. Verified by planting exactly that and watching the old form accept it.
-///
-/// The receiver is therefore written `&Source<'a>`, with the borrow **elided**. An elided lifetime in
-/// a function-pointer type is higher-ranked, so this reads "for every receiver borrow, returning
-/// `'a`" — which the regression cannot satisfy. Writing `&'a Source<'a>` here looks stricter and is
-/// the hole; the fully higher-ranked `for<'a, 's>` is the opposite error, more general than the
-/// method and refused outright. Verified by planting the regression against all three.
-///
-/// The crate denies `single_use_lifetimes`, so the explicit `for<'s>` spelling is not available
-/// anyway — which is one reason `tests/source_borrows.rs` asserts the same property from the other
-/// side, by keeping the returned value alive after the `Source` is gone. That check does not
-/// depend on anybody getting a function-pointer type right.
-///
-/// The witness gives `'a` somewhere to come from; a lifetime used only inside the body would read
-/// to clippy as an unused one.
-fn pin_rule_1<'a>(_witness: &'a ()) {
-  let _: fn(&Position) -> u64 = Position::line;
-  let _: fn(&Position) -> u64 = Position::column;
-  let _: fn(&Line<'a>) -> u64 = Line::number;
-  let _: fn(&Line<'a>) -> u64 = Line::char_count;
-  let _: fn(&Line<'a>, usize) -> u64 = Line::column_at;
-  let _: fn(&Source<'a>) -> u64 = Source::line_count;
-  let _: fn(&Source<'a>, u64) -> Option<Line<'a>> = Source::line;
-  let _: fn(&Region<'a>) -> u64 = Region::line_count;
-  let _: fn(&RegionLine<'a>) -> core::ops::Range<u64> = RegionLine::columns;
-}
+/// tied to the temporary `&self` borrow instead of to the text — satisfies the pin. An elided
+/// lifetime in a function-pointer type is higher-ranked, which is what the regression cannot
+/// satisfy; `for<'a, 's>` is the opposite error and is refused outright. Verified by planting the
+/// regression against all three. `tests/source_borrows.rs` asserts the same property from the side
+/// a caller feels, and does not depend on anybody getting a function-pointer type right.
+fn pin<'a>(_witness: &'a ()) {
+  use rule::{Count, DomainOrdinal, ForeignKey, Ordinal};
 
-/// Rule 2 — an ordinal in data the producer built. Width: `u64`.
-fn pin_rule_2<'a>(_witness: &'a ()) {
-  let _: fn(u64) -> PathSegment<'a> = PathSegment::Index;
-}
+  let _: fn(&Position) -> Ordinal = Position::line;
+  let _: fn(&Position) -> Ordinal = Position::column;
+  let _: fn(&Line<'a>) -> Ordinal = Line::number;
+  let _: fn(&Line<'a>) -> Ordinal = Line::char_count;
+  let _: fn(&Line<'a>, Count) -> Ordinal = Line::column_at;
+  let _: fn(&Source<'a>) -> Ordinal = Source::line_count;
+  let _: fn(&Source<'a>, Ordinal) -> Option<Line<'a>> = Source::line;
+  let _: fn(&Region<'a>) -> Ordinal = Region::line_count;
+  let _: fn(&RegionLine<'a>) -> core::ops::Range<Ordinal> = RegionLine::columns;
 
-/// Rule 3 — a key into a structure painty does not own. Width: the contract's, which is `u32`.
-/// No witness: rule 3's members are `Location` and `Span`, neither of which carries a lifetime,
-/// so there is nothing for one to instantiate.
-fn pin_rule_3() {
-  let _: fn(u32, Span) -> Location = Location::new;
-  let _: fn(u32) -> Location = Location::entire;
-  let _: fn(&Location) -> u32 = Location::source;
-}
+  let _: fn(DomainOrdinal) -> PathSegment<'a> = PathSegment::Index;
 
-/// Rule 4 — anything else: an index or a count of things in memory. Width: `usize`.
-fn pin_rule_4<'a>(_witness: &'a ()) {
-  let _: fn(usize, usize) -> Span = Span::new;
-  let _: fn(usize) -> Span = Span::empty;
-  let _: fn(&Span) -> usize = Span::start;
-  let _: fn(&Span) -> usize = Span::end;
-  let _: fn(&Span) -> usize = Span::len;
-  let _: fn(&Span, usize) -> bool = Span::contains;
-  let _: fn(&Position) -> usize = Position::offset;
-  let _: fn(&LineBreak) -> usize = LineBreak::byte_len;
-  let _: fn(&Source<'a>) -> usize = Source::len;
-  let _: fn(&Source<'a>, usize) -> Line<'a> = Source::line_at;
-  let _: fn(&Source<'a>, usize) -> Position = Source::position;
+  let _: fn(ForeignKey, Span) -> Location = Location::new;
+  let _: fn(ForeignKey) -> Location = Location::entire;
+  let _: fn(&Location) -> ForeignKey = Location::source;
+
+  let _: fn(Count, Count) -> Span = Span::new;
+  let _: fn(Count) -> Span = Span::empty;
+  let _: fn(&Span) -> Count = Span::start;
+  let _: fn(&Span) -> Count = Span::end;
+  let _: fn(&Span) -> Count = Span::len;
+  let _: fn(&Span, Count) -> bool = Span::contains;
+  let _: fn(&Position) -> Count = Position::offset;
+  let _: fn(&LineBreak) -> Count = LineBreak::byte_len;
+  let _: fn(&Source<'a>) -> Count = Source::len;
+  let _: fn(&Source<'a>, Count) -> Line<'a> = Source::line_at;
+  let _: fn(&Source<'a>, Count) -> Position = Source::position;
+
   // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and
   // buying that exactness meant walking a caller's `Diagnose` impl to exhaustion, so they are
   // booleans now and leave the width rule entirely.
@@ -754,10 +751,7 @@ fn the_file_list_is_the_whole_crate() {
 
 #[test]
 fn every_public_numeric_member_is_pinned() {
-  pin_rule_1(&());
-  pin_rule_2(&());
-  pin_rule_3();
-  pin_rule_4(&());
+  pin(&());
 
   let ascribed: Vec<String> = ascribed().into_iter().map(|pin| pin.path).collect();
   let missing: Vec<_> = surface()
@@ -840,58 +834,32 @@ fn u32_appears_only_where_a_foreign_key_round_trips() {
 }
 
 #[test]
-fn every_pin_carries_the_width_its_rule_gives_it() {
-  // The residual at the top of this file's list is a member placed under the WRONG rule, and it is
-  // the only residual that has ever occurred — twice. Nothing above touches it, because everything
-  // above asks whether a member is pinned and never which rule pinned it.
+fn every_number_in_a_pin_names_the_rule_that_placed_it() {
+  // The residual at the top of this file's list is a number placed under the wrong rule, and it is
+  // the only residual that has ever occurred — twice.
   //
-  // Splitting `pin` into one function per rule makes the answer a fact in the code rather than a
-  // comment beside it, and then half the question is mechanical: rule 1 and 2 mean `u64`, rule 3
-  // means `u32`, rule 4 means `usize`, so a member placed under a rule whose width it does not
-  // carry is a contradiction the test can see. Rules 1 and 2 share a width and so cannot be told
-  // apart here; they differ in where the number came from, not in what it is.
+  // It used to be checked by grouping pins into a function per rule and asking whether the rule's
+  // width appeared in the signature. That was a presence test and a mixed signature defeated it:
+  // `Line::column_at` returns a rule 1 column and takes a rule 4 count, so its pin satisfied both
+  // and rule 1 against rule 4 was passable on the real surface.
   //
-  // A signature may carry a second width legitimately — `Line::column_at` returns a rule 1 column
-  // and takes a rule 4 byte offset — so the requirement is that the rule's own width is PRESENT,
-  // not that it is the only one. What no width may be is one no rule licenses at all.
-  let licensed: Vec<&str> = RULE_WIDTH.iter().map(|(_, width)| *width).collect();
-  let mut wrong = Vec::new();
-  let mut unlicensed = Vec::new();
-
-  for pin in ascribed() {
-    let want = RULE_WIDTH
-      .iter()
-      .find(|(rule, _)| *rule == pin.rule)
-      .map(|(_, width)| *width)
-      .unwrap_or_else(|| {
-        panic!(
-          "`pin_rule_{}` names a rule README.md does not have",
-          pin.rule
-        )
-      });
-    if !pin.widths.iter().any(|width| width == want) {
-      wrong.push(format!(
-        "{} is pinned under rule {} but carries no `{want}` — it carries {:?}",
-        pin.path, pin.rule, pin.widths
-      ));
-    }
-    for width in &pin.widths {
-      if !licensed.contains(&width.as_str()) {
-        unlicensed.push(format!("{}: `{width}` is a width no rule gives", pin.path));
-      }
-    }
-  }
+  // The claim is now per NUMBER, not per member, and the compiler checks it: each occurrence is
+  // spelled through its rule's alias, and because the aliases are transparent, naming the wrong
+  // rule names the wrong width and the ascription does not build. All that is left for this test
+  // is to refuse the escape hatch — a pin that spells a primitive directly says nothing about which
+  // rule placed it.
+  let bare: Vec<_> = ascribed()
+    .into_iter()
+    .filter(|pin| !pin.bare.is_empty())
+    .map(|pin| format!("{} spells {:?} directly", pin.path, pin.bare))
+    .collect();
 
   assert!(
-    wrong.is_empty(),
-    "a member is placed under a rule whose width it does not have. Either the rule is wrong or the \
-     width is; README.md#numeric-widths decides which:\n{}",
-    wrong.join("\n")
-  );
-  assert!(
-    unlicensed.is_empty(),
-    "a width appears that none of the four rules yields:\n{}",
-    unlicensed.join("\n")
+    bare.is_empty(),
+    "a pin names a primitive instead of the rule that placed it, so nothing records which rule \
+     that is. Use `rule::Ordinal`, `rule::DomainOrdinal`, `rule::ForeignKey` or `rule::Count` — \
+     README.md#numeric-widths decides which:\n{}",
+    bare.join("\n")
   );
 }
 

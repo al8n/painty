@@ -448,6 +448,14 @@ jobs:
             echo "::error::rustdoc exited 0 and wrote no JSON, so the check below would read nothing"
             exit 1
           fi
+      # FIRST, because the check below is only as good as the traversal underneath it. A review
+      # found containers skipped, so const generics, type-parameter defaults, supertraits and where
+      # clauses were invisible — and the old non-empty guard could not see it, since every other
+      # member was still found. This runs the walk over real rustdoc output from a scratch crate
+      # holding one of each position and names them, so losing a category is a failure rather than
+      # a smaller number.
+      - name: The traversal still reaches every position a width can occupy
+        run: python3 ci/public_numeric_surface.py --self-test
       - name: The public numeric surface is the one that was decided
         run: python3 ci/public_numeric_surface.py "${CARGO_TARGET_DIR:-target}/doc/painty.json"
 
