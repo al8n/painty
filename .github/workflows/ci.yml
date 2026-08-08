@@ -142,12 +142,13 @@ jobs:
   # than left to a comment. Both read `cargo metadata`, so neither builds anything and the job
   # finishes in seconds.
   #
-  # THE FEATURE SET. The design fixes it exactly — three independently selectable outputs over a
-  # dependency-free core — and a rendering surface is easy to grow by accident. Pinning it means
-  # adding, renaming or re-wiring a feature fails here until the design and the gate move
-  # together. It is also what keeps the `no-std` job's four literal legs complete: that job names
-  # the std-free feature points one per step, and a fifth one appearing without a leg would
-  # otherwise be covered by nothing.
+  # THE FEATURE SET. The design fixes it exactly — three independently selectable outputs and one
+  # optional input adapter, over a dependency-free core — and a rendering surface is easy to grow
+  # by accident. Pinning it means adding, renaming or re-wiring a feature fails here until the
+  # design and the gate move together. It is also what keeps the `no-std` job's literal legs
+  # complete: that job names the std-free feature points one per step, and a new one appearing
+  # without a leg would otherwise be covered by nothing. The same goes for the `no-tokora` job,
+  # whose "every configuration except the adapter's" list is a literal for the same reason.
   #
   # THE PACKAGE COUNT. `cross`, `msrv`, `no-std`, `publish-dry-run`, both Miri scripts and the
   # sanitizer script all name `-p painty`. That is only as good as the claim that `painty` is the
@@ -164,7 +165,7 @@ jobs:
       - name: The declared feature set is the one the design fixed
         run: |
           set -euo pipefail
-          WANT='{"default": [], "html": [], "model": [], "std": [], "terminal": ["dep:anstyle", "dep:unicode-width", "std"]}'
+          WANT='{"default": [], "html": [], "model": [], "std": [], "terminal": ["dep:anstyle", "dep:unicode-width", "std"], "tokora": ["dep:tokora"]}'
           GOT="$(cargo metadata --no-deps --format-version 1 \
             | python3 -c 'import json,sys; p=[x for x in json.load(sys.stdin)["packages"] if x["name"]=="painty"][0]; print(json.dumps({k: sorted(v) for k, v in p["features"].items()}, sort_keys=True))')"
           echo "declared: $GOT"
@@ -172,7 +173,7 @@ jobs:
             echo "::error::painty's feature set has changed."
             echo "::error::want: $WANT"
             echo "::error::got:  $GOT"
-            echo "::error::the design fixes this set; update it there, then update this step, then check that the no-std job still names every std-free feature point"
+            echo "::error::the design fixes this set; update it there, then update this step, then check that the no-std and no-tokora jobs still name every feature point"
             exit 1
           fi
       - name: painty is still the only publishable package
@@ -358,6 +359,12 @@ jobs:
   # library by construction and could only ever be red here. The `manifest` job is what keeps this
   # list complete — it pins the feature set, so a new std-free feature cannot appear without
   # reddening there first and sending whoever added it back to this job.
+  #
+  # `tokora` IS a std-free feature point and is here for that reason, which is not an accident of
+  # the dependency: painty takes it with `default-features = false`, so tokora's own `std` stays
+  # off and its diagnostic contract — `core` plus a span type — is all that has to reach a
+  # bare-metal target. Taking tokora's default features would put `std` back and quietly delete
+  # four of these legs' meaning while every one of them still passed on the host.
   no-std:
     name: no-std (thumbv6m)
     runs-on: ubuntu-latest
@@ -385,13 +392,93 @@ jobs:
         run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features model
       - name: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html,model
         run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html,model
+      - name: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features tokora
+        run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features tokora
+      - name: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html,tokora
+        run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html,tokora
+      - name: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features model,tokora
+        run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features model,tokora
+      - name: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html,model,tokora
+        run: cargo check -p painty --target thumbv6m-none-eabi --no-default-features --features html,model,tokora
       # Compile-only reaches only the crate. These two run the no-std tiers on the host, where the
       # harness may link `std` but the crate paths under test do not — which is where a `Vec` or a
       # `format!` that slipped into a test, rather than into the library, actually shows up.
       - name: cargo test -p painty --no-default-features
         run: cargo test -p painty --no-default-features
-      - name: cargo test -p painty --no-default-features --features html,model
-        run: cargo test -p painty --no-default-features --features html,model
+      - name: cargo test -p painty --no-default-features --features html,model,tokora
+        run: cargo test -p painty --no-default-features --features html,model,tokora
+
+  # ── Gate: tokora is optional, and the graph says so ─────────────────────────
+  #
+  # painty's central design claim is that a project with its own error type can render a
+  # diagnostic without adopting a parser-combinator library. That claim is easy to make and easy
+  # to lose: a default feature set hides a mandatory dependency behind a habit, and an adapter that
+  # everything ends up going through becomes load-bearing without anyone deciding it should.
+  #
+  # So the claim is checked in the two places it can break, and neither is prose.
+  #
+  # THE GRAPH. `cargo tree` over every configuration that does not name the feature. Not
+  # `cargo check`, which would pass just as happily with tokora linked in: the question is whether
+  # the dependency is *there*, and only the graph answers it.
+  #
+  # THE SUITES. `tests/graphql_error_locations.rs` and `tests/lsp_diagnostic.rs` are written
+  # against a hand-rolled local error type and run in a build with no dependency graph at all. If
+  # painty ever needs a foreign trait to be useful, they stop compiling — which is the failure this
+  # job exists to produce, rather than a green tick over a crate nobody can use alone.
+  #
+  # The list of configurations is a LITERAL, kept complete by the `manifest` job pinning the
+  # feature set. A derived list would silently shrink to nothing the day the derivation broke, and
+  # a loop that checks zero configurations exits 0.
+  no-tokora:
+    name: no-tokora
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install Rust
+        run: rustup update stable --no-self-update && rustup default stable
+      - name: No configuration but the adapter's has tokora in its graph
+        run: |
+          set -euo pipefail
+          failed=0
+          for features in '' 'std' 'html' 'model' 'terminal' 'std,html,model' 'std,terminal,html,model'; do
+            tree="$(cargo tree -p painty --no-default-features --features "$features" --edges normal --prefix none)"
+            printf '%s\n' "--- features: '${features:-<none>}'" "$tree"
+            if printf '%s' "$tree" | grep -q '^tokora '; then
+              echo "::error::tokora is in painty's dependency graph with features '${features:-<none>}'"
+              failed=1
+            fi
+          done
+          if [ "$failed" -ne 0 ]; then
+            exit 1
+          fi
+          echo "ok: tokora appears only when the tokora feature is named"
+      # The converse. Without it the loop above would keep passing if `cargo tree`'s output format
+      # changed, or if the grep were quietly matching nothing on every line — a gate that cannot
+      # fail is not a gate, and this is the cheapest way to show that this one can.
+      - name: ...and it IS there when the feature is named
+        run: |
+          set -euo pipefail
+          tree="$(cargo tree -p painty --no-default-features --features tokora --edges normal --prefix none)"
+          printf '%s\n' "$tree"
+          if ! printf '%s' "$tree" | grep -q '^tokora '; then
+            echo "::error::the tokora feature is on and tokora is not in the graph; the check above is matching nothing and proves nothing"
+            exit 1
+          fi
+      - name: The default configuration has no dependencies at all
+        run: |
+          set -euo pipefail
+          deps="$(cargo tree -p painty --no-default-features --edges normal --prefix none | tail -n +2)"
+          if [ -n "$deps" ]; then
+            echo "::error::painty's primary configuration is meant to be dependency-free, and it now has:"
+            printf '%s\n' "$deps"
+            exit 1
+          fi
+          echo "ok: the primary configuration is dependency-free"
+      # The adapter's target is named with `required-features` in Cargo.toml, so cargo does not
+      # build it here at all. Compiling and running the consumer suites in this configuration is
+      # what turns "painty does not hard-bind to tokora" from a claim into something exercised.
+      - name: The consumer suites pass with no dependency graph
+        run: cargo test -p painty --no-default-features
 
   # ── Gate: it builds for the targets consumers actually ship to ──────────────
   cross:
