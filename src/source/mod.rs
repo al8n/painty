@@ -14,30 +14,38 @@ use crate::Span;
 #[cfg(test)]
 mod tests;
 
-/// Narrows a count to the width line and column numbers are reported in.
-///
-/// Saturating rather than wrapping: a source with more than `u32::MAX` lines cannot be built out
-/// of a `&str` on any machine that exists, and a number that stops climbing is a defect a reader
-/// can see, where one that wraps to zero is not.
-#[inline]
-pub(crate) fn saturating_u32(value: usize) -> u32 {
-  if value > u32::MAX as usize {
-    u32::MAX
-  } else {
-    value as u32
-  }
-}
-
 /// A byte offset with the line and column it lands on.
 ///
 /// Columns count **characters**, from 1. Not bytes, which no reader can see, and not display
 /// cells, which need a Unicode width table and a medium to be a width *of* — the renderer that has
 /// one converts, and that is what keeps this layer dependency-free.
+///
+/// # Two units, and the rule for telling them apart
+///
+/// A **byte offset** is a `usize`, because it is an index into the caller's `&str` and that is
+/// what Rust slices with. It is exact: the widening to `u64` an FFI export needs is lossless from
+/// every `usize` Rust has.
+///
+/// A **line or column ordinal** is a `u64`, and neither `u32` nor `usize`.
+///
+/// - Not `u32`. A position type is the one thing every renderer and every FFI consumer touches, so
+///   its width is unchangeable once published, and `u32` is a bet that no source has more than
+///   4,294,967,295 lines. The bet would very probably be won. It is still the wrong shape to
+///   publish, because losing it means either wrapping or clamping, and a clamped ordinal is
+///   indistinguishable from a real one — a value that *lies* rather than one that fails.
+/// - Not `usize`, because it is platform-dependent, and the resolved model is meant to cross a C
+///   ABI unchanged.
+///
+/// `u64` is what makes the whole question disappear rather than move. A line ordinal is at most
+/// one more than the text's length in bytes, Rust caps a single object at `isize::MAX`, so on the
+/// widest target this crate can be built for an ordinal cannot exceed 2^63. There is no clamping
+/// anywhere on this path and no arithmetic here can overflow — which `tests/exact_positions.rs`
+/// asserts against the source rather than leaving to this paragraph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct Position {
   offset: usize,
-  line: u32,
-  column: u32,
+  line: u64,
+  column: u64,
 }
 
 impl Position {
@@ -49,13 +57,13 @@ impl Position {
 
   /// Returns the 1-based line number.
   #[inline]
-  pub const fn line(&self) -> u32 {
+  pub const fn line(&self) -> u64 {
     self.line
   }
 
   /// Returns the 1-based character column.
   #[inline]
-  pub const fn column(&self) -> u32 {
+  pub const fn column(&self) -> u64 {
     self.column
   }
 }
@@ -64,7 +72,7 @@ impl Position {
 #[derive(Debug, Clone, Copy)]
 struct Cursor {
   offset: usize,
-  line: u32,
+  line: u64,
   line_start: usize,
 }
 
@@ -80,6 +88,11 @@ impl Cursor {
 ///
 /// `target` must be at or after `cursor.offset`; the walk is forward-only, which is the whole
 /// reason resolving in offset order costs one pass rather than one pass per offset.
+///
+/// The line counter is incremented rather than saturated, and that is the point: it is a `u64`
+/// bounded by the length of a `&str`, so it cannot reach its maximum, and if that reasoning were
+/// ever wrong a debug build would panic here instead of handing back a number that quietly stopped
+/// being true.
 fn advance(bytes: &[u8], mut cursor: Cursor, target: usize) -> Cursor {
   let mut index = cursor.offset;
   while index < target {
@@ -94,7 +107,7 @@ fn advance(bytes: &[u8], mut cursor: Cursor, target: usize) -> Cursor {
           break;
         }
         index = after;
-        cursor.line = cursor.line.saturating_add(1);
+        cursor.line += 1;
         cursor.line_start = index;
       }
       None => index += 1,
@@ -196,16 +209,20 @@ impl<'a> Source<'a> {
   ///
   /// Linear in the length of the text. A caller that is about to walk the lines anyway should walk
   /// them instead of counting first.
+  ///
+  /// Read off the last line's own number rather than counted with [`Iterator::count`], which would
+  /// answer a `usize` and need a cast to become the ordinal this reports. There is always a last
+  /// line — see [`Lines`].
   #[inline]
-  pub fn line_count(&self) -> u32 {
-    saturating_u32(self.lines().count())
+  pub fn line_count(&self) -> u64 {
+    self.lines().last().map_or(1, |line| line.number())
   }
 
   /// Returns line `number`, counting from 1, or `None` past the end.
   ///
   /// Linear in the offset of that line.
   #[inline]
-  pub fn line(&self, number: u32) -> Option<Line<'a>> {
+  pub fn line(&self, number: u64) -> Option<Line<'a>> {
     self.lines().find(|line| line.number() == number)
   }
 
@@ -302,7 +319,11 @@ impl<'a> Source<'a> {
     // content rather than at a column past the line's own width.
     let segment = &self.text[cursor.line_start..offset];
     let visible = segment.find(['\r', '\n']).unwrap_or(segment.len());
-    let column = saturating_u32(segment[..visible].chars().count().saturating_add(1));
+    // Counted as an ordinal from the start rather than converted from a `usize` count, so there is
+    // no cast on the path a position is built by.
+    let column = segment[..visible]
+      .chars()
+      .fold(1u64, |column, _| column + 1);
     (
       Position {
         offset,

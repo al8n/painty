@@ -2,7 +2,7 @@ use super::{LineBreak, Source};
 use crate::Span;
 
 /// The line's number, its text, and what ended it.
-fn shape(line: crate::Line<'_>) -> (u32, &str, Option<LineBreak>) {
+fn shape(line: crate::Line<'_>) -> (u64, &str, Option<LineBreak>) {
   (line.number(), line.text(), line.line_break())
 }
 

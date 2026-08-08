@@ -14,7 +14,7 @@ pub struct Region<'a> {
   start: Position,
   end: Position,
   first_line_start: usize,
-  last_line: u32,
+  last_line: u64,
 }
 
 impl<'a> Region<'a> {
@@ -24,7 +24,7 @@ impl<'a> Region<'a> {
     start: Position,
     end: Position,
     first_line_start: usize,
-    last_line: u32,
+    last_line: u64,
   ) -> Self {
     Self {
       source,
@@ -78,7 +78,7 @@ impl<'a> Region<'a> {
 
   /// Returns how many lines [`lines`](Self::lines) will yield.
   #[inline]
-  pub const fn line_count(&self) -> u32 {
+  pub const fn line_count(&self) -> u64 {
     self.last_line - self.start.line() + 1
   }
 
@@ -102,7 +102,7 @@ impl<'a> Region<'a> {
   /// assert_eq!(region.end().line(), 3);
   /// assert_eq!(region.end().column(), 1);
   ///
-  /// let drawn: Vec<u32> = region.lines().map(|line| line.line().number()).collect();
+  /// let drawn: Vec<u64> = region.lines().map(|line| line.line().number()).collect();
   /// assert_eq!(drawn, [1, 2]);
   /// assert_eq!(region.line_count(), 2);
   /// ```
@@ -152,7 +152,7 @@ impl<'a> RegionLine<'a> {
   /// Half-open like the byte range, so an empty region gives an empty column range and a renderer
   /// drawing a caret there knows to draw one cell rather than none.
   #[inline]
-  pub fn columns(&self) -> core::ops::Range<u32> {
+  pub fn columns(&self) -> core::ops::Range<u64> {
     self.line.column_at(self.covered.start())..self.line.column_at(self.covered.end())
   }
 }
@@ -162,7 +162,7 @@ impl<'a> RegionLine<'a> {
 pub struct RegionLines<'a> {
   lines: Lines<'a>,
   span: Span,
-  remaining: u32,
+  remaining: u64,
 }
 
 impl<'a> Iterator for RegionLines<'a> {
@@ -190,10 +190,18 @@ impl<'a> Iterator for RegionLines<'a> {
 
   /// Exact, and safely so: the count is [`Region::line_count`], which painty computed from the
   /// source itself rather than taking it from a caller.
+  ///
+  /// A line ordinal is a `u64` and this hint is a `usize`, so this is the one place the two units
+  /// meet. `try_from` rather than `as`: a count that would not fit answers "unknown" instead of a
+  /// wrong number, and a wrong LOWER bound is not a permissible approximation — `Vec`'s `Extend`
+  /// reserves from it. Unreachable in fact, since the lines being counted are in memory and their
+  /// count therefore fits a `usize` by construction.
   #[inline]
   fn size_hint(&self) -> (usize, Option<usize>) {
-    let remaining = self.remaining as usize;
-    (remaining, Some(remaining))
+    match usize::try_from(self.remaining) {
+      Ok(remaining) => (remaining, Some(remaining)),
+      Err(_) => (0, None),
+    }
   }
 }
 

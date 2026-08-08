@@ -1,6 +1,5 @@
 use core::iter::FusedIterator;
 
-use super::saturating_u32;
 use crate::Span;
 
 /// What ends a line.
@@ -58,7 +57,7 @@ pub(super) fn break_at(bytes: &[u8], index: usize) -> Option<LineBreak> {
 }
 
 /// Reads the line that begins at `start`, which must be a line start.
-pub(super) fn scan(source: &str, start: usize, number: u32) -> Line<'_> {
+pub(super) fn scan(source: &str, start: usize, number: u64) -> Line<'_> {
   let bytes = source.as_bytes();
   let mut index = start;
   let line_break = loop {
@@ -84,7 +83,7 @@ pub(super) fn scan(source: &str, start: usize, number: u32) -> Line<'_> {
 /// input was CRLF can ask.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct Line<'a> {
-  number: u32,
+  number: u64,
   start: usize,
   text: &'a str,
   line_break: Option<LineBreak>,
@@ -93,7 +92,7 @@ pub struct Line<'a> {
 impl<'a> Line<'a> {
   /// Returns the 1-based line number.
   #[inline]
-  pub const fn number(&self) -> u32 {
+  pub const fn number(&self) -> u64 {
     self.number
   }
 
@@ -122,8 +121,8 @@ impl<'a> Line<'a> {
   /// terminal. Keeping display width out of resolution is what keeps this layer free of a Unicode
   /// table — the conversion belongs to the renderer that has a medium to convert for.
   #[inline]
-  pub fn char_count(&self) -> u32 {
-    saturating_u32(self.text.chars().count())
+  pub fn char_count(&self) -> u64 {
+    self.text.chars().fold(0u64, |count, _| count + 1)
   }
 
   /// Returns the 1-based character column of `offset` on this line.
@@ -144,12 +143,17 @@ impl<'a> Line<'a> {
   /// assert_eq!(line.column_at(3), 3);
   /// assert_eq!(line.column_at(99), 6); // one past the last of five characters
   /// ```
-  pub fn column_at(&self, offset: usize) -> u32 {
-    let mut relative = offset.saturating_sub(self.start).min(self.text.len());
+  pub fn column_at(&self, offset: usize) -> u64 {
+    // Clamped into the line first, then measured from its start. Spelled with `max`/`min` rather
+    // than a saturating subtraction so that nothing on the path a column is built by is a
+    // saturating operation — see `tests/exact_positions.rs`, which asserts exactly that.
+    let mut relative = offset.clamp(self.start, self.start + self.text.len()) - self.start;
     while !self.text.is_char_boundary(relative) {
       relative -= 1;
     }
-    saturating_u32(self.text[..relative].chars().count().saturating_add(1))
+    self.text[..relative]
+      .chars()
+      .fold(1u64, |column, _| column + 1)
   }
 }
 
@@ -165,7 +169,7 @@ impl<'a> Line<'a> {
 pub struct Lines<'a> {
   source: &'a str,
   next: usize,
-  number: u32,
+  number: u64,
   done: bool,
 }
 
@@ -182,7 +186,7 @@ impl<'a> Lines<'a> {
 
   /// Resumes the walk at `start`, which must be the first byte of line `number`.
   #[inline]
-  pub(super) const fn resume(source: &'a str, start: usize, number: u32) -> Self {
+  pub(super) const fn resume(source: &'a str, start: usize, number: u64) -> Self {
     Self {
       source,
       next: start,
@@ -204,7 +208,7 @@ impl<'a> Iterator for Lines<'a> {
     match line.line_break {
       Some(line_break) => {
         self.next = line.span().end() + line_break.byte_len();
-        self.number = self.number.saturating_add(1);
+        self.number += 1;
       }
       None => self.done = true,
     }
