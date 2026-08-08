@@ -19,25 +19,69 @@ Renders a diagnostic and its source text to a terminal, to HTML, or to an export
 
 ## Status
 
-**Skeleton — there is no renderer yet.** This repository currently carries the crate's identity,
-its feature surface and its CI gates, and nothing else. That order is deliberate: the gates go in
-while an empty crate cannot make them fail, so the first line of rendering code is measured
-against something rather than retrofitted with a set of checks chosen to suit it.
+**Layer 2 only — there is no renderer yet.** Resolution has landed: a diagnostic and the source
+text it points into go in, and lines, character columns, excerpts and the lines a multi-line span
+is drawn on come out. The terminal, HTML and model outputs are declared as features and are not
+written.
 
 Nothing here is published to crates.io.
 
 ## Overview
 
-A diagnostic contract is worth more when it does not know how it will be displayed. Producers —
+A diagnostic is worth more when it does not know how it will be displayed. Producers —
 [smear](https://github.com/al8n/smear), [pql](https://github.com/al8n/pql), and
 [tokora](https://github.com/al8n/tokora)'s coming SQL, Yul and Solidity frontends — describe what
-went wrong through a borrowing, allocation-free, `no_std`-reachable trait that mentions no colours,
-no terminal and no markup. `painty` is the other half of that split: give it such a value and the
-source text it points into, and it produces something a human, a browser or a native UI can read.
+went wrong as structure: a code, a severity, positions, labels, a help line. `painty` is the other
+half of that split: give it such a description and the text it points into, and it produces
+something a human, a browser or a native UI can read.
 
 Existing renderers do not fit that shape. `miette` and `ariadne` both require `std`, both own their
-strings, and both bake a rendering strategy into the error type — which is the coupling the
-contract exists to avoid.
+strings, and both bake a rendering strategy into the error type — which is the coupling worth
+avoiding in the first place.
+
+```rust
+use painty::{Diagnostic, Label, Location, Severity, Source, Span};
+
+let text = "type Widget {\n  width: Int\n  width: Int\n}\n";
+let source = Source::new(text);
+
+let message = format_args!("`{}` is defined twice", "width");
+let labels = [Label::new(Location::new(0, Span::new(16, 21)), "first defined here")];
+
+let diagnostic = Diagnostic::new(
+  "mylang::schema::duplicate-field",
+  Severity::Error,
+  &message,
+  Location::new(0, Span::new(29, 34)),
+)
+.with_labels(&labels)
+.with_help("rename one of the two definitions");
+
+let region = source.resolve(diagnostic.primary().span().unwrap());
+assert_eq!(region.text(), "width");
+assert_eq!((region.start().line(), region.start().column()), (3, 3));
+```
+
+## The seam is data, not a trait
+
+`painty` takes a `Diagnostic`, a borrowed view it defines itself over nothing but `core`. It does
+not ask a caller to implement a trait, and it does not require a diagnostic contract from any
+particular crate.
+
+That is the point rather than an omission. A renderer must not force a GraphQL library on a project
+that wanted an underline drawn — and the same argument does not stop at GraphQL. A Rust project
+with its own error type should not have to adopt a parser-combinator library either. So the
+`tokora` feature is an *adapter*, one small module of conversions, and the crate is useful with
+nothing enabled at all.
+
+The alternative — declaring a trait here and blanket-implementing it for tokora's — is rejected
+deliberately. Two structurally identical traits maintained in two repositories drift, and a trait
+that has fallen behind its twin keeps compiling. A conversion function does not.
+
+The claim is checked rather than stated: the consumer suites in `tests/` are written against a
+hand-rolled local error type, they run in a build whose dependency graph is empty, and the
+`no-tokora` CI job reads `cargo tree` over every other configuration to prove the dependency is not
+quietly there.
 
 ## Three layers
 
@@ -48,35 +92,41 @@ boundary, in another language — it cannot consume a string, it needs the struc
 becomes a public layer of its own rather than an implementation detail of the text renderers:
 
 ```text
-Layer 1 — the contract        the diagnostic trait, in tokora
-                              zero-allocation, no_std, no dependencies
+Layer 1 — the description     a Diagnostic: code, severity, primary position, labels,
+                              result path, help. Borrowed data, no trait, no dependency.
 
-Layer 2 — resolution          byte offset -> (line, column); excerpt extraction; grouping
-                              labels by line; ordering; elision; overlap resolution
+Layer 2 — resolution          byte offset -> (line, column); excerpt extraction; ordering;
+                              the lines a region is drawn on
                               borrows from the source, still allocation-free
-                              THE PUBLIC DATA MODEL
+                              THE PUBLIC DATA MODEL — landed
 
 Layer 3 — outputs             terminal (ANSI) - HTML - model export for native UIs
+                              declared as features; not written
 ```
 
 Layer 2 earns its keep twice. Beyond serving outputs that are not text, it is what makes the hard
 part assertable structurally instead of by snapshot: every reported column lies within its line's
-expanded width, no two label placements occupy one cell, an excerpt re-sliced from the source by
-the reported offsets equals the span it came from. Golden files are then left covering only
-appearance, where re-blessing one is cheap and correct.
+width, an excerpt re-sliced from the source by the reported offsets equals the span it came from,
+and a multi-line region opens and closes on the lines it actually covers. Golden files are then
+left covering only appearance, where re-blessing one is cheap and correct.
+
+Grouping labels by line and eliding distant ones are layer 2's too, and are deliberately not here
+yet: whether elision stays allocation-free is a measurement, and it is taken when the first
+renderer can say what shape it needs.
 
 ## Features
 
 Every output is independently selectable, and the default configuration selects none of them — the
-crate is `no_std` and dependency-free until a caller asks for a renderer.
+crate is `no_std` and dependency-free until a caller asks for something.
 
-| feature    | implies | pulls in                  | what it turns on                                    |
-| ---------- | ------- | ------------------------- | --------------------------------------------------- |
-| *(default)* | —      | —                         | layer 2 only: resolution, `no_std`, no dependencies |
-| `std`      | —       | —                         | anything needing the standard library               |
-| `terminal` | `std`   | `unicode-width`, `anstyle` | ANSI output, box drawing, display-width alignment   |
-| `html`     | —       | —                         | HTML output: escaping and CSS classes               |
-| `model`    | —       | —                         | a stable C-ABI export of the resolved model         |
+| feature     | implies | pulls in                   | what it turns on                                    |
+| ----------- | ------- | -------------------------- | --------------------------------------------------- |
+| *(default)* | —       | —                          | layer 2: resolution, `no_std`, no dependencies      |
+| `std`       | —       | —                          | anything needing the standard library               |
+| `terminal`  | `std`   | `unicode-width`, `anstyle` | ANSI output, box drawing, display-width alignment   |
+| `html`      | —       | —                          | HTML output: escaping and CSS classes               |
+| `model`     | —       | —                          | a stable C-ABI export of the resolved model         |
+| `tokora`    | —       | `tokora`                   | an adapter from `tokora::diagnostic::Diagnose`      |
 
 ```toml
 [dependencies]
@@ -89,13 +139,17 @@ gain. `anstyle` is what `clap` and `cargo` already use, so a consumer's `--color
 crate's theme interoperate without a conversion layer. Both sit behind `terminal`; the HTML and
 model outputs pull in neither.
 
+`tokora` is taken with `default-features = false`, so it stays `no_std` and brings only the
+diagnostic contract the adapter reads — `--features tokora` is one of the bare-metal legs the
+`no-std` job builds.
+
 SwiftUI and Flutter bindings are deliberately not features. They are separate repositories
 consuming the `model` export, so this crate never needs to know Swift or Dart exist.
 
 ## Minimum supported Rust version
 
-`1.95`, matching `tokora` — the crate whose diagnostic contract `painty` renders. A renderer with a
-lower floor than its contract would be advertising a floor no caller could actually build on. The
+`1.95`, matching `tokora` — the crate whose diagnostic contract `painty`'s optional adapter reads.
+Keeping the floor no lower than the contract's is what makes it a floor a caller can stand on. The
 `msrv` CI job reads `rust-version` out of `Cargo.toml` rather than hardcoding a toolchain, so the
 declared value and the tested value cannot drift.
 
