@@ -18,48 +18,74 @@
 //! same moment, so one worked example proves almost nothing about its precision. A parser has no
 //! such blind spot: it either accepts Rust or it does not.
 //!
-//! # The five layers
+//! # THIS FILE IS AN EARLY WARNING. IT DOES NOT DECIDE.
 //!
-//! **Every signature, by function pointer.** [`pin`] ascribes the whole signature of every public
-//! member that mentions a primitive integer, and a binding only counts as a pin when its declared
-//! type really is a function pointer — see [`ascribed`]. A parameter's width is as frozen as a
-//! return's, and the receiver's borrow is elided rather than tied to the source lifetime; see
-//! [`pin`] for why that distinction is load-bearing rather than pedantic.
+//! Read this before trusting anything below it. Everything here that reads `src/` **recognises**
+//! the places a public numeric can appear, and three consecutive reviews each found another place
+//! it did not recognise: a rustfmt-wrapped signature, a trait method, a name that prefixes a
+//! pinned one, a macro inside an impl block, a const-generic parameter. Changing its mechanism
+//! partway through — line scanning to a `syn` parse — made the recogniser better and left it a
+//! recogniser. The holes share one shape: a check establishing its conclusion relative to a frame
+//! it never establishes, that frame being *the set of syntactic positions a width can occupy*.
 //!
-//! **That the list is complete, and no longer than the surface.** The public members are read out
-//! of `src/` and matched against the ascriptions by *exact* path, in both directions.
+//! A reader of source text cannot close that frame, because the set of positions is whatever the
+//! grammar allows and the grammar grows. So the deciding check is elsewhere:
+//! **`ci/public_numeric_surface.py`**, run by the `public-surface` job, which asks *rustdoc* for
+//! the resolved public API and recurses over arbitrary JSON for primitives. It names no syntactic
+//! position, so there is no case in it to forget.
 //!
-//! **That no spelling hides a primitive.** Every check above recognises an integer by *name*,
-//! which rests on a frame nobody was checking: that a primitive in a public signature is spelled
-//! like one. Type aliases, renamed imports, item macros and unparsed items break that frame, and
-//! [`no_spelling_can_hide_a_primitive_integer`] refuses all of them with no allowlist.
+//! What this file is for, then: it runs in `cargo test`, in a second, on every developer's machine,
+//! and it catches the ordinary case long before CI does. Treat a pass here as "probably fine" and
+//! the `public-surface` job as "checked".
 //!
-//! **`u32`, by exact member.** Rule 3 in `README.md` is the only rule yielding a narrow type, and
-//! it justifies exactly four occurrences. The exemption names those four members and requires each
-//! to match exactly once, so a duplicate cannot shelter under an existing entry and an entry
-//! cannot outlive what it licensed.
+//! Two things here are NOT early warnings and do decide, because they are compile-time and the
+//! compiler is the authority: [`pin_rule_1`] and its siblings, which refuse a signature or a
+//! returned borrow that has changed shape, and `tests/source_borrows.rs`.
+//!
+//! # Why these are assertions and not scenarios
+//!
+//! The behaviour worth guaranteeing is that painty never reports a number that has been quietly
+//! narrowed, and never publishes a width it cannot change later. The scenario that would exercise
+//! a clamp needs a source with more than `u32::MAX` line breaks — over four gigabytes of text — so
+//! no test is going to construct it. So the *property* is asserted instead.
+//!
+//! # The layers
+//!
+//! **Every signature, by function pointer.** [`pin_rule_1`] and its siblings ascribe the whole
+//! signature of every public member that mentions a primitive integer, and a binding only counts
+//! as a pin when its declared type really is a function pointer. A parameter's width is as frozen
+//! as a return's, and the receiver's borrow is elided rather than tied to the source lifetime.
+//!
+//! **Which rule placed it.** One function per rule, so the rule a member was placed under is a
+//! fact in the code rather than a comment beside it, and
+//! [`every_pin_carries_the_width_its_rule_gives_it`] checks the width against the rule. This is the
+//! only layer aimed at the residual that has actually occurred.
+//!
+//! **That the list is complete, and no longer than the surface** — early warning; the
+//! `public-surface` job decides.
+//!
+//! **That no spelling hides a primitive** — early warning, and now closed against the positions
+//! three reviews named; the `public-surface` job is what makes "closed" true rather than "closed
+//! so far".
+//!
+//! **`u32`, by exact member.** Rule 3 is the only rule yielding a narrow type and it justifies
+//! exactly four occurrences, each required to match once.
 //!
 //! **The arithmetic.** No saturating call and no `as` cast on the path a position is built by.
+//! Nothing in rustdoc's view can see a function body, so this one has no decider behind it and is
+//! the real thing here rather than a warning.
 //!
 //! # What still gets through
 //!
-//! 1. **A member placed under the wrong rule.** A new `usize` that should have been a rule-2
-//!    ordinal is pinned, complete, `u32`-free, spelled plainly — and wrong. No parser reads
-//!    intent, so this is untouched by every layer above and is the residual that matters. It is
-//!    also the only one that has happened: twice, and review caught it both times.
-//! 2. **A width painty does not choose.** A method of `impl Iterator for RegionLines` takes its
-//!    signature from the trait, and `src/tokora.rs`'s conversions take theirs from tokora. Those
-//!    are excluded from the *completeness* census on purpose — painty cannot pick them — but they
-//!    are inside the `u32` census, and an associated type painty *binds* to a primitive is
-//!    refused outright, so the part that is painty's choice is still covered.
-//! 3. **A foreign type that is secretly an integer alias.** `libc::c_uint` in a public signature
-//!    would read to this scan as an ordinary named type. Nothing foreign appears in painty's
-//!    public API today, and the checks above make painty's *own* spellings closed; what remains is
-//!    a spelling somebody else owns.
-//!
-//! Item 1 needs a reader. Item 3 needs the compiler's resolved view of the surface rather than a
-//! parse of the crate's text — priced in
-//! [`no_spelling_can_hide_a_primitive_integer`] and declined, with the reason.
+//! 1. **A member placed under a rule that shares its width.** Rules 1 and 2 both give `u64`, so
+//!    the check above cannot separate them; they differ in where the number came from, not in what
+//!    it is. Every other misplacement changes the width and fails. This is what is left of the
+//!    residual that had been uncaught entirely.
+//! 2. **The rule set itself being wrong.** No check can find a category nobody has thought of;
+//!    rule 4 exists because two members turned out to fit none of the first three.
+//! 3. **A width painty does not choose.** `Iterator::size_hint` returns `(usize, Option<usize>)`
+//!    because `Iterator` says so. Excluded by name in both this file and the decider, so the
+//!    exclusion is visible rather than assumed.
 //!
 //! # What "exact" rests on
 //!
@@ -147,6 +173,20 @@ struct Member {
   site: String,
 }
 
+/// One ascription, and the rule the function it lives in places it under.
+#[derive(Debug, Clone)]
+struct Pin {
+  path: String,
+  rule: u8,
+  widths: Vec<String>,
+}
+
+/// The width each rule in `README.md` gives a member it places.
+///
+/// Rules 1 and 2 agree on `u64`, so this cannot tell those two apart — they differ in provenance
+/// and not in outcome. Every other confusion between rules changes the width, and therefore fails.
+const RULE_WIDTH: [(u8, &str); 4] = [(1, "u64"), (2, "u64"), (3, "u32"), (4, "usize")];
+
 /// Somewhere a rule or a discipline could be broken, named by the member that owns it.
 #[derive(Debug, Clone)]
 struct Site {
@@ -174,6 +214,15 @@ fn type_name(ty: &Type) -> String {
     Type::Reference(reference) => type_name(&reference.elem),
     _ => String::new(),
   }
+}
+
+fn macro_name(kind: &str, mac: &syn::Macro) -> String {
+  let name = mac
+    .path
+    .segments
+    .last()
+    .map_or_else(String::new, |segment| segment.ident.to_string());
+  format!("{kind} `{name}!`")
 }
 
 fn is_public(visibility: &Visibility) -> bool {
@@ -324,6 +373,19 @@ impl<'ast> Visit<'ast> for Scan<'_> {
   }
 
   fn visit_item_trait(&mut self, node: &'ast syn::ItemTrait) {
+    // `pub trait Rows: Iterator<Item = usize>` publishes a width in the supertrait list, where
+    // nothing else here looks and no pin can reach.
+    for bound in &node.supertraits {
+      let mut found = Integers::default();
+      found.visit_type_param_bound(bound);
+      if !found.0.is_empty() {
+        self.spelling(
+          format!("supertrait binding on `{}`", node.ident),
+          node.ident.span(),
+        );
+        break;
+      }
+    }
     let public = core::mem::replace(&mut self.public_container, is_public(&node.vis));
     self.scoped(node.ident.to_string(), |scan| {
       visit::visit_item_trait(scan, node);
@@ -435,14 +497,49 @@ impl<'ast> Visit<'ast> for Scan<'_> {
   }
 
   fn visit_item_macro(&mut self, node: &'ast syn::ItemMacro) {
-    let name = node
-      .mac
-      .path
-      .segments
-      .last()
-      .map_or_else(String::new, |segment| segment.ident.to_string());
-    self.spelling(format!("item macro `{name}!`"), node.mac.path.span());
+    self.spelling(macro_name("item macro", &node.mac), node.mac.path.span());
     visit::visit_item_macro(self, node);
+  }
+
+  fn visit_impl_item_macro(&mut self, node: &'ast syn::ImplItemMacro) {
+    self.spelling(
+      macro_name("impl-item macro", &node.mac),
+      node.mac.path.span(),
+    );
+    visit::visit_impl_item_macro(self, node);
+  }
+
+  fn visit_trait_item_macro(&mut self, node: &'ast syn::TraitItemMacro) {
+    self.spelling(
+      macro_name("trait-item macro", &node.mac),
+      node.mac.path.span(),
+    );
+    visit::visit_trait_item_macro(self, node);
+  }
+
+  fn visit_const_param(&mut self, node: &'ast syn::ConstParam) {
+    // `pub struct Page<const N: usize>` publishes a width, and no function pointer can pin a
+    // const-generic parameter. Refusing it is the only posture available.
+    if !integers_in_type(&node.ty).is_empty() {
+      self.spelling(
+        format!("const-generic parameter `{}::{}`", self.owner, node.ident),
+        node.ident.span(),
+      );
+    }
+    visit::visit_const_param(self, node);
+  }
+
+  fn visit_type_param(&mut self, node: &'ast syn::TypeParam) {
+    // `pub struct Page<T = usize>` publishes a width through a default nobody has to write.
+    if let Some(default) = &node.default
+      && !integers_in_type(default).is_empty()
+    {
+      self.spelling(
+        format!("defaulted type parameter `{}::{}`", self.owner, node.ident),
+        node.ident.span(),
+      );
+    }
+    visit::visit_type_param(self, node);
   }
 
   fn visit_item(&mut self, node: &'ast Item) {
@@ -496,13 +593,13 @@ fn surface() -> Surface {
 /// completeness census while constraining no parameter, no return and no receiver borrow — the
 /// gate would pass over a member whose widths nothing holds. So the local's declared type has to
 /// be a bare function pointer, and anything else is not a pin.
-fn ascribed() -> Vec<String> {
+fn ascribed() -> Vec<Pin> {
   #[derive(Default)]
-  struct Locals(Vec<String>);
+  struct Locals(Vec<(String, Vec<String>)>);
   impl<'ast> Visit<'ast> for Locals {
     fn visit_local(&mut self, node: &'ast syn::Local) {
       if let syn::Pat::Type(typed) = &node.pat
-        && matches!(&*typed.ty, Type::BareFn(_))
+        && let Type::BareFn(signature) = &*typed.ty
         && let Some(init) = &node.init
         && let syn::Expr::Path(path) = &*init.expr
       {
@@ -513,22 +610,32 @@ fn ascribed() -> Vec<String> {
           .map(|segment| segment.ident.to_string())
           .collect::<Vec<_>>()
           .join("::");
-        self.0.push(joined);
+        let mut widths = Integers::default();
+        widths.visit_type_bare_fn(signature);
+        self.0.push((joined, widths.0));
       }
       visit::visit_local(self, node);
     }
   }
 
   let parsed = syn::parse_file(SELF).expect("this test file parses");
-  let mut locals = Locals::default();
+  let mut found = Vec::new();
   for item in &parsed.items {
     if let Item::Fn(function) = item
-      && function.sig.ident == "pin"
+      && let Some(rule) = function.sig.ident.to_string().strip_prefix("pin_rule_")
+      && let Ok(rule) = rule.parse::<u8>()
     {
+      let mut locals = Locals::default();
       locals.visit_item_fn(function);
+      found.extend(
+        locals
+          .0
+          .into_iter()
+          .map(|(path, widths)| Pin { path, rule, widths }),
+      );
     }
   }
-  locals.0
+  found
 }
 
 /// The whole public numeric surface, one ascription per member.
@@ -560,8 +667,7 @@ fn ascribed() -> Vec<String> {
 ///
 /// The witness gives `'a` somewhere to come from; a lifetime used only inside the body would read
 /// to clippy as an unused one.
-fn pin<'a>(_witness: &'a ()) {
-  // Rule 1 — a line or column in the resolved model.
+fn pin_rule_1<'a>(_witness: &'a ()) {
   let _: fn(&Position) -> u64 = Position::line;
   let _: fn(&Position) -> u64 = Position::column;
   let _: fn(&Line<'a>) -> u64 = Line::number;
@@ -571,16 +677,24 @@ fn pin<'a>(_witness: &'a ()) {
   let _: fn(&Source<'a>, u64) -> Option<Line<'a>> = Source::line;
   let _: fn(&Region<'a>) -> u64 = Region::line_count;
   let _: fn(&RegionLine<'a>) -> core::ops::Range<u64> = RegionLine::columns;
+}
 
-  // Rule 2 — an ordinal in data the producer built.
+/// Rule 2 — an ordinal in data the producer built. Width: `u64`.
+fn pin_rule_2<'a>(_witness: &'a ()) {
   let _: fn(u64) -> PathSegment<'a> = PathSegment::Index;
+}
 
-  // Rule 3 — a key into a structure painty does not own.
+/// Rule 3 — a key into a structure painty does not own. Width: the contract's, which is `u32`.
+/// No witness: rule 3's members are `Location` and `Span`, neither of which carries a lifetime,
+/// so there is nothing for one to instantiate.
+fn pin_rule_3() {
   let _: fn(u32, Span) -> Location = Location::new;
   let _: fn(u32) -> Location = Location::entire;
   let _: fn(&Location) -> u32 = Location::source;
+}
 
-  // Rule 4 — everything else: an index or a count of things in memory.
+/// Rule 4 — anything else: an index or a count of things in memory. Width: `usize`.
+fn pin_rule_4<'a>(_witness: &'a ()) {
   let _: fn(usize, usize) -> Span = Span::new;
   let _: fn(usize) -> Span = Span::empty;
   let _: fn(&Span) -> usize = Span::start;
@@ -592,11 +706,9 @@ fn pin<'a>(_witness: &'a ()) {
   let _: fn(&Source<'a>) -> usize = Source::len;
   let _: fn(&Source<'a>, usize) -> Line<'a> = Source::line_at;
   let _: fn(&Source<'a>, usize) -> Position = Source::position;
-
   // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and
   // buying that exactness meant walking a caller's `Diagnose` impl to exhaustion, so they are
-  // booleans now and leave the width rule entirely. Recorded here rather than silently absent,
-  // because an empty `#[cfg]` block would read as an oversight.
+  // booleans now and leave the width rule entirely.
 }
 
 #[test]
@@ -642,9 +754,12 @@ fn the_file_list_is_the_whole_crate() {
 
 #[test]
 fn every_public_numeric_member_is_pinned() {
-  pin(&());
+  pin_rule_1(&());
+  pin_rule_2(&());
+  pin_rule_3();
+  pin_rule_4(&());
 
-  let ascribed = ascribed();
+  let ascribed: Vec<String> = ascribed().into_iter().map(|pin| pin.path).collect();
   let missing: Vec<_> = surface()
     .members
     .into_iter()
@@ -671,6 +786,7 @@ fn no_ascription_outlives_the_member_it_pins() {
   let members = surface().members;
   let stale: Vec<_> = ascribed()
     .into_iter()
+    .map(|pin| pin.path)
     .filter(|path| !members.iter().any(|member| &member.path == path))
     .collect();
 
@@ -720,6 +836,62 @@ fn u32_appears_only_where_a_foreign_key_round_trips() {
     miscounted.is_empty(),
     "a rule 3 exemption is not single-use:\n{}",
     miscounted.join("\n")
+  );
+}
+
+#[test]
+fn every_pin_carries_the_width_its_rule_gives_it() {
+  // The residual at the top of this file's list is a member placed under the WRONG rule, and it is
+  // the only residual that has ever occurred — twice. Nothing above touches it, because everything
+  // above asks whether a member is pinned and never which rule pinned it.
+  //
+  // Splitting `pin` into one function per rule makes the answer a fact in the code rather than a
+  // comment beside it, and then half the question is mechanical: rule 1 and 2 mean `u64`, rule 3
+  // means `u32`, rule 4 means `usize`, so a member placed under a rule whose width it does not
+  // carry is a contradiction the test can see. Rules 1 and 2 share a width and so cannot be told
+  // apart here; they differ in where the number came from, not in what it is.
+  //
+  // A signature may carry a second width legitimately — `Line::column_at` returns a rule 1 column
+  // and takes a rule 4 byte offset — so the requirement is that the rule's own width is PRESENT,
+  // not that it is the only one. What no width may be is one no rule licenses at all.
+  let licensed: Vec<&str> = RULE_WIDTH.iter().map(|(_, width)| *width).collect();
+  let mut wrong = Vec::new();
+  let mut unlicensed = Vec::new();
+
+  for pin in ascribed() {
+    let want = RULE_WIDTH
+      .iter()
+      .find(|(rule, _)| *rule == pin.rule)
+      .map(|(_, width)| *width)
+      .unwrap_or_else(|| {
+        panic!(
+          "`pin_rule_{}` names a rule README.md does not have",
+          pin.rule
+        )
+      });
+    if !pin.widths.iter().any(|width| width == want) {
+      wrong.push(format!(
+        "{} is pinned under rule {} but carries no `{want}` — it carries {:?}",
+        pin.path, pin.rule, pin.widths
+      ));
+    }
+    for width in &pin.widths {
+      if !licensed.contains(&width.as_str()) {
+        unlicensed.push(format!("{}: `{width}` is a width no rule gives", pin.path));
+      }
+    }
+  }
+
+  assert!(
+    wrong.is_empty(),
+    "a member is placed under a rule whose width it does not have. Either the rule is wrong or the \
+     width is; README.md#numeric-widths decides which:\n{}",
+    wrong.join("\n")
+  );
+  assert!(
+    unlicensed.is_empty(),
+    "a width appears that none of the four rules yields:\n{}",
+    unlicensed.join("\n")
   );
 }
 
