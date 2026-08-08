@@ -464,12 +464,16 @@ jobs:
             echo "::error::the tokora feature is on and tokora is not in the graph; the check above is matching nothing and proves nothing"
             exit 1
           fi
+      # No `--no-default-features` here, on purpose. Every check above passes it, so all of them
+      # would stay green if `default` grew an entry — and what a consumer writing `painty = "0"`
+      # actually gets is the default set. The `manifest` job pins `default = []` too, so this is
+      # the second of two independent ways that particular mistake reddens.
       - name: The default configuration has no dependencies at all
         run: |
           set -euo pipefail
-          deps="$(cargo tree -p painty --no-default-features --edges normal --prefix none | tail -n +2)"
+          deps="$(cargo tree -p painty --edges normal --prefix none | tail -n +2)"
           if [ -n "$deps" ]; then
-            echo "::error::painty's primary configuration is meant to be dependency-free, and it now has:"
+            echo "::error::painty's default configuration is meant to be dependency-free, and it now has:"
             printf '%s\n' "$deps"
             exit 1
           fi
