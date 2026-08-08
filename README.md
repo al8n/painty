@@ -146,12 +146,16 @@ so it is a `u64`. And nothing on the path a position is built by may saturate or
 ordinal is indistinguishable from a real one, which is a number that lies rather than one that
 fails.
 
-**A parameter's width is as frozen as a return's**, so both are pinned. `tests/numeric_widths.rs`
-ascribes the whole signature of every member listed above, reads the public surface back out of
-`src/` so a new member cannot go unpinned, checks that its own file list is the whole crate,
-permits `u32` at four named lines and nowhere else, and asserts the absence of clamping against the
-source. What no such check can catch is a member placed under the wrong rule — that is what the
-ordering is for, and what review is for.
+**A parameter's width is as frozen as a return's**, so both are pinned — and so is the lifetime a
+borrow comes back on. `tests/numeric_widths.rs` ascribes the whole signature of every member listed
+above; parses `src/` with `syn` to read the public surface back out, so a new member cannot go
+unpinned and a stale pin cannot linger; checks that its own file list is the whole crate; permits
+`u32` on four named members and nowhere else, each exactly once; and asserts the absence of
+clamping. `tests/source_borrows.rs` covers the other half: everything resolution returns borrows
+the source text rather than the `&Source` it came through.
+
+What no such check can catch is a member placed under the **wrong rule**. A parser reads
+declarations, not intent. That is what the ordering above is for, and what review is for.
 
 ## Features
 

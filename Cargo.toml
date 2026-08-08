@@ -84,6 +84,21 @@ anstyle = { version = "1", optional = true }
 tokora = { version = "0.9", default-features = false, optional = true }
 unicode-width = { version = "0.2", optional = true }
 
+# The first and only dev-dependency, and it is worth naming why a crate that took pains to have an
+# empty dependency graph now has one at all.
+#
+# `tests/numeric_widths.rs` asserts that every public numeric is the width the rule in README.md
+# gives it. To do that it has to find the public numerics, and it used to find them by scanning
+# lines for `pub fn`. That recogniser was wrong five times across two reviews — it missed a
+# rustfmt-wrapped signature, a trait method, a name that is a prefix of a pinned one, a duplicate
+# exempted line, and a whole declaration shape — which is what a checker that recognises a pattern
+# rather than asking an authority does. `syn` is the authority. It is a dev-dependency, so it is
+# absent from every consumer's graph, from the `no-tokora` job's `--edges normal` walk, and from
+# the bare-metal points, which build no test target.
+[dev-dependencies]
+proc-macro2 = { version = "1", features = ["span-locations"] }
+syn = { version = "2", features = ["full", "visit"] }
+
 # Named so the target is ABSENT rather than empty when the feature is off. `#![cfg(feature =
 # "tokora")]` inside the file would compile a target with nothing in it, which reads as a passing
 # test suite and proves nothing; `required-features` makes cargo skip building it at all. That is
