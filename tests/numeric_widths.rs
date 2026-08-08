@@ -387,6 +387,17 @@ impl<'ast> Visit<'ast> for Scan<'_> {
     self.public_container = public;
   }
 
+  fn visit_trait_item_const(&mut self, node: &'ast syn::TraitItemConst) {
+    // A trait's members inherit the trait's publicness; there is no `pub` on them to read. This
+    // handler was simply missing, which is how an associated constant of pointer width could fix
+    // an API width with nothing here to notice.
+    let path = format!("{}::{}", self.owner, node.ident);
+    if self.public_container && !integers_in_type(&node.ty).is_empty() {
+      self.member(path.clone(), node.ident.span());
+    }
+    self.scoped(path, |scan| visit::visit_trait_item_const(scan, node));
+  }
+
   fn visit_trait_item_fn(&mut self, node: &'ast syn::TraitItemFn) {
     let path = format!("{}::{}", self.owner, node.sig.ident);
     if self.public_container && !integers_in_signature(&node.sig).is_empty() {
