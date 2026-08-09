@@ -312,6 +312,21 @@ impl<P: Palette> Terminal<P> {
     let mut shown_input = None;
     for (drawn, text, primary, source, origin) in &excerpts {
       if shown_input != Some(*source) {
+        // `column_at` and NOT the bounded walk, which is the opposite of what it looks like it
+        // should be. The header reports a DISPLAY column, and a display column at offset N is a sum
+        // over every cluster before N — there is no bounded way to know it, and clipping it to the
+        // window would report a position the error is not at, which is the one thing this crate
+        // exists not to do.
+        //
+        // `column_at` is already the smallest walk that answers it: it returns AT the offset rather
+        // than running to the end of the line, so it is linear in the offset and not in the line.
+        // Routing it through `marks_within` instead would walk the whole budget even for a span in
+        // the first few bytes, which is more work and not less.
+        //
+        // So this is one unbounded pass, it is 1x in input the caller supplied, and
+        // `the_renderer_adds_a_bounded_number_of_passes_over_the_input` pins that it stays one.
+        // Removing it altogether needs the header's column to change unit — see the report on
+        // `max_source_bytes`.
         let column =
           LineCells::new(drawn.line(), self.tab_width).column_at(drawn.covered().start());
         pad(out, gutter)?;

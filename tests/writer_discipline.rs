@@ -677,3 +677,79 @@ mod the_size_contract {
     );
   }
 }
+
+/// What layer 2 alone costs to resolve a span and hand back its line, and what a whole render
+/// costs on top.
+///
+/// Both are linear in the line, so the figure that means anything is the ratio: how many passes
+/// over the caller's input the renderer adds to the one layer 2 must make.
+fn passes_over_layer_two(megabytes: usize, offset: usize) -> f64 {
+  let text = format!("{}\n", "a".repeat(megabytes * 1_000_000));
+  let span = Span::new(offset, offset + 5);
+  let message = "a message";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::new(0, span),
+  )
+  .with_primary_label("here");
+
+  let source = Source::new(&text);
+  let _ = source.resolve(span).lines().next();
+  let started = std::time::Instant::now();
+  for _ in 0..3 {
+    core::hint::black_box(source.resolve(span).lines().next());
+  }
+  let layer_two = started.elapsed().as_secs_f64();
+
+  let started = std::time::Instant::now();
+  for _ in 0..3 {
+    let mut out = String::new();
+    Terminal::plain()
+      .render(&diagnostic, &[Input::new(Source::new(&text))], &mut out)
+      .expect("a String is writable");
+    core::hint::black_box(out);
+  }
+  started.elapsed().as_secs_f64() / layer_two
+}
+
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "an asymptotic measurement over nine megabytes of input, which Miri is not checking"
+)]
+fn the_renderer_adds_a_bounded_number_of_passes_over_the_input() {
+  // The render-level companion to `the_geometry_costs_the_window_and_not_the_line`, which asserts
+  // at `underline` — and that is exactly why a second unbounded pass in the SHIPPING path survived
+  // it. A property held at a helper says nothing about the function that ships.
+  //
+  // What cannot be asserted here is that a render is bounded, because it is not and no budget can
+  // make it so: layer 2 turns a byte offset into a line and column by scanning to it, and finding
+  // where a line ENDS is linear in the line whatever the span. Measured at eight megabytes, a
+  // render with the span at offset zero is 1.04x layer 2 alone — the renderer adds essentially
+  // nothing — and everything either of them does is 1x in input the caller supplied.
+  //
+  // So what is asserted is the number of PASSES, which is a real bound and the thing a regression
+  // would move. Measured while writing this:
+  //
+  //   near span   1 MB 1.35x   8 MB 1.04x
+  //   far span    1 MB 2.52x   8 MB 2.50x
+  //
+  // The far case is above one because the `-->` header reports a DISPLAY column, and a display
+  // column at offset N is a sum over the clusters before it — one grapheme walk, unavoidable while
+  // the header is denominated that way. Four allows that one pass and refuses a second.
+  let near = passes_over_layer_two(8, 0);
+  assert!(
+    near < 2.0,
+    "a render with the span at the start of the line cost {near:.2} times layer 2 alone, so the \
+     renderer has taken on a pass that does not depend on where the span is"
+  );
+
+  let far = passes_over_layer_two(8, 8_000_000 - 10);
+  assert!(
+    far < 4.0,
+    "a render with the span at the end of the line cost {far:.2} times layer 2 alone; one walk is \
+     the display column in the header, and a second one is a regression"
+  );
+}
