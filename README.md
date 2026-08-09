@@ -208,7 +208,7 @@ crate is `no_std` and dependency-free until a caller asks for something.
 | ----------- | ------- | -------------------------- | --------------------------------------------------- |
 | *(default)* | —       | —                          | layer 2: resolution, `no_std`, no dependencies      |
 | `std`       | —       | —                          | anything needing the standard library               |
-| `terminal`  | `std`   | `unicode-width`, `anstyle` | the terminal renderer: cell arithmetic, colour detection, ANSI |
+| `terminal`  | `std`   | `unicode-width`, `unicode-segmentation`, `anstyle` | the terminal renderer: cell arithmetic, colour detection, ANSI |
 | `html`      | —       | —                          | HTML output: escaping and CSS classes               |
 | `model`     | —       | —                          | a stable C-ABI export of the resolved model         |
 | `tokora`    | —       | `tokora`                   | an adapter from `tokora::diagnostic::Diagnose`      |
@@ -220,9 +220,21 @@ painty = { version = "0", features = ["terminal"] }
 
 `unicode-width` is taken rather than hand-narrowed because correct terminal alignment is impossible
 without display width, and owning a Unicode table means owning a class of alignment bug for no
-gain. `anstyle` is what `clap` and `cargo` already use, so a consumer's `--color` flag and this
-crate's theme interoperate without a conversion layer. Both sit behind `terminal`; the HTML and
-model outputs pull in neither.
+gain. `unicode-segmentation` is taken for a sharper version of the same reason: where a *placement
+unit* ends is UAX#29 grapheme segmentation, and two rounds of review found two different home-grown
+answers that each inferred it from incremental prefix width — the second placing every marker after
+a variation-selector emoji one cell early. A rule that has to be tuned a third time is a wrong
+model, so the question goes to the crate that implements the standard, exactly as `syn` and not a
+line scanner decides what a public item is. `anstyle` is what `clap` and `cargo` already use, so a
+consumer's `--color` flag and this crate's theme interoperate without a conversion layer. All three
+sit behind `terminal`; the HTML and model outputs pull in none of them.
+
+A grapheme cluster and a display unit are not defined to be the same thing — `unicode-width` applies
+rules over a whole string, so the clusters' widths need not sum to the line's. painty measures per
+cluster and `LineCells::width` is that sum, because a marker starts and stops at a boundary and one
+number for the line cannot be decomposed into the clusters it spans. The two agree on every case in
+the corpus, and the test that says so records that as an observation about a table version rather
+than a guarantee.
 
 `tokora` is taken with `default-features = false`, so it stays `no_std` and brings only the
 diagnostic contract the adapter reads — `--features tokora` is one of the bare-metal legs the

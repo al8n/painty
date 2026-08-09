@@ -1,5 +1,6 @@
 use core::fmt;
 
+use unicode_segmentation::{GraphemeIndices, UnicodeSegmentation};
 use unicode_width::UnicodeWidthStr;
 
 use crate::{Line, Span};
@@ -22,10 +23,11 @@ use crate::{Line, Span};
 ///
 /// # What a display column is defined to be
 ///
-/// `1` plus the number of cells the text *before* an offset occupies. That definition is what the
-/// invariants are written against, and it has one consequence worth naming: a prefix cut through
-/// the middle of a grapheme cluster is measured as the prefix, not as the cluster, because a
-/// terminal drawing that prefix would do the same.
+/// `1` plus the cells of the whole grapheme clusters *before* an offset. Clusters, not characters
+/// and not prefixes: a terminal draws a cluster or it draws none of it, so an offset in the middle
+/// of one reports where that cluster begins. Which is where a cluster ends is UAX#29's question and
+/// is asked of `unicode-segmentation` rather than inferred here — two rounds of review found two
+/// different home-grown answers, and both put a marker in the wrong cell.
 ///
 /// ```
 /// use painty::{Source, terminal::LineCells};
@@ -167,25 +169,19 @@ impl<'a> LineCells<'a> {
 
   /// Writes the line with its tabs expanded to spaces.
   ///
-  /// The expansion and the measurement are the same arithmetic, which is what keeps an underline
-  /// placed by [`column_at`](Self::column_at) under the text this writes.
+  /// Walks the same units [`column_at`](Self::column_at) does rather than re-deriving the tab
+  /// arithmetic, so the two cannot drift: an underline is placed under the text this writes only
+  /// because both are the same walk.
   pub fn write_expanded(&self, out: &mut impl fmt::Write) -> fmt::Result {
-    let mut column = 0u64;
-    for piece in self.line.text().split_inclusive('\t') {
-      match piece.strip_suffix('\t') {
-        Some(body) => {
-          out.write_str(body)?;
-          column += width_of(body);
-          let stop = next_stop(column, self.tab_width);
-          for _ in column..stop {
-            out.write_char(' ')?;
-          }
-          column = stop;
+    let text = self.line.text();
+    for unit in self.units() {
+      let cluster = &text[unit.start..unit.end];
+      if cluster == "\t" {
+        for _ in 0..unit.cells {
+          out.write_char(' ')?;
         }
-        None => {
-          out.write_str(piece)?;
-          column += width_of(piece);
-        }
+      } else {
+        out.write_str(cluster)?;
       }
     }
     Ok(())
@@ -205,33 +201,47 @@ impl<'a> LineCells<'a> {
   /// The placement units of this line, left to right.
   fn units(&self) -> Units<'a> {
     Units {
-      text: self.line.text(),
+      clusters: self.line.text().grapheme_indices(true),
       tab_width: self.tab_width,
-      at: 0,
       column: 1,
     }
   }
 }
 
-/// One run of characters a terminal places together.
+/// One grapheme cluster, and the cells a terminal gives it.
 ///
-/// # Why units and not prefix slices
+/// # Where a unit ends is asked, not inferred
 ///
-/// This measured a display column by slicing the text up to an offset and asking its width. That
-/// is a different model from the one a terminal uses, and the two agree only on simple input: for
-/// a joined emoji, every interior boundary measures the same width, so a span over one component
-/// produced an empty range that widened into the *following* character's cell.
+/// Two rounds of review found two different home-grown answers to that question, and both were
+/// wrong in the same way. The first sliced the text up to an offset and measured the prefix, so
+/// every interior boundary of a joined emoji measured alike and a span over one component widened
+/// into the *following* character's cell. The second fixed a unit's width from its first character
+/// and extended while the measured width held — which reads a joiner's zero width as a signal, and
+/// so cuts any sequence whose final shaped width differs from its base. A variation selector
+/// (`☃` + U+FE0F) is exactly that: one cluster, two cells, and a base that measures one. Every
+/// marker after it landed a cell early.
 ///
-/// The review that found it made the sharper point. The invariant meant to catch this cross-checked
-/// the renderer against this very layer — and both were built on prefix slicing, so they agreed
-/// while the marker was visibly wrong. **A cross-check between two layers is evidence only if the
-/// layers do not share the model being checked.** The oracle for these units is therefore written
-/// to a different shape in the tests, and deliberately a cruder one.
+/// Both derived a unit's **extent** from **incremental prefix measurement**, which is how neither
+/// grapheme segmentation nor display width is defined. A heuristic that needs tuning a third time
+/// is not a heuristic that needs tuning. So the extent is asked of the authority for it —
+/// `unicode-segmentation`, which implements UAX#29 — for the same reason `syn` and not a line
+/// scanner decides what a public item is, and each whole cluster is then measured once.
 ///
-/// A unit is found by asking the width table, not by recognising a pattern: characters are added
-/// while doing so does not change the measured width. That makes a joined sequence one unit and a
-/// combining mark part of its base's, without this file holding any opinion about which code points
-/// join.
+/// The review that found the first made the sharper point about how it survived. The invariant
+/// meant to catch it cross-checked the renderer against this very layer, and both were built on
+/// prefix slicing, so they agreed while the marker was visibly wrong. **A cross-check between two
+/// layers is evidence only if the layers do not share the model being checked.** The numbers that
+/// hold this file now are in the tests' `PLACEMENTS` table: cells a terminal paints, written by
+/// hand, agreeing with no library.
+///
+/// # A cluster and a display unit are not defined to be the same thing
+///
+/// `unicode-width` applies rules over a whole string, so the sum of the clusters' widths is not
+/// obliged to equal the width of the line they came from. painty measures per cluster, because a
+/// marker has to start and stop at a boundary and a single number for the line cannot be
+/// decomposed into the clusters it spans. [`width`](LineCells::width) is therefore that sum. The
+/// two agree on every case in the corpus, and the test that says so records that this is an
+/// observation about a table version rather than a guarantee.
 #[derive(Debug, Clone, Copy)]
 struct Unit {
   start: usize,
@@ -241,9 +251,8 @@ struct Unit {
 }
 
 struct Units<'a> {
-  text: &'a str,
+  clusters: GraphemeIndices<'a>,
   tab_width: u64,
-  at: usize,
   column: u64,
 }
 
@@ -251,55 +260,26 @@ impl Iterator for Units<'_> {
   type Item = Unit;
 
   fn next(&mut self) -> Option<Unit> {
-    let start = self.at;
-    if start >= self.text.len() {
-      return None;
-    }
+    let (start, cluster) = self.clusters.next()?;
 
-    if self.text[start..].starts_with('\t') {
-      let stop = next_stop(self.column - 1, self.tab_width) + 1;
-      let unit = Unit {
-        start,
-        end: start + 1,
-        column: self.column,
-        cells: stop - self.column,
-      };
-      self.at = unit.end;
-      self.column = stop;
-      return Some(unit);
-    }
-
-    let mut end = boundary_after(self.text, start);
-    let cells = width_of(&self.text[start..end]);
-    // Extend while the next character adds nothing, which is what makes a joined sequence and its
-    // joiners one unit without this code knowing what a joiner is.
-    while end < self.text.len() && !self.text[end..].starts_with('\t') {
-      let next = boundary_after(self.text, end);
-      if width_of(&self.text[start..next]) != cells {
-        break;
-      }
-      end = next;
-    }
+    // A tab is the one unit whose width is not a property of its text, so it is the one this file
+    // measures itself. UAX#29 puts it in a cluster of its own — a tab is `Control`, and GB4/GB5
+    // break on both sides of one — so this arm never sees a tab attached to anything.
+    let cells = if cluster == "\t" {
+      next_stop(self.column - 1, self.tab_width) + 1 - self.column
+    } else {
+      width_of(cluster)
+    };
 
     let unit = Unit {
       start,
-      end,
+      end: start + cluster.len(),
       column: self.column,
       cells,
     };
-    self.at = end;
     self.column += cells;
     Some(unit)
   }
-}
-
-/// The next character boundary strictly after `at`.
-fn boundary_after(text: &str, at: usize) -> usize {
-  let mut next = at + 1;
-  while next < text.len() && !text.is_char_boundary(next) {
-    next += 1;
-  }
-  next.min(text.len())
 }
 
 /// The next tab stop at or after `column`, counting from zero.

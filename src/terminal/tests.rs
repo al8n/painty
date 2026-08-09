@@ -6,7 +6,7 @@ use crate::{Source, Span};
 /// A corpus whose members are not individually justified is a corpus the next person trims. Each
 /// of these defeats a *different* wrong definition of "column", and the first entry is the one
 /// that makes all the wrong definitions look right.
-const CORPUS: [(&str, &str); 12] = [
+const CORPUS: [(&str, &str); 17] = [
   (
     "abc",
     "the baseline where every wrong definition agrees: one byte, one character, one cell",
@@ -51,6 +51,29 @@ const CORPUS: [(&str, &str); 12] = [
   (
     "a\u{7f}b",
     "a control character — no width table entry, and it must not be treated as a hole",
+  ),
+  (
+    "\u{2603}\u{fe0f}x",
+    "a variation selector — the presentation sequence is WIDER than its base, so a unit's extent \
+     cannot be read off the width of its first character",
+  ),
+  (
+    "1\u{fe0f}\u{20e3}x",
+    "a keycap — three code points and one key, the middle of which changes the width",
+  ),
+  (
+    "\u{1f1ef}\u{1f1f5}x",
+    "a regional indicator pair — one flag, and each half is a legal character on its own",
+  ),
+  (
+    "\u{915}\u{94d}\u{937}\u{93f}x",
+    "a Devanagari conjunct — the prefix widths rise 1, 1, 2, 3 through a single cluster, so any \
+     extend-while-the-width-holds rule cuts it somewhere",
+  ),
+  (
+    "\u{e01}\u{e33}x",
+    "Thai sara am — a cluster whose second character ADDS a cell, the mirror of a combining mark \
+     that adds none",
   ),
 ];
 
@@ -831,55 +854,38 @@ fn a_whole_input_position_shows_no_excerpt_rather_than_a_fabricated_one() {
   assert_eq!(out.lines().count(), 1, "{out}");
 }
 
-/// Placement units, recognised a **different way** from how the crate computes them.
+/// The clusters a span must be widened to.
 ///
-/// The crate finds a unit by asking the width table: characters join while the measured width does
-/// not change. This walks characters and joins on the *identity* of the joiner — a zero-width
-/// character, a zero-width joiner, or a variation selector. It is a cruder model, and deliberately
-/// so.
+/// This used to be a hand-rolled second model — walk characters, join on the identity of a joiner —
+/// kept precisely because it did not share the crate's prefix-slicing model. It has been retired,
+/// and the reason is worth keeping: **it was the same kind of thing the crate's own defect was.** It
+/// recognised joiners from a list of code points, and measured against `unicode-segmentation` it is
+/// wrong in both directions — it merges `"a\u{200d}b"`, which UAX#29 splits, and it splits `"กำ"`
+/// and `"क्षि"`, which UAX#29 does not.
 ///
-/// That difference is the whole value. The review that prompted this found the previous invariant
-/// cross-checking the renderer against the cell layer while both were built on prefix slicing: they
-/// agreed with each other and disagreed with the terminal. **A cross-check between two layers is
-/// evidence only if the layers do not share the model being checked.**
-fn clusters_by_character(text: &str) -> Vec<(usize, usize)> {
-  use unicode_width::UnicodeWidthChar;
-  let mut out: Vec<(usize, usize)> = Vec::new();
-  for (at, character) in text.char_indices() {
-    // `Some(0)` and `None` are different answers and conflating them was this oracle's own first
-    // bug, caught on its first run by disagreeing with the crate: a combining mark is a zero-width
-    // character and joins its base, while a control character simply has no table entry and joins
-    // nothing. A shared-model cross-check could not have surfaced that.
-    let joins =
-      matches!(character, '\u{200d}' | '\u{fe0e}' | '\u{fe0f}') || character.width() == Some(0);
-    let after_joiner = out.last().is_some_and(|(start, _)| {
-      text[*start..at]
-        .chars()
-        .last()
-        .is_some_and(|previous| previous == '\u{200d}')
-    });
-    match out.last_mut() {
-      Some(last) if (joins || after_joiner) && character != '\t' => {
-        last.1 = at + character.len_utf8();
-      }
-      _ => out.push((at, at + character.len_utf8())),
-    }
-  }
-  out
+/// A known-wrong oracle left in a suite eventually disagrees with the standard, and the next person
+/// makes the code match the oracle. The independence it was providing now comes from `PLACEMENTS`,
+/// which is hand-written cells rather than a second algorithm — and an algorithm is what could
+/// share a model in the first place.
+fn clusters(text: &str) -> Vec<(usize, usize)> {
+  use unicode_segmentation::UnicodeSegmentation;
+  text
+    .grapheme_indices(true)
+    .map(|(at, cluster)| (at, at + cluster.len()))
+    .collect()
 }
 
 #[test]
 fn a_span_touching_a_cluster_is_widened_to_the_whole_cluster() {
   // The defect this replaced: a span over one component of a joined emoji produced an empty range
   // that widened into the cell of the character AFTER the cluster, so the marker pointed at the
-  // wrong glyph. Checked against the character-based oracle above rather than against the crate's
-  // own units.
+  // wrong glyph.
   for (text, why) in CORPUS {
     if text.contains('\t') || text.is_empty() {
       continue;
     }
     let cells = measured(text, 4);
-    for (start, end) in clusters_by_character(text) {
+    for (start, end) in clusters(text) {
       // Every interior slice of a cluster must produce the same marker as the whole cluster.
       let whole = cells.columns_for(Span::new(start, end));
       let mut inner = start;
@@ -951,5 +957,150 @@ fn a_tab_width_is_bounded_at_both_ends() {
     let mut expanded = String::new();
     cells.write_expanded(&mut expanded).expect("writable");
     assert!(expanded.len() <= LineCells::max_tab_width() as usize + 2);
+  }
+}
+
+/// A cluster, the cells it occupies, and where the `x` after it therefore lands.
+///
+/// Hand-written rather than computed, and that is the point: a table derived from the crate's own
+/// units would agree with any implementation of them. These are the columns a terminal paints, and
+/// a wrong implementation has to produce a different number.
+const PLACEMENTS: [(&str, u64, &str); 6] = [
+  (
+    "\u{2603}\u{fe0f}x",
+    2,
+    "an emoji-presentation snowman is two cells, not the one its base character measures",
+  ),
+  (
+    "1\u{fe0f}\u{20e3}x",
+    2,
+    "a keycap is drawn as one two-cell key",
+  ),
+  (
+    "\u{1f1ef}\u{1f1f5}x",
+    2,
+    "a flag is one two-cell glyph, not two halves",
+  ),
+  (
+    "\u{915}\u{94d}\u{937}\u{93f}x",
+    3,
+    "a conjunct is one cluster, and its cells are the whole of it",
+  ),
+  (
+    "\u{e01}\u{e33}x",
+    2,
+    "the vowel sign adds a cell to its base's cluster",
+  ),
+  (
+    "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}x",
+    2,
+    "the joined family, kept from the round before so that fix stays fixed",
+  ),
+];
+
+#[test]
+fn a_cluster_occupies_its_own_cells_and_the_next_character_follows_them() {
+  // R1 was prefix slicing; R2 was prefix-width extension. Both derived a unit's EXTENT from
+  // incremental prefix measurement, which is how neither grapheme segmentation nor display width is
+  // defined, and both put every marker after a variation-selector sequence one cell early.
+  for (text, cells_of_first, why) in PLACEMENTS {
+    let at = text.rfind('x').expect("each placement ends in an x");
+    let cells = measured(text, 4);
+
+    assert_eq!(
+      cells.column_at(at),
+      cells_of_first + 1,
+      "{text:?}: the x follows a {cells_of_first}-cell cluster — {why}"
+    );
+    assert_eq!(
+      cells.width(),
+      cells_of_first + 1,
+      "{text:?}: the line is the cluster plus the x — {why}"
+    );
+    assert_eq!(
+      cells.columns_for(Span::new(at, at + 1)),
+      cells_of_first + 1..cells_of_first + 2,
+      "{text:?}: the marker for the x — {why}"
+    );
+
+    // Every interior boundary of the leading cluster marks the whole of it, at columns 1..=n.
+    let mut inner = 0;
+    while inner < at {
+      let mut outer = inner + 1;
+      while outer <= at {
+        if text.is_char_boundary(inner) && text.is_char_boundary(outer) {
+          assert_eq!(
+            cells.columns_for(Span::new(inner, outer)),
+            1..cells_of_first + 1,
+            "{text:?}: {inner}..{outer} is inside the leading cluster — {why}"
+          );
+        }
+        outer += 1;
+      }
+      inner += 1;
+    }
+  }
+}
+
+#[test]
+fn a_placement_unit_is_a_grapheme_cluster() {
+  // A conformance check rather than a cross-check: it restates that the crate asks the authority,
+  // and its value is that it fails the moment something starts inferring extents again. The
+  // evidence that the authority is the RIGHT model is in `PLACEMENTS`, whose numbers are what a
+  // terminal paints and come from no library at all.
+  use unicode_segmentation::UnicodeSegmentation;
+
+  for (text, why) in CORPUS {
+    let cells = measured(text, 4);
+    let boundaries: Vec<usize> = text.grapheme_indices(true).map(|(at, _)| at).collect();
+    for (at, cluster) in text.grapheme_indices(true) {
+      let column = cells.column_at(at);
+      for inside in at..at + cluster.len() {
+        if text.is_char_boundary(inside) {
+          assert_eq!(
+            cells.column_at(inside),
+            column,
+            "{text:?}: offset {inside} is inside the cluster at {at} — {why}"
+          );
+        }
+      }
+      // And the boundary after it starts a new column, so units are not merged either.
+      let after = at + cluster.len();
+      if boundaries.contains(&after) && cluster != "\u{200b}" {
+        assert!(
+          cells.column_at(after) >= column,
+          "{text:?}: the cluster after {at} went backwards — {why}"
+        );
+      }
+    }
+  }
+}
+
+#[test]
+fn a_lines_width_is_the_sum_of_its_clusters() {
+  // The residual the review named, pinned rather than papered over. painty measures WHOLE CLUSTERS
+  // and adds them up, because a marker has to be placed at a cluster boundary and a single number
+  // for the line cannot be decomposed into the clusters it spans. `unicode-width`'s string-level
+  // rules operate over a whole string and are not obliged to agree with that sum.
+  //
+  // On this corpus and this table they do agree, and that agreement is an observation rather than a
+  // guarantee. If this ever fires, the answer is to record the divergent input here and keep the
+  // per-cluster model — not to switch the code to whole-string measurement, which cannot place a
+  // marker.
+  use unicode_segmentation::UnicodeSegmentation;
+  use unicode_width::UnicodeWidthStr;
+
+  for (text, why) in CORPUS {
+    if text.contains('\t') {
+      continue;
+    }
+    let summed: u64 = text.graphemes(true).map(|c| c.width() as u64).sum();
+    assert_eq!(measured(text, 4).width(), summed, "{text:?}: {why}");
+    assert_eq!(
+      summed,
+      text.width() as u64,
+      "{text:?}: per-cluster and whole-string width have diverged — record the input, keep the \
+       per-cluster model: {why}"
+    );
   }
 }
