@@ -179,6 +179,28 @@ impl<P: Palette> Terminal<P> {
   /// a row cannot become a denial of service. It bounds what this renderer DRAWS;
   /// [`LineCells::write_expanded`] still writes whatever it is handed, because a caller drawing its
   /// own excerpt owns the size of what it asked for.
+  ///
+  /// # What it covers: the excerpt, and not the caller's own words
+  ///
+  /// This bounds **source-excerpt geometry**. It does not bound the message, the code, the origin,
+  /// the labels or the help text, and that is a decision rather than a gap. A whole render is
+  /// therefore
+  ///
+  /// > a bound from this number, **plus** whatever the caller passed in.
+  ///
+  /// The two halves differ in kind. An excerpt **amplifies**: 257 bytes of tabs become 65,536
+  /// cells, two hundred and fifty times what was handed over and nothing the caller could have
+  /// predicted from it. Bounding that is painty's job because painty created it. Caller text
+  /// **passes through**: a ten-megabyte label is printed once and produces ten megabytes, the
+  /// caller already knows how long its own string is, and it can pass a shorter one.
+  ///
+  /// Truncating it would be the worse failure. A diagnostic exists to say something, and one that
+  /// silently drops the part its author wrote is lying about what it was asked to report — an
+  /// invisible loss, in exchange for bounding a size the caller had already chosen. `rustc` does not
+  /// cut your error message either.
+  ///
+  /// Both halves are pinned in `tests/writer_discipline.rs`: that no small input yields a large
+  /// excerpt, and that a large label really does come out whole.
   #[inline]
   #[must_use]
   pub const fn max_rendered_width() -> u64 {

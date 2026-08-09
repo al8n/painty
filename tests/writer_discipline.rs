@@ -534,3 +534,103 @@ fn the_geometry_costs_the_window_and_not_the_line() {
      is following the line rather than stopping at the window"
   );
 }
+
+/// The two halves of the size contract, stated as one inequality.
+///
+/// `max_rendered_width` bounds the EXCERPT and not the caller's own strings, so what a render
+/// produces is a bound from the policy plus whatever was passed in. Both halves need pinning and
+/// they pin against each other: assert only the first and a future change could satisfy it by
+/// truncating a label; assert only the second and the amplification bound could quietly lapse.
+mod the_size_contract {
+  use super::{Accepting, cases, render_into};
+  use painty::{
+    Diagnostic, Location, Severity, Source, Span, Theme,
+    terminal::{Input, Terminal},
+  };
+
+  #[test]
+  fn no_small_input_produces_a_large_excerpt() {
+    // The half painty owns, because painty creates it: an excerpt AMPLIFIES. 257 bytes of tabs ask
+    // for 65,536 cells, two hundred and fifty times what was handed over, and a caller could not
+    // have predicted it from the input.
+    //
+    // Every case here carries short caller text, so anything large in the output came from the
+    // source — which is what makes this the amplification statement rather than a restatement of
+    // the emission bound.
+    let ceiling = Terminal::<Theme>::max_rendered_width();
+    let allowed = usize::try_from(ceiling)
+      .unwrap_or(usize::MAX)
+      .saturating_mul(8);
+
+    for case in cases() {
+      let mut out = Accepting::default();
+      render_into(&case, &mut out).expect("a counting writer never refuses");
+      assert!(
+        case.text.len() < allowed,
+        "{}: the INPUT is already over the allowance, so this case cannot show amplification",
+        case.what
+      );
+      assert!(
+        out.taken < allowed,
+        "{}: {} bytes of source became {} characters, over the {allowed} a ceiling of {ceiling} \
+         allows",
+        case.what,
+        case.text.len(),
+        out.taken
+      );
+    }
+  }
+
+  #[test]
+  fn a_large_label_is_printed_in_full_and_not_cut() {
+    // The half painty does NOT own, pinned deliberately so that a future change which starts
+    // truncating fails here rather than passing quietly.
+    //
+    // Caller text PASSES THROUGH: it is printed once, so ten megabytes in is ten megabytes out.
+    // There is no amplification to bound and no surprise to prevent — the caller knows how long its
+    // own string is and can pass a shorter one. Cutting it would be the worse failure: a diagnostic
+    // that silently drops the part its author wrote is lying about what it was asked to report, and
+    // the caller cannot see that it happened.
+    let long = "x".repeat(100_000);
+    let message = format!("message {long}");
+    let source = "fn main() {}\n";
+    let diagnostic = Diagnostic::new(
+      "mylang::test::rule",
+      Severity::Error,
+      &message,
+      Location::new(0, Span::new(0, 2)),
+    )
+    .with_primary_label(&long)
+    .with_help(&long);
+
+    let mut out = String::new();
+    Terminal::plain()
+      .render(
+        &diagnostic,
+        &[Input::new(Source::new(source)).with_origin(&long)],
+        &mut out,
+      )
+      .expect("a String is writable");
+
+    // Four caller strings carry it — message, label, help and origin — and each must carry it
+    // whole. Counted rather than merely found, so truncating one of the four cannot pass.
+    assert_eq!(
+      out.matches(long.as_str()).count(),
+      4,
+      "a caller string was cut: the label appears {} times in {} characters of output",
+      out.matches(long.as_str()).count(),
+      out.chars().count()
+    );
+    assert!(
+      out.chars().count() > 4 * long.chars().count(),
+      "the output is shorter than the text handed to it"
+    );
+
+    // And no elision mark anywhere, because nothing here is an excerpt over the ceiling. The `…` is
+    // the excerpt's business; a caller string never earns one.
+    assert!(
+      !out.contains('…'),
+      "caller text was marked as elided, which is what this test exists to forbid"
+    );
+  }
+}
