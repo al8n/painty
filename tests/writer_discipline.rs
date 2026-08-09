@@ -50,6 +50,53 @@
 //! A `#[global_allocator]` is per-binary. Keeping it here rather than beside the appearance tests
 //! means the tests that read output run under the ordinary allocator, and the one thing in the
 //! crate that measures allocation is the one thing affected by measuring it.
+//!
+//! # Almost none of this is interpreted under Miri
+//!
+//! Four of the five dimensions above are RESOURCE dimensions — how much is emitted, how much is
+//! allocated, how much work is done, and how wide a column is on a narrower target. Miri answers a
+//! different question, whether an execution path has undefined behaviour, and it is not an
+//! instrument for any of the four; the two timing tests below already say as much in their own
+//! `ignore` reasons.
+//!
+//! What makes that decisive rather than philosophical is the size of the inputs. [`cases`] is sized
+//! against `Terminal::max_source_bytes`, which is 65,536, so one render walks and segments tens of
+//! thousands of bytes — and five of the tests below render the whole table, between six and roughly
+//! two thousand times each. Three more build their own large inputs instead: two twenty-kilobyte
+//! origins, a twenty-thousand-byte line, and four caller strings of a hundred kilobytes apiece.
+//!
+//! CI has measured exactly one of them. Six of the eight cells in Miri run 31316096247 reached this
+//! file at all — the other two had already ICEd in `tests/numeric_widths.rs` — and not one of the
+//! six got past its SECOND test. [`a_cut_row_says_that_it_was_cut`], eight renders, took 7m37s on
+//! the quickest cell and 48m34s on the slowest, and two cells were killed while still inside it. On
+//! the four that finished it, [`the_size_contract::a_large_label_is_printed_in_full_and_not_cut`]
+//! was still running 3h14m later when the job hit GitHub's six-hour ceiling. Six of the eight cells
+//! died on that ceiling rather than on a finding.
+//!
+//! So every test here that renders a large input carries `#[cfg_attr(miri, ignore = "…")]`, and one
+//! added below should carry one too. **Nothing about painty's execution leaves the interpreter's
+//! view with them**, which is the part worth checking rather than asserting:
+//!
+//! * `Terminal::render` end to end — `tests/terminal_appearance.rs`, twenty-two tests over realistic
+//!   inputs, 20s to 67s per cell.
+//! * The elision path, which is what the table exists to reach —
+//!   [`past_the_ceiling_the_output_stops_depending_on_the_input`], which is NOT ignored. It renders
+//!   the two small tab cases, asserts the mark is there, and costs about half a minute.
+//! * The ceiling and byte-budget arithmetic underneath it —
+//!   `a_ceiling_stops_the_walk_where_a_whole_unit_stops`,
+//!   `a_zero_width_run_is_stopped_by_the_byte_budget_and_by_nothing_else` and
+//!   `slicing_a_line_at_the_budget_does_not_change_the_units_before_the_cut`, in
+//!   `src/terminal/tests.rs`, all on inputs a few bytes long.
+//! * A writer that refuses — `Budgeted`, in the same file.
+//!
+//! And the ignored tests are not skipped anywhere else: `cargo hack test -p painty
+//! --feature-powerset` runs them on three operating systems, as do the coverage and sanitizer jobs.
+//!
+//! Test by test rather than a whole-file `#![cfg(not(miri))]` like `tests/numeric_widths.rs` carries,
+//! and the reason is [`Counting`] below. It is the crate's only `unsafe`, so it is the only thing
+//! here Miri can have a finding about, and it is exercised on every allocation this binary makes —
+//! including the harness's own, with every test body ignored. The whole-file form would take it out
+//! with them.
 
 #![cfg(feature = "terminal")]
 
@@ -312,6 +359,11 @@ fn render_into(case: &Case, out: &mut impl core::fmt::Write) -> core::fmt::Resul
 }
 
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "a size bound over the whole 65,536-byte case table, which Miri neither checks nor can \
+            afford"
+)]
 fn what_the_renderer_emits_is_bounded_by_policy_and_not_by_the_input() {
   // Dimension 1, and the one the other three do not imply. Streaming a row instead of building it
   // moved the cost from an allocation to the writer; against a writer that says yes — a `String`, a
@@ -378,6 +430,12 @@ fn past_the_ceiling_the_output_stops_depending_on_the_input() {
 }
 
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "eight renders of the whole case table: 7m37s on the quickest Miri cell and 48m34s on \
+            the slowest. The elision path it reaches stays interpreted by \
+            `past_the_ceiling_the_output_stops_depending_on_the_input`"
+)]
 fn a_cut_row_says_that_it_was_cut() {
   // Elision has to be visible. A diagnostic that quietly truncates is worse than one that admits
   // it: the reader believes they are looking at the line.
@@ -426,6 +484,11 @@ fn a_cut_row_says_that_it_was_cut() {
 }
 
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "thirty-two renders of the whole case table, measuring allocation — which under an \
+            interpreter is the interpreter's and not the renderer's"
+)]
 fn the_renderer_allocates_nothing_proportional_to_a_row() {
   // Dimension 2. Both rows used to be built into `String`s before `out` was consulted, so a caller
   // with a bounded or refusing writer could not decline what it never saw.
@@ -453,6 +516,11 @@ fn the_renderer_allocates_nothing_proportional_to_a_row() {
 }
 
 #[test]
+#[cfg_attr(
+  miri,
+  ignore = "roughly two thousand renders of the whole case table, one per budget in the sweep. The \
+            refusal path itself stays interpreted by `Budgeted` in `src/terminal/tests.rs`"
+)]
 fn a_refused_write_is_reported_and_leaves_no_style_open() {
   // Dimension 3. `styled_with` wrote the opener, then `body(..)?` — so any failure returned before
   // the reset and left the caller's terminal wearing a style. The closure form was introduced for
@@ -582,6 +650,10 @@ mod the_size_contract {
   };
 
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "a size bound over six of the eight cases, two of them twenty kilobytes"
+  )]
   fn no_small_input_produces_a_large_excerpt() {
     // The half painty owns, because painty creates it: an excerpt AMPLIFIES. 257 bytes of tabs ask
     // for 65,536 cells, two hundred and fifty times what was handed over, and a caller could not
@@ -625,6 +697,11 @@ mod the_size_contract {
   }
 
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "a size bound over two twenty-kilobyte origins; over seven minutes under tree borrows \
+              on the development machine, and unmeasured on any CI cell because none reached it"
+  )]
   fn alternating_inputs_do_not_multiply_their_origins_or_their_source_rows() {
     // Caller text is pass-through at 1x — that is the contract — and this path made it k, twice
     // over and for two different reasons.
@@ -733,6 +810,10 @@ mod the_size_contract {
   }
 
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "a size bound over a twenty-thousand-byte line rendered at two label counts"
+  )]
   fn labels_on_one_line_add_marker_rows_and_not_excerpts() {
     // The output half of the k axis, and the half no timing can see: an excerpt is bounded by the
     // ceiling, so drawing k of them costs `k × 4096` characters and no measurable time next to a
@@ -810,6 +891,12 @@ mod the_size_contract {
   }
 
   #[test]
+  #[cfg_attr(
+    miri,
+    ignore = "four hundred kilobytes of caller text through one render. This is the one that ended \
+              the Miri run: it had not finished 3h14m in when the job hit its six-hour ceiling, on \
+              every cell that got as far as starting it"
+  )]
   fn a_large_label_is_printed_in_full_and_not_cut() {
     // The half painty does NOT own, pinned deliberately so that a future change which starts
     // truncating fails here rather than passing quietly.
