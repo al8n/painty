@@ -95,6 +95,35 @@
 //! 2^63 and a `u64` cannot overflow. The increments are therefore plain `+`, and a debug build
 //! panics if that reasoning is ever wrong — which is the direction to fail in. A saturating
 //! increment would instead hand back a number indistinguishable from a real one.
+//!
+//! # NOT INTERPRETED UNDER MIRI
+//!
+//! Miri answers one question — whether an execution path has undefined behaviour — and the answer
+//! is a property of the path rather than of how often it is walked. Everything here reads painty's
+//! source TEXT: `syn` parses the sixteen files in [`CRATE`] and the censuses walk the trees. None
+//! of painty's own paths is exercised by that, so the interpreter has nothing to have an opinion
+//! about. The two tests that do call painty — [`the_pinned_widths_are_the_values_the_crate_produces`]
+//! and [`the_last_line_number_and_the_line_count_are_the_same_number`] — run a fourteen-byte source
+//! through accessors that `tests/resolution_invariants.rs` and the lib's own unit tests put through
+//! the interpreter thousands of times over, so nothing leaves Miri's view with this file.
+//!
+//! Leaving it in does not cost a slow cell, it costs a red one, in two different ways. Interpreting
+//! `syn` took between 2h22m and 4h58m per cell in run 31316096247 — by a wide margin the largest
+//! single item in a job GitHub caps at six hours, and up to 83% of one cell's whole budget. On
+//! `i686-unknown-linux-gnu` it does not finish at all: Miri hands each allocation a fresh address
+//! out of the target's four-gigabyte space, a census this long exhausts it, and validation ICEs with
+//! `there are no more free addresses in the address space` — 1h44m in under tree borrows, 58m under
+//! stacked borrows. That is a limit of the interpreter's address allocator on a 32-bit target, not a
+//! finding about painty, and no `MIRIFLAGS` entry raises it.
+//!
+//! `#![cfg(not(miri))]` rather than `#[cfg_attr(miri, ignore)]` per test, because the reason is a
+//! property of what this file DOES and not of any test in it: it belongs where a reader looking for
+//! it will be, and a test added below inherits it instead of having to remember an attribute. The
+//! ICE also arrives during *evaluation* rather than compilation, so an ignored-but-present test
+//! would be enough — but the whole-file form is the one that cannot go stale. `cfg(miri)` is set by
+//! the interpreter and by nothing else, so `cargo test`, the coverage lane and the sanitizer lane
+//! still compile and run every test here; the emptiness cannot spread beyond the two Miri lanes.
+#![cfg(not(miri))]
 
 use painty::{
   Ansi16, Color, Line, LineBreak, Location, PathSegment, Position, Region, RegionLine, Source, Span,
