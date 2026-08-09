@@ -1008,17 +1008,14 @@ fn a_tab_width_is_bounded_at_both_ends() {
   }
 }
 
-/// A cluster, the cells it occupies, and where the `x` after it therefore lands.
-///
-/// Hand-written rather than computed, and that is the point: a table derived from the crate's own
-/// units would agree with any implementation of them. These are the columns a terminal paints, and
-/// a wrong implementation has to produce a different number.
 /// Where a terminal paints each cluster of a line, written from the terminal side.
 ///
-/// A row is the clusters in order with the cells each occupies, and the line is their
-/// concatenation — so the BOUNDARIES are hand-written too, not read out of the segmenter. That is
-/// what makes this an oracle rather than a restatement: the crate's units are checked against a
-/// table computed by no library, and the segmenter is checked against it as well.
+/// Hand-written rather than computed, and that is the point: a table derived from the crate's own
+/// units would agree with any implementation of them. A row is the clusters in order with the cells
+/// each occupies, and the line is their concatenation — so the BOUNDARIES are hand-written too, not
+/// read out of the segmenter. That is what makes this an oracle rather than a restatement: the
+/// crate's units are checked against a table computed by no library, and the segmenter is checked
+/// against it as well.
 ///
 /// Multi-cluster rows exist for the divergence set. `لا` is two clusters of one cell each, and
 /// `unicode-width` scores the pair 1 — the whole subject of the round that produced this table. It
