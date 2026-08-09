@@ -1,5 +1,5 @@
 use super::LineCells;
-use crate::Source;
+use crate::{Source, Span};
 
 /// The corpus, and what each member is here to break.
 ///
@@ -182,14 +182,32 @@ fn a_display_column_equals_a_character_column_exactly_when_every_character_is_on
 }
 
 #[test]
-fn a_combining_mark_occupies_no_cells() {
-  // `e` then U+0301. The mark is a character and two bytes, and zero cells.
+fn a_combining_mark_occupies_no_cells_and_belongs_to_its_base() {
+  // `e` then U+0301, then `f`. The mark is a character and two bytes and zero cells, and it is not
+  // separately placeable: a terminal draws it on the `e`.
+  //
+  // This assertion changed when the geometry did, and the reason is a change of DEFINITION rather
+  // than a test bent to fit new output. It used to say byte 1 is column 2 — "after the `e`" —
+  // which is true of a prefix measured on its own and false of anything a terminal draws. An
+  // offset inside a placement unit now reports where that unit begins, because that is where the
+  // whole of it appears.
   let cells = measured("e\u{301}f", 4);
   assert_eq!(cells.column_at(0), 1);
-  assert_eq!(cells.column_at(1), 2, "after `e`");
-  assert_eq!(cells.column_at(3), 2, "after the mark, which draws nothing");
+  assert_eq!(
+    cells.column_at(1),
+    1,
+    "inside the cluster, which is drawn at column one"
+  );
+  assert_eq!(
+    cells.column_at(3),
+    2,
+    "the `f`, after the cluster's single cell"
+  );
   assert_eq!(cells.width(), 2);
   assert_eq!(cells.line().char_count(), 3, "three characters, two cells");
+
+  // And a span over only the mark is widened to the cluster, because half of one cannot be drawn.
+  assert_eq!(cells.columns_for(Span::new(1, 3)), 1..2);
 }
 
 #[test]
@@ -549,8 +567,8 @@ fn a_capability_orders_from_none_upwards() {
 // invariant gets written to agree with the golden instead of with the definition — which is
 // exactly how the cell test above came to compare against a guessed eight.
 
-use super::Terminal;
-use crate::{Diagnostic, Label, Location, Severity, Span, Theme};
+use super::{Input, Terminal};
+use crate::{Diagnostic, Label, Location, Severity, Theme};
 
 /// A diagnostic assembled over `text`, with whatever positions the caller names.
 fn diagnose<'a>(
@@ -566,7 +584,7 @@ fn diagnose<'a>(
 fn render(diagnostic: &Diagnostic<'_>, text: &str) -> String {
   let mut out = String::new();
   Terminal::plain()
-    .render(diagnostic, Source::new(text), None, &mut out)
+    .render(diagnostic, &[Input::new(Source::new(text))], &mut out)
     .expect("a String never fails to be written to");
   out
 }
@@ -701,8 +719,7 @@ fn nothing_is_emitted_for_a_style_that_asks_for_nothing() {
   Terminal::with_palette(Theme::monochrome())
     .render(
       &diagnostic,
-      Source::new(text),
-      None,
+      &[Input::new(Source::new(text))],
       &mut monochrome_at_none,
     )
     .expect("a String is writable");
@@ -715,8 +732,7 @@ fn nothing_is_emitted_for_a_style_that_asks_for_nothing() {
     .with_capability(ColorCapability::Ansi16)
     .render(
       &diagnostic,
-      Source::new(text),
-      None,
+      &[Input::new(Source::new(text))],
       &mut monochrome_in_colour,
     )
     .expect("a String is writable");
@@ -813,4 +829,127 @@ fn a_whole_input_position_shows_no_excerpt_rather_than_a_fabricated_one() {
   assert!(!out.contains("-->"), "{out}");
   assert!(!out.contains('^'), "{out}");
   assert_eq!(out.lines().count(), 1, "{out}");
+}
+
+/// Placement units, recognised a **different way** from how the crate computes them.
+///
+/// The crate finds a unit by asking the width table: characters join while the measured width does
+/// not change. This walks characters and joins on the *identity* of the joiner — a zero-width
+/// character, a zero-width joiner, or a variation selector. It is a cruder model, and deliberately
+/// so.
+///
+/// That difference is the whole value. The review that prompted this found the previous invariant
+/// cross-checking the renderer against the cell layer while both were built on prefix slicing: they
+/// agreed with each other and disagreed with the terminal. **A cross-check between two layers is
+/// evidence only if the layers do not share the model being checked.**
+fn clusters_by_character(text: &str) -> Vec<(usize, usize)> {
+  use unicode_width::UnicodeWidthChar;
+  let mut out: Vec<(usize, usize)> = Vec::new();
+  for (at, character) in text.char_indices() {
+    // `Some(0)` and `None` are different answers and conflating them was this oracle's own first
+    // bug, caught on its first run by disagreeing with the crate: a combining mark is a zero-width
+    // character and joins its base, while a control character simply has no table entry and joins
+    // nothing. A shared-model cross-check could not have surfaced that.
+    let joins =
+      matches!(character, '\u{200d}' | '\u{fe0e}' | '\u{fe0f}') || character.width() == Some(0);
+    let after_joiner = out.last().is_some_and(|(start, _)| {
+      text[*start..at]
+        .chars()
+        .last()
+        .is_some_and(|previous| previous == '\u{200d}')
+    });
+    match out.last_mut() {
+      Some(last) if (joins || after_joiner) && character != '\t' => {
+        last.1 = at + character.len_utf8();
+      }
+      _ => out.push((at, at + character.len_utf8())),
+    }
+  }
+  out
+}
+
+#[test]
+fn a_span_touching_a_cluster_is_widened_to_the_whole_cluster() {
+  // The defect this replaced: a span over one component of a joined emoji produced an empty range
+  // that widened into the cell of the character AFTER the cluster, so the marker pointed at the
+  // wrong glyph. Checked against the character-based oracle above rather than against the crate's
+  // own units.
+  for (text, why) in CORPUS {
+    if text.contains('\t') || text.is_empty() {
+      continue;
+    }
+    let cells = measured(text, 4);
+    for (start, end) in clusters_by_character(text) {
+      // Every interior slice of a cluster must produce the same marker as the whole cluster.
+      let whole = cells.columns_for(Span::new(start, end));
+      let mut inner = start;
+      while inner < end {
+        if text.is_char_boundary(inner) {
+          let mut outer = inner + 1;
+          while outer <= end {
+            if text.is_char_boundary(outer) {
+              assert_eq!(
+                cells.columns_for(Span::new(inner, outer)),
+                whole,
+                "{text:?}: {inner}..{outer} inside cluster {start}..{end} — {why}"
+              );
+            }
+            outer += 1;
+          }
+        }
+        inner += 1;
+      }
+      assert!(
+        whole.end > whole.start,
+        "{text:?}: cluster {start}..{end} has no cells"
+      );
+    }
+  }
+}
+
+#[test]
+fn a_marker_never_lands_on_a_cell_outside_the_span_it_describes() {
+  // Stated as the property a reader actually cares about: whatever the marker covers, the cell
+  // immediately after it must belong to something the span does not touch.
+  let text = "👨\u{200d}👩\u{200d}👧x";
+  let cells = measured(text, 4);
+  let family = cells.columns_for(Span::new(7, 11));
+  let following = cells.column_at(text.len() - 1);
+  assert!(
+    family.end <= following,
+    "the marker for an interior component reaches the following character: {family:?} against {following}"
+  );
+  assert_eq!(
+    family,
+    1..3,
+    "the whole family, which is what a terminal draws"
+  );
+}
+
+#[test]
+fn a_tab_width_is_bounded_at_both_ends() {
+  // Caller-supplied and multiplied into every column, so it is bounded rather than trusted.
+  // `u64::MAX` used to panic in `column_at` with an add overflow, and would have made
+  // `write_expanded` emit that many spaces.
+  for asked in [
+    0,
+    1,
+    4,
+    LineCells::max_tab_width(),
+    LineCells::max_tab_width() + 1,
+    u64::MAX,
+  ] {
+    let cells = measured("a\tb", asked);
+    assert!(cells.tab_width() >= 1);
+    assert!(cells.tab_width() <= LineCells::max_tab_width());
+    // Total: no panic, and the arithmetic stays somewhere a terminal could draw.
+    let width = cells.width();
+    assert!(
+      width <= LineCells::max_tab_width() + 2,
+      "asked {asked}, got {width} cells"
+    );
+    let mut expanded = String::new();
+    cells.write_expanded(&mut expanded).expect("writable");
+    assert!(expanded.len() <= LineCells::max_tab_width() as usize + 2);
+  }
 }

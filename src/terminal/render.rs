@@ -3,6 +3,50 @@ use core::fmt;
 use super::{ColorCapability, LineCells};
 use crate::{Color, Diagnostic, Palette, RegionLine, Role, Source, Style, Theme};
 
+/// One of the caller's inputs: its text, and whatever the caller calls it.
+///
+/// A [`Location`](crate::Location) carries a `source: u32` that indexes the list the producer was
+/// numbering, so a renderer needs that same list to resolve a span. Mapping an index to a *name*
+/// stays with the caller — painty is not a source-file manager — which is why the name comes in
+/// here rather than being looked up.
+#[derive(Debug, Clone, Copy)]
+pub struct Input<'a> {
+  source: Source<'a>,
+  origin: Option<&'a str>,
+}
+
+impl<'a> Input<'a> {
+  /// An input with no name.
+  #[inline]
+  #[must_use]
+  pub const fn new(source: Source<'a>) -> Self {
+    Self {
+      source,
+      origin: None,
+    }
+  }
+
+  /// Names the input — a path, a URL, whatever the caller has.
+  #[inline]
+  #[must_use]
+  pub const fn with_origin(mut self, origin: &'a str) -> Self {
+    self.origin = Some(origin);
+    self
+  }
+
+  /// Returns the text.
+  #[inline]
+  pub const fn source(&self) -> Source<'a> {
+    self.source
+  }
+
+  /// Returns the caller's name for it, if it gave one.
+  #[inline]
+  pub const fn origin(&self) -> Option<&'a str> {
+    self.origin
+  }
+}
+
 /// Renders a diagnostic and its source to a fixed-width terminal.
 ///
 /// # What this draws, and what it does not yet
@@ -18,7 +62,7 @@ use crate::{Color, Diagnostic, Palette, RegionLine, Role, Source, Style, Theme};
 /// eventually want drawn.
 ///
 /// ```
-/// use painty::{Diagnostic, Location, Severity, Source, Span, terminal::Terminal};
+/// use painty::{Diagnostic, Location, Severity, Source, Span, terminal::{Input, Terminal}};
 ///
 /// let text = "type Widget {\n  width: Int\n}\n";
 /// let message = "`width` is defined twice";
@@ -32,7 +76,7 @@ use crate::{Color, Diagnostic, Palette, RegionLine, Role, Source, Style, Theme};
 ///
 /// let mut out = String::new();
 /// Terminal::plain()
-///   .render(&diagnostic, Source::new(text), None, &mut out)
+///   .render(&diagnostic, &[Input::new(Source::new(text))], &mut out)
 ///   .unwrap();
 ///
 /// assert!(out.starts_with("error[mylang::schema::duplicate-field]: `width` is defined twice\n"));
@@ -99,23 +143,35 @@ impl<P: Palette> Terminal<P> {
   /// Never empty: a zero-width span is a caret, and a caret a reader cannot see is not a caret.
   pub fn underline(&self, drawn: RegionLine<'_>) -> core::ops::Range<u64> {
     let cells = LineCells::new(drawn.line(), self.tab_width);
-    let start = cells.column_at(drawn.covered().start());
-    let width = cells
-      .cells_between(drawn.covered().start(), drawn.covered().end())
-      .max(1);
-    start..start + width
+    let marks = cells.columns_for(drawn.covered());
+    if marks.end > marks.start {
+      marks
+    } else {
+      marks.start..marks.start + 1
+    }
   }
 
-  /// Writes `diagnostic` against `source`.
+  /// Writes `diagnostic` against the caller's inputs.
   ///
-  /// `origin` is the caller's name for the input — a path, a URL, whatever it has. painty holds no
-  /// mapping from a [`Location`](crate::Location)'s source index to a name, so if the caller wants
-  /// one shown it supplies it here.
+  /// # Why a list, and not one source
+  ///
+  /// This took a single [`Source`] and resolved every span against it, ignoring
+  /// [`Location::source`](crate::Location::source) entirely. A diagnostic whose label points into
+  /// a *different* input — "first defined here", in another file, which is the commonest
+  /// multi-file diagnostic there is — was rendered against the wrong text, with a confident line
+  /// number and a marker under whatever happened to be there. Silently wrong output, which is the
+  /// failure this crate exists to prevent.
+  ///
+  /// So a location's `source` is used for what it is: an index into the list the producer was
+  /// numbering. Out of range draws no excerpt rather than a fabricated one, on the same terms as
+  /// [`Location::entire`](crate::Location::entire).
+  ///
+  /// painty still owns no mapping from an index to a filename — [`Input::origin`] is the caller's
+  /// name for its own input, supplied because only the caller has it.
   pub fn render(
     &self,
     diagnostic: &Diagnostic<'_>,
-    source: Source<'_>,
-    origin: Option<&str>,
+    inputs: &[Input<'_>],
     out: &mut impl fmt::Write,
   ) -> fmt::Result {
     let severity = diagnostic.severity();
@@ -129,26 +185,29 @@ impl<P: Palette> Terminal<P> {
 
     // Every excerpt this will draw, so the gutter can be sized before any of them is written.
     let mut excerpts = Vec::new();
-    if let Some(span) = diagnostic.primary().span()
-      && let Some(drawn) = source.resolve(span).lines().next()
-    {
-      excerpts.push((drawn, diagnostic.primary_label(), true));
-    }
+    let mut positions = Vec::new();
+    positions.push((diagnostic.primary(), diagnostic.primary_label(), true));
     for label in diagnostic.labels() {
-      if let Some(span) = label.location().span()
-        && let Some(drawn) = source.resolve(span).lines().next()
+      positions.push((label.location(), Some(label.text()), false));
+    }
+    for (location, text, primary) in positions {
+      let Some(input) = inputs.get(location.source() as usize) else {
+        continue;
+      };
+      if let Some(span) = location.span()
+        && let Some(drawn) = input.source.resolve(span).lines().next()
       {
-        excerpts.push((drawn, Some(label.text()), false));
+        excerpts.push((drawn, text, primary, input.origin));
       }
     }
 
     let gutter = excerpts
       .iter()
-      .map(|(drawn, _, _)| digits(drawn.line().number()))
+      .map(|(drawn, _, _, _)| digits(drawn.line().number()))
       .max()
       .unwrap_or(1);
 
-    if let Some((drawn, _, _)) = excerpts.first() {
+    if let Some((drawn, _, _, origin)) = excerpts.first() {
       let column = LineCells::new(drawn.line(), self.tab_width).column_at(drawn.covered().start());
       write!(out, "{:width$}--> ", "", width = gutter as usize)?;
       if let Some(origin) = origin {
@@ -157,7 +216,7 @@ impl<P: Palette> Terminal<P> {
       writeln!(out, "{}:{column}", drawn.line().number())?;
     }
 
-    for (index, (drawn, text, primary)) in excerpts.iter().enumerate() {
+    for (index, (drawn, text, primary, _)) in excerpts.iter().enumerate() {
       if index == 0 {
         self.bar(out, gutter)?;
       }
@@ -285,9 +344,36 @@ fn to_anstyle(style: Style) -> anstyle::Style {
     .effects(effects)
 }
 
+fn to_ansi_color(colour: crate::Ansi16) -> anstyle::AnsiColor {
+  use crate::Ansi16;
+  match colour {
+    Ansi16::Black => anstyle::AnsiColor::Black,
+    Ansi16::Red => anstyle::AnsiColor::Red,
+    Ansi16::Green => anstyle::AnsiColor::Green,
+    Ansi16::Yellow => anstyle::AnsiColor::Yellow,
+    Ansi16::Blue => anstyle::AnsiColor::Blue,
+    Ansi16::Magenta => anstyle::AnsiColor::Magenta,
+    Ansi16::Cyan => anstyle::AnsiColor::Cyan,
+    Ansi16::White => anstyle::AnsiColor::White,
+    Ansi16::BrightBlack => anstyle::AnsiColor::BrightBlack,
+    Ansi16::BrightRed => anstyle::AnsiColor::BrightRed,
+    Ansi16::BrightGreen => anstyle::AnsiColor::BrightGreen,
+    Ansi16::BrightYellow => anstyle::AnsiColor::BrightYellow,
+    Ansi16::BrightBlue => anstyle::AnsiColor::BrightBlue,
+    Ansi16::BrightMagenta => anstyle::AnsiColor::BrightMagenta,
+    Ansi16::BrightCyan => anstyle::AnsiColor::BrightCyan,
+    Ansi16::BrightWhite => anstyle::AnsiColor::BrightWhite,
+  }
+}
+
 fn to_anstyle_color(colour: Color) -> anstyle::Color {
   match colour {
-    Color::Ansi16(sixteen) => anstyle::Color::Ansi256(anstyle::Ansi256Color(sixteen.index())),
+    // The SIXTEEN, not their indices in the 256 palette. Emitting `Ansi256(1)` where `Ansi(Red)` is
+    // meant produces an escape a sixteen-colour terminal was never promised — the same defect as a
+    // capability of none emitting a bold sequence, one level along: output exceeding the capability
+    // it was narrowed to. `tests/terminal_appearance.rs` now enumerates, per level, which escape
+    // families may appear.
+    Color::Ansi16(sixteen) => anstyle::Color::Ansi(to_ansi_color(sixteen)),
     Color::Ansi256(index) => anstyle::Color::Ansi256(anstyle::Ansi256Color(index)),
     Color::Rgb(red, green, blue) => anstyle::Color::Rgb(anstyle::RgbColor(red, green, blue)),
   }

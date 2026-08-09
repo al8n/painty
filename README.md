@@ -133,7 +133,9 @@ Worked through the whole public surface, that gives:
 
 - **rule 1** — `Position::line`, `Position::column`, `Line::number`, `Line::char_count`,
   `Line::column_at`, `Source::line_count`, `Source::line`, `Region::line_count`,
-  `RegionLine::columns`;
+  `RegionLine::columns`, and every member of `LineCells` — `column_at`, `width`, `columns_for`,
+  `cells_between`, `default_tab_width`, `max_tab_width` — display columns being painty's own
+  geometry just as character columns are;
 - **rule 2** — `PathSegment::Index`, a position in a *result* the producer assembled;
 - **rule 3** — `Location::source`, a `u32` index into the caller's own list of inputs, which is
   what every producer of one already spells it;
@@ -191,6 +193,11 @@ What is left is a member placed under a rule that gives the *same* width — rul
 `u64`, and they differ in where the number came from rather than in what it is — and the rule set
 itself being wrong. No check reads intent. That is what the ordering above is for, and what review
 is for.
+
+Two of those are associated functions where a constant would read more naturally —
+`LineCells::default_tab_width` and `LineCells::max_tab_width`. A `pub const` cannot be pinned by
+ascribing a function pointer, and the choice was between a second pinning mechanism for two members
+and an API shape the one mechanism already covers. The API moved.
 
 ## Features
 

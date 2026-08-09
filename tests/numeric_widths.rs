@@ -761,6 +761,8 @@ fn pin<'a>(_witness: &'a ()) {
     let _: fn(&LineCells<'a>) -> Ordinal = LineCells::width;
     let _: fn(&LineCells<'a>, Count, Count) -> Ordinal = LineCells::cells_between;
     let _: fn() -> Ordinal = LineCells::default_tab_width;
+    let _: fn() -> Ordinal = LineCells::max_tab_width;
+    let _: fn(&LineCells<'a>, Span) -> core::ops::Range<Ordinal> = LineCells::columns_for;
 
     // The renderer's own geometry. A tab width is a distance across the rendered geometry and a
     // marker range is a pair of positions in it, so both are rule 1 for the same reason.

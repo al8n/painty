@@ -20,13 +20,17 @@
 
 use painty::{
   Diagnostic, Label, Location, Severity, Source, Span, Theme,
-  terminal::{ColorCapability, Terminal},
+  terminal::{ColorCapability, Input, Terminal},
 };
 
 fn render(diagnostic: &Diagnostic<'_>, text: &str, origin: Option<&str>) -> String {
+  let mut input = Input::new(Source::new(text));
+  if let Some(origin) = origin {
+    input = input.with_origin(origin);
+  }
   let mut out = String::new();
   Terminal::plain()
-    .render(diagnostic, Source::new(text), origin, &mut out)
+    .render(diagnostic, &[input], &mut out)
     .expect("a String never fails to be written to");
   out
 }
@@ -245,7 +249,7 @@ fn colour_appears_only_when_the_capability_allows_it() {
     let mut out = String::new();
     Terminal::with_palette(theme)
       .with_capability(capability)
-      .render(&diagnostic, Source::new("abc\n"), None, &mut out)
+      .render(&diagnostic, &[Input::new(Source::new("abc\n"))], &mut out)
       .expect("a String is writable");
     out
   };
@@ -280,4 +284,191 @@ fn colour_appears_only_when_the_capability_allows_it() {
   };
   assert_eq!(strip(&sixteen), none);
   assert_eq!(strip(&truecolour), none);
+}
+
+/// Which escape families a rendered string contains.
+///
+/// Parsed rather than searched for, so a family cannot hide inside a longer sequence.
+fn escape_families(rendered: &str) -> Vec<String> {
+  let mut families = Vec::new();
+  let bytes: Vec<char> = rendered.chars().collect();
+  let mut at = 0;
+  while at < bytes.len() {
+    if bytes[at] == '\u{1b}' && bytes.get(at + 1) == Some(&'[') {
+      let mut end = at + 2;
+      while end < bytes.len() && bytes[end] != 'm' {
+        end += 1;
+      }
+      let body: String = bytes[at + 2..end.min(bytes.len())].iter().collect();
+      for parameter in body.split(';').filter(|p| !p.is_empty()) {
+        families.push(parameter.to_owned());
+      }
+      at = end + 1;
+    } else {
+      at += 1;
+    }
+  }
+  families
+}
+
+#[test]
+fn each_capability_emits_only_the_escape_families_it_promises() {
+  // The same class as the no-colour defect found while building, enumerated rather than fixed one
+  // instance at a time: at every level, output that exceeds the level is the bug. The sixteen were
+  // being emitted as `38;5;n`, which is the 256-colour form and a capability a sixteen-colour
+  // terminal was never promised.
+  //
+  // A control character is in the source deliberately: no capability may turn one into an escape.
+  let text = "let \u{7f}x = 1;\n";
+  let message = "a message";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(4, 6)),
+  )
+  .with_primary_label("here")
+  .with_help("do this");
+
+  let at = |theme: Theme, capability| {
+    let mut out = String::new();
+    Terminal::with_palette(theme)
+      .with_capability(capability)
+      .render(&diagnostic, &[Input::new(Source::new(text))], &mut out)
+      .expect("a String is writable");
+    out
+  };
+
+  // None: no escape at all, whatever the theme asks for.
+  for theme in [Theme::new(), Theme::high_contrast(), Theme::monochrome()] {
+    let out = at(theme, ColorCapability::None);
+    assert!(
+      escape_families(&out).is_empty(),
+      "a capability of none emitted {:?}",
+      escape_families(&out)
+    );
+    assert!(out.contains('\u{7f}'), "the control character was altered");
+  }
+
+  // Sixteen: only attributes and the 30–37 / 90–97 foreground families, never `38`, which
+  // introduces the 256-colour and truecolour forms.
+  let sixteen = at(Theme::new(), ColorCapability::Ansi16);
+  let families = escape_families(&sixteen);
+  assert!(!families.is_empty(), "nothing was emitted at all");
+  for family in &families {
+    let code: u16 = family.parse().expect("a numeric SGR parameter");
+    let allowed = matches!(code, 0..=9)
+      || (30..=37).contains(&code)
+      || (40..=47).contains(&code)
+      || (90..=97).contains(&code)
+      || (100..=107).contains(&code);
+    assert!(
+      allowed,
+      "the sixteen-colour capability emitted SGR {code}, which it does not promise: {families:?}"
+    );
+  }
+  assert!(
+    !families.iter().any(|f| f == "38" || f == "48"),
+    "the sixteen-colour capability emitted an extended-colour introducer: {families:?}"
+  );
+
+  // 256: `38;5;n` is allowed, `38;2;r;g;b` is not.
+  let palette = at(
+    Theme::new().with(
+      painty::Role::Severity(Severity::Error),
+      painty::Style::plain().with_foreground(painty::Color::Rgb(200, 30, 40)),
+    ),
+    ColorCapability::Ansi256,
+  );
+  let palette_families = escape_families(&palette);
+  assert!(
+    palette_families.iter().any(|f| f == "5"),
+    "{palette_families:?}"
+  );
+  assert!(
+    !palette_families.iter().any(|f| f == "2"),
+    "the 256-colour capability emitted a truecolour introducer: {palette_families:?}"
+  );
+
+  // Truecolour: the `2` form is what distinguishes it, and its absence would mean the level did
+  // nothing.
+  let truecolour = at(
+    Theme::new().with(
+      painty::Role::Severity(Severity::Error),
+      painty::Style::plain().with_foreground(painty::Color::Rgb(200, 30, 40)),
+    ),
+    ColorCapability::TrueColor,
+  );
+  assert!(escape_families(&truecolour).iter().any(|f| f == "2"));
+}
+
+#[test]
+fn a_label_in_another_input_is_drawn_against_that_input() {
+  // The defect: every span was resolved against one source, so a label pointing into input 1 was
+  // rendered against input 0 — a confident line number and a marker under whatever happened to be
+  // there. Silently wrong output.
+  //
+  // Asserted against the text the WRONG input would have shown, so the defect cannot satisfy it.
+  let schema = "type Widget {\n  width: Int\n}\n";
+  let other = "extend type Widget {\n  width: Float\n}\n";
+  let message = "`width` is declared in two documents";
+  let labels = [Label::new(
+    Location::new(1, Span::new(23, 28)),
+    "and again here",
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::schema::duplicate-field",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(16, 21)),
+  )
+  .with_primary_label("declared here")
+  .with_labels(&labels);
+
+  let mut out = String::new();
+  Terminal::plain()
+    .render(
+      &diagnostic,
+      &[
+        Input::new(Source::new(schema)).with_origin("schema.graphql"),
+        Input::new(Source::new(other)).with_origin("extension.graphql"),
+      ],
+      &mut out,
+    )
+    .expect("a String is writable");
+
+  assert!(
+    out.contains("width: Int"),
+    "the primary input is missing\n{out}"
+  );
+  assert!(
+    out.contains("width: Float"),
+    "the label was not drawn against its own input\n{out}"
+  );
+  assert!(out.contains("schema.graphql:2:3"), "{out}");
+}
+
+#[test]
+fn a_location_naming_an_input_that_was_not_supplied_draws_no_excerpt() {
+  // Total rather than panicking or fabricating: an index past the list is the same situation as a
+  // position with no span, and gets the same answer.
+  let message = "a message";
+  let labels = [Label::new(Location::new(7, Span::new(0, 1)), "elsewhere")];
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, 3)),
+  )
+  .with_labels(&labels);
+
+  let mut out = String::new();
+  Terminal::plain()
+    .render(&diagnostic, &[Input::new(Source::new("abc\n"))], &mut out)
+    .expect("a String is writable");
+  assert!(out.contains("^^^"), "{out}");
+  assert!(
+    !out.contains("elsewhere"),
+    "an absent input was drawn anyway\n{out}"
+  );
 }

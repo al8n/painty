@@ -7,7 +7,7 @@ mod render;
 mod width;
 
 pub use detect::{CapturedEnvironment, ColorCapability, ColorChoice, Environment};
-pub use render::Terminal;
+pub use render::{Input, Terminal};
 pub use width::LineCells;
 
 #[cfg(test)]
