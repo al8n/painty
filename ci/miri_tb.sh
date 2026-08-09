@@ -63,4 +63,31 @@ export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbo
 #
 # `ci/miri_sb.sh` carries the same line and has to keep carrying it: a fix that lands in one of two
 # sibling scripts and not the other is a defect this program keeps repeating.
+#
+# WHAT `--tests` SELECTS AND DOES NOT INTERPRET. Two integration targets opt out from inside the
+# file, and they are named here because a reader of the line below would otherwise take `--tests` at
+# its word. Nine units are selected and nine are built; seven of them run whole, one runs nothing at
+# all, and one is down to a single test:
+#
+#   * `tests/numeric_widths.rs` is `#![cfg(not(miri))]`, so it builds and runs zero tests. It is a
+#     `syn` census over painty's source TEXT and walks none of painty's own paths, so there is
+#     nothing in it for an interpreter to have an opinion about. It cost between 2h22m and 4h58m per
+#     cell in run 31316096247, and on `i686-unknown-linux-gnu` it did not finish at all: Miri hands
+#     every allocation a fresh address out of the target's four gigabytes, a census this long
+#     exhausts them, and validation ICEs with `there are no more free addresses in the address
+#     space`. No `MIRIFLAGS` entry raises that ceiling.
+#   * `tests/writer_discipline.rs` keeps one test and `#[cfg_attr(miri, ignore)]`s the rest. Its case
+#     table is sized against a 65,536-byte budget, and the ignored tests render it between six and
+#     roughly two thousand times each or build their own inputs of the same order. The only one CI
+#     ever managed to measure took 7m37s on the quickest cell and 48m34s on the slowest, and no cell
+#     got past the test after it before the ceiling.
+#
+# Neither is dropped from CI, only from the interpreter: `cargo hack test -p painty
+# --feature-powerset` in `.github/workflows/ci.yml` runs both in full on three operating systems, as
+# do the coverage and sanitizer jobs. Each file's header says what still covers its paths here.
+#
+# The exclusions live in the FILES and not in a `--test a --test b` list on this line, deliberately.
+# A cargo target filter that stops matching warns and exits 0, so a list here would go quietly wrong
+# the first time a target is renamed — and a reader of the test would have no way to learn that it
+# never runs. In the file, the reason is where the reader already is.
 cargo miri test -p painty --lib --tests --all-features --target "$TARGET"

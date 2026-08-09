@@ -39,4 +39,10 @@ export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbo
 
 # `-p painty` names the package, and `--lib --tests` keeps bench targets out of the interpreter;
 # see the note in `ci/miri_tb.sh`, which this line is the sibling of and must stay identical to.
+#
+# That note also lists the two integration targets which `--tests` selects here and which interpret
+# nothing or almost nothing — `tests/numeric_widths.rs`, whose `syn` census ICEd the 32-bit cell on
+# Miri's address space, and `tests/writer_discipline.rs`, whose case table is sized for a
+# 65,536-byte budget rather than for an interpreter. Both opt out from inside the file, so this
+# script is not what excludes them and editing this line will not bring them back.
 cargo miri test -p painty --lib --tests --all-features --target "$TARGET"
