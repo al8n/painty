@@ -197,29 +197,35 @@ impl<P: Palette> Terminal<P> {
       if let Some(span) = location.span()
         && let Some(drawn) = input.source.resolve(span).lines().next()
       {
-        excerpts.push((drawn, text, primary, input.origin));
+        excerpts.push((drawn, text, primary, location.source(), input.origin));
       }
     }
 
     let gutter = excerpts
       .iter()
-      .map(|(drawn, _, _, _)| digits(drawn.line().number()))
+      .map(|(drawn, _, _, _, _)| digits(drawn.line().number()))
       .max()
       .unwrap_or(1);
 
-    if let Some((drawn, _, _, origin)) = excerpts.first() {
-      let column = LineCells::new(drawn.line(), self.tab_width).column_at(drawn.covered().start());
-      write!(out, "{:width$}--> ", "", width = gutter as usize)?;
-      if let Some(origin) = origin {
-        write_shown(out, origin)?;
-        out.write_char(':')?;
-      }
-      writeln!(out, "{}:{column}", drawn.line().number())?;
-    }
-
-    for (index, (drawn, text, primary, _)) in excerpts.iter().enumerate() {
-      if index == 0 {
+    // A header per input, and the key is the input INDEX rather than the origin string. Resolving
+    // each span against its own input was half the multi-input fix; the other half is saying which
+    // input a row came from, because a secondary label in another file was otherwise drawn under
+    // the first file's header — the reader told, confidently and silently, that text came from a
+    // file it did not come from. Two inputs with no origin, or with the same one, are still two
+    // inputs, and only the index distinguishes them.
+    let mut shown_input = None;
+    for (drawn, text, primary, source, origin) in &excerpts {
+      if shown_input != Some(*source) {
+        let column =
+          LineCells::new(drawn.line(), self.tab_width).column_at(drawn.covered().start());
+        write!(out, "{:width$}--> ", "", width = gutter as usize)?;
+        if let Some(origin) = origin {
+          write_shown(out, origin)?;
+          out.write_char(':')?;
+        }
+        writeln!(out, "{}:{column}", drawn.line().number())?;
         self.bar(out, gutter)?;
+        shown_input = Some(*source);
       }
       self.excerpt(out, gutter, *drawn, *text, *primary)?;
       self.bar(out, gutter)?;

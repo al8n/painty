@@ -460,6 +460,142 @@ fn a_label_in_another_input_is_drawn_against_that_input() {
 }
 
 #[test]
+fn every_input_an_excerpt_comes_from_is_named_above_it() {
+  // The half of the multi-input fix that did not land. Resolving each span against its own input
+  // stopped the renderer drawing the wrong TEXT; the header stayed single-origin, so the right text
+  // appeared under the wrong filename. That is the same class of defect the resolution fix closed —
+  // a reader told, confidently and silently, where something is — and it is worse than no name at
+  // all, because a name that is present is believed.
+  let schema = "type Widget {\n  width: Int\n}\n";
+  let other = "extend type Widget {\n  width: Float\n}\n";
+  let message = "`width` is declared in two documents";
+  let labels = [Label::new(
+    Location::new(1, Span::new(23, 28)),
+    "and again here",
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::schema::duplicate-field",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(16, 21)),
+  )
+  .with_primary_label("declared here")
+  .with_labels(&labels);
+
+  let mut out = String::new();
+  Terminal::plain()
+    .render(
+      &diagnostic,
+      &[
+        Input::new(Source::new(schema)).with_origin("schema.graphql"),
+        Input::new(Source::new(other)).with_origin("extension.graphql"),
+      ],
+      &mut out,
+    )
+    .expect("a String is writable");
+
+  // The whole frame, because what was wrong was the ARRANGEMENT rather than any one value: the
+  // second file's row sat under the first file's header, and only the order of the rows says so.
+  assert_eq!(
+    out,
+    "\
+error[mylang::schema::duplicate-field]: `width` is declared in two documents
+ --> schema.graphql:2:3
+  |
+2 |   width: Int
+  |   ^^^^^ declared here
+  |
+ --> extension.graphql:2:3
+  |
+2 |   width: Float
+  |   ----- and again here
+  |
+"
+  );
+}
+
+#[test]
+fn one_input_is_named_once_however_many_excerpts_it_has() {
+  // The converse, and the reason the header is keyed on the input rather than emitted per excerpt:
+  // two labels in the same file are one file, and repeating its name between them would be noise a
+  // reader has to re-read to discover says nothing new.
+  let schema = "type Widget {\n  width: Int\n  width: Int\n}\n";
+  let message = "`width` is defined twice";
+  let labels = [Label::new(
+    Location::new(0, Span::new(29, 34)),
+    "and again here",
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::schema::duplicate-field",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(16, 21)),
+  )
+  .with_primary_label("declared here")
+  .with_labels(&labels);
+
+  let mut out = String::new();
+  Terminal::plain()
+    .render(
+      &diagnostic,
+      &[Input::new(Source::new(schema)).with_origin("schema.graphql")],
+      &mut out,
+    )
+    .expect("a String is writable");
+
+  assert_eq!(
+    out.matches("--> ").count(),
+    1,
+    "the same input was announced more than once: {out}"
+  );
+  assert_eq!(
+    out.matches("schema.graphql").count(),
+    1,
+    "the same origin was repeated: {out}"
+  );
+}
+
+#[test]
+fn two_unnamed_inputs_are_still_two_inputs() {
+  // Keying the header on the origin STRING rather than the input index would collapse these two
+  // into one announcement, and the second excerpt would again sit under a header that is not its
+  // own — the defect surviving in the case where nothing names it. Two inputs with the same origin
+  // would collapse the same way.
+  let first = "alpha\n";
+  let second = "beta\n";
+  let message = "a message";
+  let labels = [Label::new(Location::new(1, Span::new(0, 4)), "and here")];
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, 5)),
+  )
+  .with_primary_label("here")
+  .with_labels(&labels);
+
+  let mut out = String::new();
+  Terminal::plain()
+    .render(
+      &diagnostic,
+      &[
+        Input::new(Source::new(first)),
+        Input::new(Source::new(second)),
+      ],
+      &mut out,
+    )
+    .expect("a String is writable");
+
+  assert_eq!(
+    out.matches("--> ").count(),
+    2,
+    "an unnamed second input was folded into the first: {out}"
+  );
+  assert!(out.contains("alpha"), "{out}");
+  assert!(out.contains("beta"), "{out}");
+}
+
+#[test]
 fn a_location_naming_an_input_that_was_not_supplied_draws_no_excerpt() {
   // Total rather than panicking or fabricating: an index past the list is the same situation as a
   // position with no span, and gets the same answer.
