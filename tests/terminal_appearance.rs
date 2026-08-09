@@ -347,7 +347,18 @@ fn each_capability_emits_only_the_escape_families_it_promises() {
       "a capability of none emitted {:?}",
       escape_families(&out)
     );
-    assert!(out.contains('\u{7f}'), "the control character was altered");
+    // This assertion used to be its own opposite — that the control character reached the output
+    // untouched — and it changed because the DEFINITION did, not because the output did. A control
+    // character in caller-supplied text is an instruction to the terminal, and a renderer whose
+    // whole promise is deciding what the terminal is told cannot forward one unread.
+    assert!(
+      !out.contains('\u{7f}'),
+      "a control character was forwarded to the terminal\n{out}"
+    );
+    assert!(
+      out.contains('\u{2421}'),
+      "and it was not shown either\n{out}"
+    );
   }
 
   // Sixteen: only attributes and the 30–37 / 90–97 foreground families, never `38`, which
@@ -471,4 +482,177 @@ fn a_location_naming_an_input_that_was_not_supplied_draws_no_excerpt() {
     !out.contains("elsewhere"),
     "an absent input was drawn anyway\n{out}"
   );
+}
+
+#[test]
+fn no_capability_lets_caller_text_steer_the_terminal() {
+  // Escape injection. The capability gate governed only the styles the palette produced, so a
+  // message, a code, an origin, a label or a line of source containing `\x1b[38;5;196m` reached the
+  // terminal verbatim — under `ColorCapability::None` as readily as under truecolour. That defeats
+  // the per-level guarantee in the test above from the one direction it does not control: its
+  // input.
+  let attack = "\u{1b}[38;5;196m";
+  let text = format!("let x = \"{attack}\";\n");
+  let message = format!("unexpected {attack} here");
+  let label_text = format!("this {attack}");
+  let origin = format!("src/{attack}.rs");
+  let labels = [Label::new(
+    Location::new(0, Span::new(4, 5)),
+    label_text.as_str(),
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(8, 12)),
+  )
+  .with_primary_label(&label_text)
+  .with_labels(&labels)
+  .with_help(&message);
+
+  for capability in [
+    ColorCapability::None,
+    ColorCapability::Ansi16,
+    ColorCapability::Ansi256,
+    ColorCapability::TrueColor,
+  ] {
+    let mut out = String::new();
+    Terminal::with_palette(Theme::new())
+      .with_capability(capability)
+      .render(
+        &diagnostic,
+        &[Input::new(Source::new(&text)).with_origin(&origin)],
+        &mut out,
+      )
+      .expect("a String is writable");
+
+    if capability == ColorCapability::None {
+      assert!(
+        !out.contains('\u{1b}'),
+        "an ESC reached a no-colour terminal: {out:?}"
+      );
+    }
+    // At every level the 256-colour family the INPUT asked for must be absent, because no level was
+    // asked for it by the palette. Under `Ansi16` that is also the level's own promise, and under
+    // truecolour it is what proves the escape came from painty rather than from the text.
+    let families = escape_families(&out);
+    assert!(
+      !families.iter().any(|f| f == "38"),
+      "{capability:?} passed the input's own escape through: {families:?}"
+    );
+    // The ESC, not the text after it. Written the other way round this contradicted its own
+    // neighbour below — "shown rather than swallowed" means the visible `␛[38;5;196m` is exactly
+    // what should be there — and what makes a sequence a sequence is the byte that introduces it.
+    assert!(
+      !out.contains("\u{1b}[38;5;196m"),
+      "{capability:?} wrote the injected sequence: {out:?}"
+    );
+    // Shown rather than swallowed: a reader has to be able to see what was in the file.
+    assert!(
+      out.contains('\u{241b}'),
+      "{capability:?} dropped the escape instead of showing it: {out:?}"
+    );
+  }
+}
+
+#[test]
+fn a_sanitized_control_character_does_not_move_the_marker() {
+  // The substitution happens where the text is written, so it is only safe because it is
+  // width-preserving: the width table gives every control character one cell, and each stand-in is
+  // one cell and one cluster. If that ever stops being true the caret moves, so it is asserted
+  // rather than assumed.
+  let message = "a message";
+  let of = |text: &str| {
+    let diagnostic = Diagnostic::new(
+      "mylang::test::rule",
+      Severity::Error,
+      &message,
+      Location::new(0, Span::new(9, 10)),
+    );
+    let mut out = String::new();
+    Terminal::plain()
+      .render(&diagnostic, &[Input::new(Source::new(text))], &mut out)
+      .expect("a String is writable");
+    out
+  };
+  let marker_column = |out: &str| {
+    out
+      .lines()
+      .find(|line| line.contains('^'))
+      .and_then(|line| line.find('^'))
+      .expect("a marker row")
+  };
+
+  assert_eq!(
+    marker_column(&of("let ab = 1;\n")),
+    marker_column(&of("let \u{1b}b = 1;\n"))
+  );
+}
+
+#[test]
+fn every_control_picture_is_the_standard_one_for_its_character() {
+  // The table in `control_picture` is transcribed, so it is checked against the definition rather
+  // than trusted: the Control Pictures block runs from U+2400 in code point order, and DEL has its
+  // own at U+2421. The arithmetic lives here because `src/` may not spell a `u32`.
+  //
+  // Also the width claim the substitution rests on, asserted at the character rather than inferred
+  // from a rendered frame: every stand-in must be one cell, or the caret moves.
+  use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+
+  let text: String = (0u32..=0x9f)
+    .filter_map(char::from_u32)
+    .filter(|c| *c != '\t' && *c != '\n' && *c != '\r')
+    .collect();
+  let mut out = String::new();
+  let message = "a message";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, 1)),
+  );
+  Terminal::plain()
+    .render(
+      &diagnostic,
+      &[Input::new(Source::new(&format!("{text}\n")))],
+      &mut out,
+    )
+    .expect("a String is writable");
+
+  for raw in (0u32..=0x1f).filter_map(char::from_u32) {
+    if raw == '\t' || raw == '\n' || raw == '\r' {
+      continue;
+    }
+    let expected = char::from_u32(0x2400 + raw as u32).expect("the block is contiguous");
+    assert!(
+      out.contains(expected),
+      "U+{:04X} was not shown as {expected:?}",
+      raw as u32
+    );
+    assert!(
+      !out.contains(raw),
+      "U+{:04X} reached the output",
+      raw as u32
+    );
+    // Both sides of the width-preserving claim. The substitution happens where the text is
+    // written and the measurement reads the ORIGINAL, so a control that did not measure one cell,
+    // or a stand-in that was not one cell, would move every column after it.
+    assert_eq!(expected.width(), Some(1), "{expected:?} is not one cell");
+    assert_eq!(
+      raw.to_string().as_str().width(),
+      1,
+      "U+{:04X} does not measure one cell, so substituting it moves the caret",
+      raw as u32
+    );
+  }
+  assert!(out.contains('\u{2421}'), "DEL was not shown");
+  assert_eq!('\u{2421}'.width(), Some(1));
+  assert_eq!('\u{fffd}'.width(), Some(1));
+  for raw in (0x80u32..=0x9f).filter_map(char::from_u32) {
+    assert!(
+      !out.contains(raw),
+      "U+{:04X} reached the output",
+      raw as u32
+    );
+  }
 }

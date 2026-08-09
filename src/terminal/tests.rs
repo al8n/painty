@@ -1104,3 +1104,41 @@ fn a_lines_width_is_the_sum_of_its_clusters() {
     );
   }
 }
+
+#[test]
+fn expanding_a_line_forwards_no_control_character() {
+  // `write_expanded` is public: a caller drawing its own excerpt gets whatever this writes, with no
+  // renderer in between to catch an escape. The renderer does substitute a second time on the way
+  // out — which is why a plant that disabled this one survived until this test existed.
+  let controls = (0u32..=0x1f).chain(0x7fu32..=0x9f);
+  for raw in controls.filter_map(char::from_u32) {
+    if raw == '\t' || raw == '\n' || raw == '\r' {
+      continue;
+    }
+    let text = format!("let {raw}x = 1;\n");
+    let mut expanded = String::new();
+    measured(&text, 4)
+      .write_expanded(&mut expanded)
+      .expect("a String is writable");
+    assert!(
+      !expanded.contains(raw),
+      "U+{:04X} was written to the terminal",
+      raw as u32
+    );
+    assert!(
+      expanded.contains(control_picture_for(raw)),
+      "U+{:04X} was dropped rather than shown",
+      raw as u32
+    );
+  }
+}
+
+/// The stand-in a character is expected to be shown as, stated here rather than imported, so the
+/// test does not restate whatever the crate happens to do.
+fn control_picture_for(character: char) -> char {
+  match character {
+    '\u{7f}' => '\u{2421}',
+    '\u{80}'..='\u{9f}' => '\u{fffd}',
+    _ => char::from_u32(0x2400 + character as u32).expect("the block is contiguous"),
+  }
+}

@@ -26,6 +26,19 @@ written.
 
 Nothing here is published to crates.io.
 
+### Caller text never steers the terminal
+
+Diagnostic text is caller-supplied and so is the source it points into, so every control character
+in either — the message, the code, the origin, a label, the excerpt — is replaced by a visible
+stand-in before it is written. An ESC reads as `␛`, DEL as `␡`, and C1, which has no pictures, as
+the replacement character.
+
+Not cosmetic. `\x1b[38;5;196m` sitting in a source file would otherwise colour the rest of the
+frame, and it would do it under `ColorCapability::None`, which is the one guarantee the capability
+gate exists to make; U+009B is a single-byte CSI on terminals that honour C1, and a bare newline
+needs no escape at all to break the frame. Substituted rather than dropped, because a reader has to
+be able to see that something was there, and every stand-in is one cell wide so no marker moves.
+
 ## Overview
 
 A diagnostic is worth more when it does not know how it will be displayed. Producers —

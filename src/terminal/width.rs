@@ -167,11 +167,20 @@ impl<'a> LineCells<'a> {
     columns.end - columns.start
   }
 
-  /// Writes the line with its tabs expanded to spaces.
+  /// Writes the line as a terminal is to draw it: tabs expanded to spaces, control characters
+  /// replaced by a visible stand-in.
   ///
   /// Walks the same units [`column_at`](Self::column_at) does rather than re-deriving the tab
   /// arithmetic, so the two cannot drift: an underline is placed under the text this writes only
   /// because both are the same walk.
+  ///
+  /// Source text is caller-supplied and an ESC in it is an instruction to the terminal, so it does
+  /// not reach one: `\x1b[38;5;196m` in a file would otherwise colour the rest of the frame. Each
+  /// C0 character is written as its Control Pictures glyph — ESC reads as `␛` — DEL as `␡`, and C1,
+  /// which has none, as the replacement character. A substitution and not a deletion, because a
+  /// reader has to be able to see that something was there, and every stand-in is one cell so
+  /// nothing placed against this line moves. It happens here rather than in the renderer because
+  /// here is where the same walk measures it.
   pub fn write_expanded(&self, out: &mut impl fmt::Write) -> fmt::Result {
     let text = self.line.text();
     for unit in self.units() {
@@ -179,6 +188,10 @@ impl<'a> LineCells<'a> {
       if cluster == "\t" {
         for _ in 0..unit.cells {
           out.write_char(' ')?;
+        }
+      } else if holds_a_control(cluster) {
+        for character in cluster.chars() {
+          out.write_char(control_picture(character).unwrap_or(character))?;
         }
       } else {
         out.write_str(cluster)?;
@@ -268,6 +281,11 @@ impl Iterator for Units<'_> {
     let cells = if cluster == "\t" {
       next_stop(self.column - 1, self.tab_width) + 1 - self.column
     } else {
+      // Control characters are measured as they are, not as the stand-ins that will be written in
+      // their place, and that is safe only because the two are the same width: the table gives
+      // every control character one cell and every stand-in is one cell. A branch here that
+      // measured the substitution instead would be unreachable — no input can tell the two apart —
+      // so the property is asserted in the tests rather than defended by code no plant can kill.
       width_of(cluster)
     };
 
@@ -280,6 +298,52 @@ impl Iterator for Units<'_> {
     self.column += cells;
     Some(unit)
   }
+}
+
+/// The visible stand-in for a control character, or `None` for anything drawable as it is.
+///
+/// A control character in caller-supplied text is an instruction to the terminal, and a renderer
+/// whose whole promise is deciding what the terminal is told cannot forward one unread. ESC is the
+/// sharp case — `\x1b[38;5;196m` sitting in a source file would colour the rest of the frame, and
+/// would do it under [`ColorCapability::None`](super::ColorCapability::None), which is exactly the
+/// guarantee the capability gate exists to make. It is not the only one: U+009B is a single-byte
+/// CSI on terminals that honour C1, and a bare newline needs no escape at all to break the frame.
+///
+/// Shown rather than swallowed. A reader has to be able to tell that something was there, so C0
+/// becomes its Control Pictures glyph — ESC reads as `␛` — DEL becomes `␡`, and C1, which has no
+/// pictures, becomes the replacement character.
+///
+/// Every stand-in is one cell and one grapheme cluster, and the width table gives every control
+/// character one cell too, so the substitution moves nothing. That is asserted rather than assumed:
+/// a marker's column is compared across a line with a control character and one without.
+///
+/// Tab is excluded because it is not a glyph at all — its width is a tab stop rather than a
+/// property of the character, and it is expanded before this is reached.
+pub(crate) fn control_picture(character: char) -> Option<char> {
+  /// The Control Pictures block, U+2400 upwards, in code point order — so the picture for a C0
+  /// character is at its own index. Written out rather than computed as `0x2400 + n`, because that
+  /// arithmetic needs a `u32` and the numeric rule places every integer in `src/`; a scalar value
+  /// is `char`'s business and not one of painty's numbers. A test walks the table against
+  /// `char::from_u32` so the transcription is checked rather than trusted.
+  const C0: [char; 32] = [
+    '␀', '␁', '␂', '␃', '␄', '␅', '␆', '␇', '␈', '␉', '␊', '␋', '␌', '␍', '␎', '␏', '␐', '␑', '␒',
+    '␓', '␔', '␕', '␖', '␗', '␘', '␙', '␚', '␛', '␜', '␝', '␞', '␟',
+  ];
+  match character {
+    '\t' => None,
+    '\0'..='\u{1f}' => C0.get(character as usize).copied(),
+    '\u{7f}' => Some('\u{2421}'),
+    '\u{80}'..='\u{9f}' => Some('\u{fffd}'),
+    _ => None,
+  }
+}
+
+/// Whether any character in `cluster` needs a stand-in.
+///
+/// Measurement and writing consult this same predicate, which is what keeps the cells counted and
+/// the characters written in agreement.
+fn holds_a_control(cluster: &str) -> bool {
+  cluster.chars().any(|c| control_picture(c).is_some())
 }
 
 /// The next tab stop at or after `column`, counting from zero.

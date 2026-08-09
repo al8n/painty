@@ -1,6 +1,6 @@
 use core::fmt;
 
-use super::{ColorCapability, LineCells};
+use super::{ColorCapability, LineCells, width::control_picture};
 use crate::{Color, Diagnostic, Palette, RegionLine, Role, Source, Style, Theme};
 
 /// One of the caller's inputs: its text, and whatever the caller calls it.
@@ -180,7 +180,7 @@ impl<P: Palette> Terminal<P> {
     self.styled(out, Role::Code, diagnostic.code())?;
     self.styled(out, Role::Code, "]")?;
     out.write_str(": ")?;
-    write!(out, "{}", diagnostic.message())?;
+    write_shown(out, diagnostic.message())?;
     out.write_char('\n')?;
 
     // Every excerpt this will draw, so the gutter can be sized before any of them is written.
@@ -211,7 +211,8 @@ impl<P: Palette> Terminal<P> {
       let column = LineCells::new(drawn.line(), self.tab_width).column_at(drawn.covered().start());
       write!(out, "{:width$}--> ", "", width = gutter as usize)?;
       if let Some(origin) = origin {
-        write!(out, "{origin}:")?;
+        write_shown(out, origin)?;
+        out.write_char(':')?;
       }
       writeln!(out, "{}:{column}", drawn.line().number())?;
     }
@@ -294,10 +295,12 @@ impl<P: Palette> Terminal<P> {
   fn styled(&self, out: &mut impl fmt::Write, role: Role, text: &str) -> fmt::Result {
     let style = self.narrow(self.palette.style(role));
     if style.is_plain() {
-      return out.write_str(text);
+      return write_shown(out, text);
     }
     let ansi = to_anstyle(style);
-    write!(out, "{}{text}{}", ansi.render(), ansi.render_reset())
+    write!(out, "{}", ansi.render())?;
+    write_shown(out, text)?;
+    write!(out, "{}", ansi.render_reset())
   }
 
   /// Brings a style down to what the output can carry.
@@ -314,6 +317,44 @@ impl<P: Palette> Terminal<P> {
       ColorCapability::Ansi256 => style.to_ansi256(),
       ColorCapability::TrueColor => style,
     }
+  }
+}
+
+/// Writes caller-supplied text with every control character replaced by a visible stand-in.
+///
+/// The capability gate decides which escapes painty PRODUCES; it said nothing about the ones a
+/// caller's own strings contain, so a message, a code, an origin or a label holding
+/// `\x1b[38;5;196m` reached the terminal verbatim — at every level, `ColorCapability::None`
+/// included. Escape injection through diagnostic text, and it defeated the per-level guarantee from
+/// the one direction that guarantee did not control: its input.
+///
+/// Source excerpts are handled a layer down, by
+/// [`LineCells::write_expanded`](super::LineCells::write_expanded), because there the walk that
+/// writes a cluster is the walk that counted its cells. The strings here are never measured, so
+/// they are substituted at the point they are written.
+fn write_shown(out: &mut impl fmt::Write, text: impl fmt::Display) -> fmt::Result {
+  // Fully qualified rather than `write!` over an imported trait: the numeric census rejects a
+  // renamed import outright — `Write as _` is a name it cannot see through — and it offers no
+  // allowlist on purpose.
+  fmt::Write::write_fmt(&mut Shown(out), format_args!("{text}"))
+}
+
+/// A writer that substitutes as it goes.
+///
+/// An adapter rather than a function over `&str`, so that a message's own [`fmt::Display`] is
+/// covered: the text a caller's type writes is as caller-supplied as the text it hands over
+/// directly, and a `Display` that emits an escape would otherwise walk straight past this.
+struct Shown<'a, W: fmt::Write>(&'a mut W);
+
+impl<W: fmt::Write> fmt::Write for Shown<'_, W> {
+  fn write_str(&mut self, text: &str) -> fmt::Result {
+    for character in text.chars() {
+      // `self.0`, not `self` — the default `write_char` forwards to `write_str`.
+      self
+        .0
+        .write_char(control_picture(character).unwrap_or(character))?;
+    }
+    Ok(())
   }
 }
 
