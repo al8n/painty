@@ -287,3 +287,257 @@ fn a_tab_width_of_zero_is_raised_rather_than_dividing_by_it() {
   assert_eq!(cells.tab_width(), 1);
   assert_eq!(cells.column_at(2), 3, "the tab is one cell");
 }
+
+// ── Colour detection ────────────────────────────────────────────────────────────────────────
+//
+// Whether a terminal supports colour is an environment question, and an environment is the one
+// thing these tests cannot have an oracle for. So none of this touches the process: the decision
+// is a pure function of a captured snapshot, and what is asserted is the DECISION PROCEDURE —
+// given these inputs, this answer.
+
+use super::{ColorCapability, ColorChoice, Environment};
+
+/// Every value each input can take, chosen so that each one changes a different branch.
+const NO_COLOR: [Option<&str>; 3] = [None, Some(""), Some("0")];
+const FORCE: [Option<&str>; 4] = [None, Some(""), Some("0"), Some("1")];
+const CLICOLOR: [Option<&str>; 3] = [None, Some("0"), Some("1")];
+const TERM: [Option<&str>; 4] = [None, Some("dumb"), Some("xterm"), Some("xterm-256color")];
+const COLORTERM: [Option<&str>; 4] = [None, Some("truecolor"), Some("24bit"), Some("nonsense")];
+
+fn every_environment(mut visit: impl FnMut(Environment<'static>)) {
+  for no_color in NO_COLOR {
+    for force in FORCE {
+      for clicolor in CLICOLOR {
+        for term in TERM {
+          for colorterm in COLORTERM {
+            for is_terminal in [false, true] {
+              visit(
+                Environment::new()
+                  .with_no_color(no_color)
+                  .with_clicolor_force(force)
+                  .with_clicolor(clicolor)
+                  .with_term(term)
+                  .with_colorterm(colorterm)
+                  .with_terminal(is_terminal),
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+}
+
+#[test]
+fn an_explicit_choice_is_never_overruled_by_the_environment() {
+  // Level one of the precedence, and the only one with nothing above it. If any environment can
+  // move these, the caller's `--color` flag is a suggestion rather than a decision.
+  let mut seen = 0;
+  every_environment(|environment| {
+    seen += 1;
+    assert_eq!(
+      ColorChoice::Never.resolve(&environment),
+      ColorCapability::None,
+      "{environment:?}"
+    );
+    assert_ne!(
+      ColorChoice::Always.resolve(&environment),
+      ColorCapability::None,
+      "{environment:?}"
+    );
+  });
+  assert_eq!(seen, 3 * 4 * 3 * 4 * 4 * 2, "the sweep is not exhaustive");
+}
+
+#[test]
+fn no_color_is_presence_and_not_truthiness() {
+  // The convention is explicit that `NO_COLOR=0` still means no colour, which is the case a
+  // reasonable person implements wrongly. Empty is the documented exception.
+  let terminal = Environment::new()
+    .with_terminal(true)
+    .with_term(Some("xterm"));
+  assert_eq!(
+    ColorChoice::Auto.resolve(&terminal.with_no_color(Some("0"))),
+    ColorCapability::None,
+    "`NO_COLOR=0` is still no colour"
+  );
+  assert_eq!(
+    ColorChoice::Auto.resolve(&terminal.with_no_color(Some(""))),
+    ColorCapability::Ansi16,
+    "empty is the documented exception"
+  );
+  assert_eq!(
+    ColorChoice::Auto.resolve(&terminal.with_no_color(None)),
+    ColorCapability::Ansi16
+  );
+}
+
+#[test]
+fn no_color_outranks_the_force_convention() {
+  // Level two over level three. Nothing else in the sweep contradicts these two at once, so
+  // without this the ordering between them is never exercised.
+  let environment = Environment::new()
+    .with_no_color(Some("1"))
+    .with_clicolor_force(Some("1"))
+    .with_term(Some("xterm-256color"))
+    .with_terminal(true);
+  assert_eq!(
+    ColorChoice::Auto.resolve(&environment),
+    ColorCapability::None
+  );
+}
+
+#[test]
+fn forcing_outranks_the_stream_not_being_a_terminal() {
+  // Level three over level four, and the entire reason `CLICOLOR_FORCE` exists: a pipe into
+  // `less -R` or a CI log renders escapes perfectly well.
+  let piped = Environment::new()
+    .with_terminal(false)
+    .with_term(Some("xterm"));
+  assert_eq!(
+    ColorChoice::Auto.resolve(&piped),
+    ColorCapability::None,
+    "a pipe gets none by default"
+  );
+  assert_eq!(
+    ColorChoice::Auto.resolve(&piped.with_clicolor_force(Some("1"))),
+    ColorCapability::Ansi16,
+    "and colour when forced"
+  );
+  // `0` and empty do not force, or the variable's presence alone would be the decision.
+  assert_eq!(
+    ColorChoice::Auto.resolve(&piped.with_clicolor_force(Some("0"))),
+    ColorCapability::None
+  );
+  assert_eq!(
+    ColorChoice::Auto.resolve(&piped.with_clicolor_force(Some(""))),
+    ColorCapability::None
+  );
+}
+
+#[test]
+fn forcing_outranks_a_dumb_terminal_and_clicolor_zero() {
+  let hostile = Environment::new()
+    .with_terminal(true)
+    .with_term(Some("dumb"))
+    .with_clicolor(Some("0"));
+  assert_eq!(ColorChoice::Auto.resolve(&hostile), ColorCapability::None);
+  assert_eq!(
+    ColorChoice::Auto.resolve(&hostile.with_clicolor_force(Some("1"))),
+    ColorCapability::Ansi16,
+    "forced past both"
+  );
+}
+
+#[test]
+fn being_a_terminal_outranks_clicolor_and_the_term_type() {
+  // Level four over level five: a non-terminal is already off, so `CLICOLOR=1` cannot switch it
+  // back on. The reverse ordering would make redirection depend on a variable.
+  let piped = Environment::new()
+    .with_terminal(false)
+    .with_clicolor(Some("1"))
+    .with_term(Some("xterm-256color"))
+    .with_colorterm(Some("truecolor"));
+  assert_eq!(ColorChoice::Auto.resolve(&piped), ColorCapability::None);
+}
+
+#[test]
+fn the_level_is_read_even_when_colour_was_forced() {
+  // Forcing colour onto a pipe and being handed monochrome would be a strange reward for asking,
+  // so the gate and the level are separate questions.
+  let forced = Environment::new()
+    .with_terminal(false)
+    .with_clicolor_force(Some("1"));
+  assert_eq!(
+    ColorChoice::Auto.resolve(&forced.with_colorterm(Some("truecolor"))),
+    ColorCapability::TrueColor
+  );
+  assert_eq!(
+    ColorChoice::Auto.resolve(&forced.with_term(Some("xterm-256color"))),
+    ColorCapability::Ansi256
+  );
+  assert_eq!(ColorChoice::Auto.resolve(&forced), ColorCapability::Ansi16);
+}
+
+#[test]
+fn the_level_comes_from_colorterm_before_term() {
+  let terminal = Environment::new().with_terminal(true);
+  // `COLORTERM` wins where they disagree: a truecolour terminal often still reports `xterm`.
+  assert_eq!(
+    ColorChoice::Auto.resolve(
+      &terminal
+        .with_term(Some("xterm"))
+        .with_colorterm(Some("24bit"))
+    ),
+    ColorCapability::TrueColor
+  );
+  // ...and a value that means nothing does not promote anything.
+  assert_eq!(
+    ColorChoice::Auto.resolve(
+      &terminal
+        .with_term(Some("xterm-256color"))
+        .with_colorterm(Some("nonsense"))
+    ),
+    ColorCapability::Ansi256
+  );
+  assert_eq!(
+    ColorChoice::Auto.resolve(&terminal.with_term(Some("xterm"))),
+    ColorCapability::Ansi16
+  );
+}
+
+#[test]
+fn every_level_of_the_precedence_is_contradicted_by_the_one_above_it() {
+  // The gate against a precedence bug hiding where nothing disagrees. Each row sets up a decision
+  // and then adds the level above it, and the answer must change. Compared against what the WRONG
+  // order would produce, rather than against a value typed by hand: if any pair were reordered,
+  // the two sides of the pair would agree and the assertion would be unsatisfiable.
+  let base = Environment::new().with_term(Some("xterm"));
+  let pairs: [(Environment<'_>, Environment<'_>); 4] = [
+    // the stream, contradicted by forcing
+    (
+      base.with_terminal(false),
+      base.with_terminal(false).with_clicolor_force(Some("1")),
+    ),
+    // forcing, contradicted by NO_COLOR
+    (
+      base.with_terminal(false).with_clicolor_force(Some("1")),
+      base
+        .with_terminal(false)
+        .with_clicolor_force(Some("1"))
+        .with_no_color(Some("1")),
+    ),
+    // a dumb terminal, contradicted by forcing
+    (
+      base.with_terminal(true).with_term(Some("dumb")),
+      base
+        .with_terminal(true)
+        .with_term(Some("dumb"))
+        .with_clicolor_force(Some("1")),
+    ),
+    // CLICOLOR=0, contradicted by forcing
+    (
+      base.with_terminal(true).with_clicolor(Some("0")),
+      base
+        .with_terminal(true)
+        .with_clicolor(Some("0"))
+        .with_clicolor_force(Some("1")),
+    ),
+  ];
+  for (lower, with_higher) in pairs {
+    assert_ne!(
+      ColorChoice::Auto.resolve(&lower),
+      ColorChoice::Auto.resolve(&with_higher),
+      "the level above did not override: {lower:?} against {with_higher:?}"
+    );
+  }
+}
+
+#[test]
+fn a_capability_orders_from_none_upwards() {
+  // A renderer narrows a style by comparing capabilities, so the order has to be the one a reader
+  // would assume.
+  assert!(ColorCapability::None < ColorCapability::Ansi16);
+  assert!(ColorCapability::Ansi16 < ColorCapability::Ansi256);
+  assert!(ColorCapability::Ansi256 < ColorCapability::TrueColor);
+}

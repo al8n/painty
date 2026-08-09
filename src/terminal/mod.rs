@@ -2,8 +2,10 @@
 //!
 //! Public, unlike the other modules, because a caller selects this renderer by name.
 
+mod detect;
 mod width;
 
+pub use detect::{CapturedEnvironment, ColorCapability, ColorChoice, Environment};
 pub use width::LineCells;
 
 #[cfg(test)]
