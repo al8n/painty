@@ -286,6 +286,59 @@ fn colour_appears_only_when_the_capability_allows_it() {
   assert_eq!(strip(&truecolour), none);
 }
 
+#[test]
+fn attributes_without_colour_is_a_palette_and_not_a_capability() {
+  // The request `ColorCapability::None` is NOT: bold and underline, no colour. Three doc sites said
+  // that rung granted it — that "attributes still work" there — and the renderer has always emitted
+  // no escape at all, because that rung is a file or a pipe and a bold escape in a file is as wrong
+  // as a red one.
+  //
+  // The docs were the defect, and this is the alternative they now point at, exercised rather than
+  // asserted: a capability says what the MEDIUM carries, a palette says what to draw, so styling
+  // without colour is `Theme::monochrome` at a capability that can carry escapes.
+  let message = "a message";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, 3)),
+  );
+  let at = |capability| {
+    let mut out = String::new();
+    Terminal::with_palette(Theme::monochrome())
+      .with_capability(capability)
+      .render(&diagnostic, &[Input::new(Source::new("abc\n"))], &mut out)
+      .expect("a String is writable");
+    out
+  };
+
+  // Carried: bold, and nothing else. `1` is the only family monochrome asks for, so a colour
+  // appearing here would mean the theme or the narrowing had started adding one.
+  let sixteen = at(ColorCapability::Ansi16);
+  let families = escape_families(&sixteen);
+  assert!(
+    !families.is_empty(),
+    "monochrome emitted no attribute at a capability that carries them: {sixteen:?}"
+  );
+  assert!(
+    families.iter().all(|family| family == "1" || family == "0"),
+    "monochrome asked for something other than bold: {families:?}"
+  );
+
+  // And the rung that carries nothing carries nothing, whatever the palette wants. This is the half
+  // the documentation used to deny.
+  let none = at(ColorCapability::None);
+  assert!(
+    !none.contains('\u{1b}'),
+    "a no-escape capability emitted one for an attribute: {none:?}"
+  );
+  assert_eq!(
+    none,
+    at(ColorCapability::None),
+    "the no-escape rendering is not even stable"
+  );
+}
+
 /// Which escape families a rendered string contains.
 ///
 /// Parsed rather than searched for, so a family cannot hide inside a longer sequence.

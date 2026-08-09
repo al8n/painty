@@ -17,9 +17,22 @@ pub enum ColorChoice {
 }
 
 /// How much colour the output can actually carry.
+///
+/// A property of the MEDIUM, which is the distinction the bottom rung turns on: it answers what the
+/// sink can be sent, not what a caller would like drawn. What to draw is the palette's question.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub enum ColorCapability {
-  /// None at all. Attributes still work — see [`Style::without_color`](crate::Style::without_color).
+  /// **No escape sequences at all** — not "no colour but keep the bold".
+  ///
+  /// This rung is what a pipe, a file, `TERM=dumb`, `NO_COLOR` and
+  /// [`ColorChoice::Never`](ColorChoice::Never) all resolve to: sinks that mostly cannot act on an
+  /// escape, and where a bold sequence written into a file is as wrong as a red one.
+  ///
+  /// Attributes without colour is a real request and this is not it. Because a capability describes
+  /// the medium, that request is a palette: [`Theme::monochrome`](crate::Theme::monochrome) at a
+  /// capability that can carry escapes, built out of
+  /// [`Style::without_color`](crate::Style::without_color). Asking for it here would mean asking a
+  /// file to render bold.
   None,
   /// The sixteen.
   Ansi16,

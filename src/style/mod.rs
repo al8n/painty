@@ -189,8 +189,13 @@ impl Style {
 
   /// Drops every colour, keeping the attributes.
   ///
-  /// What a two-colour terminal gets, and what `ColorChoice::Never` selects: bold and underline
-  /// still carry a difference a reader can see.
+  /// What a two-colour terminal gets: bold and underline still carry a difference a reader can see.
+  ///
+  /// A palette's tool, not a capability's. `ColorChoice::Never` does **not** select this — it
+  /// resolves to `ColorCapability::None`, which emits no escape at all, because that choice is
+  /// usually a file or a pipe and a bold escape in a file is as wrong as a red one. A caller who
+  /// wants attributes without colour builds a palette from this — [`Theme::monochrome`] is the
+  /// built-in one — and renders at a capability that can carry escapes.
   #[inline]
   #[must_use]
   pub const fn without_color(mut self) -> Self {
@@ -292,8 +297,12 @@ impl Theme {
 
   /// Attributes only, no colour at all.
   ///
-  /// The honest fallback for a two-colour terminal, and what a caller asking for no colour gets.
-  /// Bold and underline still separate a header from an underline from a help line.
+  /// The honest fallback for a two-colour terminal, and the way to ask for styling without colour:
+  /// bold and underline still separate a header from an underline from a help line.
+  ///
+  /// It has to be paired with a capability that can carry escapes to have any effect.
+  /// `ColorCapability::None` emits none at all, so this theme and any other render the same there —
+  /// which is the point of that rung rather than a limitation of this one.
   #[must_use]
   pub const fn monochrome() -> Self {
     Self {
