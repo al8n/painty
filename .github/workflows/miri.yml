@@ -72,8 +72,8 @@ concurrency:
   # lane can cancel another's run. This is the workflow whose runs stay pending longest, so the
   # push branch of the expression matters most here — see `ci.yml`'s concurrency comment for why
   # `cancel-in-progress: false` alone would not protect a queued run.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && github.sha || '' }}
+  cancel-in-progress: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') }}
 
 # Every `run:` here is bash — the same block the other three workflows carry, and `ci.yml`'s has
 # the full account. The construct at risk in this file is the `case ... esac` inside both scripts,

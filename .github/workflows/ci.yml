@@ -80,8 +80,8 @@ concurrency:
   # run is by construction a run on a branch in that list. Keyed on the event it cannot drift at
   # the next rename. `${{ github.workflow }}` leading the group is what keeps the three lanes
   # apart, so no lane can cancel another's run.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && github.sha || '' }}
+  cancel-in-progress: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') }}
 
 # ── EVERY `run:` IN THIS FILE IS BASH ───────────────────────────────────────────────────────
 #

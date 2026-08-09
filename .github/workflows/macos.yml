@@ -58,8 +58,8 @@ concurrency:
   # the three lanes independent: `CI-...`, `Miri-...` and `macOS-...` are different groups, so no
   # lane can cancel another's run. See `ci.yml`'s concurrency comment for why a push is keyed on
   # the commit SHA and why that must not be collapsed back to one group per ref.
-  group: ${{ github.workflow }}-${{ github.ref }}-${{ github.event_name == 'push' && github.sha || '' }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && github.sha || '' }}
+  cancel-in-progress: ${{ !(github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') }}
 
 # Every `run:` here is bash — the same block the other three workflows carry, and `ci.yml`'s has
 # the full account of what it is for. Every host in this file happens to be macOS, where bash is
