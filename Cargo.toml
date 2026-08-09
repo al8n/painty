@@ -118,7 +118,4 @@ single_use_lifetimes = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
   # Set by rustdoc on docs.rs via the `rustdoc-args` above, and by nothing else.
   'cfg(docsrs)',
-  # Set by `build.rs` when it detects cargo-tarpaulin, and by the `coverage` CI job through
-  # `RUSTFLAGS`.
-  'cfg(tarpaulin)',
 ] }
