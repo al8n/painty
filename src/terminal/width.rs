@@ -275,20 +275,30 @@ impl<'a> LineCells<'a> {
       mark.anchor = None;
     }
 
+    // Two budgets, and the second is the one that matters. Cells bound the LAYOUT — where the
+    // elision mark goes — and are blind to a unit that occupies none: a run of U+200B or of
+    // combining marks advances zero cells for as many bytes as the caller cares to supply, so a
+    // cell check alone never trips. Bytes bound the WORK, and every input that has cost anything
+    // over five rounds of review had first to be supplied as bytes.
+    //
+    // The byte budget is spent by SLICING rather than by checking, because a check runs after the
+    // segmenter has already been over the cluster it rejects. One eight-megabyte grapheme cluster
+    // is one unit, so the check fired once — having read all eight megabytes to get there, against
+    // a budget of sixty-four kilobytes.
+    let (within, whole) = self.capped(budget.bytes);
     let mut drawn = 0;
     let mut drawn_end = 0;
-    let mut elided = false;
-    for unit in self.units() {
-      // Two budgets, and the second is the one that matters. Cells bound the LAYOUT — where the
-      // elision mark goes — and are blind to a unit that occupies none: a run of U+200B or of
-      // combining marks advances zero cells for as many bytes as the caller cares to supply, so a
-      // cell check alone never trips. Bytes bound the WORK, and every input that has cost anything
-      // over five rounds of review had first to be supplied as bytes.
-      //
+    // Nothing past the cap will be drawn, so a cap that cut the line is an elision already.
+    let mut elided = !whole;
+    for unit in Units::new(within, self.tab_width) {
       // A subtraction against the cell budget rather than `drawn + unit.cells > cells`, which
-      // overflows for an unbounded caller. `drawn` never passes it, so this cannot. The byte side
-      // widens `usize` into `u64`, which loses nothing on any target painty builds for.
-      if budget.cells - drawn < unit.cells || unit.end as u64 > budget.bytes {
+      // overflows for an unbounded caller. `drawn` never passes it, so this cannot.
+      //
+      // The last unit of a CUT slice is dropped, because the cluster it came from may continue past
+      // the cap and half a cluster is not something a terminal can draw. Conservative in the one
+      // direction that is safe: a cluster that happened to end exactly at the cap is elided a unit
+      // early, on a row that is being elided anyway.
+      if budget.cells - drawn < unit.cells || (!whole && unit.end == within.len()) {
         elided = true;
         break;
       }
@@ -333,20 +343,22 @@ impl<'a> LineCells<'a> {
 
   /// The same walk as [`write_expanded`](Self::write_expanded), replaying to a byte offset.
   ///
-  /// Takes [`Marks::drawn_end`] — the offset the geometry walk already stopped at — rather than a
+  /// Takes [`Row::drawn_end`] — the offset the geometry walk already stopped at — rather than a
   /// budget it would have to re-derive a stop from. There is one stopping rule and this is not it;
   /// this only replays the decision, so the row drawn and the row measured cannot disagree about
   /// where it ended whatever the budget was denominated in.
+  ///
+  /// Replayed over the SLICE and not over the line with a check inside the loop, for the reason
+  /// [`place_marks`](Self::place_marks) slices: a check sees a cluster only after the segmenter has
+  /// read it, and the cluster starting at a stop can be the whole rest of the file. `drawn_end` is
+  /// a cluster boundary of the line, so the slice segments to the same units the geometry measured.
   pub(crate) fn write_expanded_upto(
     &self,
     out: &mut impl fmt::Write,
     byte_end: usize,
   ) -> fmt::Result {
-    let text = self.line.text();
-    for unit in self.units() {
-      if unit.end > byte_end {
-        return Ok(());
-      }
+    let text = self.upto(byte_end);
+    for unit in Units::new(text, self.tab_width) {
       let cluster = &text[unit.start..unit.end];
       // Before the control arm, and that ORDER is the tab's whole exception. `control_picture` has
       // a picture for a tab like every other C0 character, so reaching it first would draw one `␉`
@@ -379,13 +391,34 @@ impl<'a> LineCells<'a> {
     relative
   }
 
+  /// The line's text up to a line-relative offset, moved back to a character boundary.
+  ///
+  /// Total rather than slicing whatever it is handed: a `&str` cannot be cut inside a character,
+  /// and a renderer that panics on an offset is a diagnostic lost.
+  fn upto(&self, byte_end: usize) -> &'a str {
+    let text = self.line.text();
+    let mut end = byte_end.min(text.len());
+    while !text.is_char_boundary(end) {
+      end -= 1;
+    }
+    &text[..end]
+  }
+
+  /// The most of this line that `bytes` allows to be looked at, and whether that is all of it.
+  ///
+  /// The budget is denominated in bytes of the line, so it is spent by handing the segmenter fewer
+  /// of them. A cap that falls inside a character moves back to its boundary; a cap that falls
+  /// inside a grapheme CLUSTER cannot be seen from here, which is why the caller drops the last
+  /// unit of a cut slice.
+  fn capped(&self, bytes: u64) -> (&'a str, bool) {
+    let text = self.line.text();
+    let cap = usize::try_from(bytes).unwrap_or(usize::MAX);
+    (self.upto(cap), cap >= text.len())
+  }
+
   /// The placement units of this line, left to right.
   fn units(&self) -> Units<'a> {
-    Units {
-      clusters: self.line.text().grapheme_indices(true),
-      tab_width: self.tab_width,
-      column: 1,
-    }
+    Units::new(self.line.text(), self.tab_width)
   }
 }
 
@@ -565,6 +598,17 @@ struct Units<'a> {
   clusters: GraphemeIndices<'a>,
   tab_width: u64,
   column: u64,
+}
+
+impl<'a> Units<'a> {
+  /// The units of `text`, which is a whole line or as much of one as a budget allows.
+  fn new(text: &'a str, tab_width: u64) -> Self {
+    Self {
+      clusters: text.grapheme_indices(true),
+      tab_width,
+      column: 1,
+    }
+  }
 }
 
 impl Iterator for Units<'_> {

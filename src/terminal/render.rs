@@ -289,10 +289,26 @@ impl<P: Palette> Terminal<P> {
   /// class rather than beside it: in this layer nothing consumes unbounded work without unbounded
   /// input, so one number bounds the walk, the row, the marker row and the segmentation under them.
   ///
-  /// What it does not reach is written down rather than left to be discovered. Resolving a byte
-  /// offset to a line and column is layer 2's scan, linear in the offset; the display column of an
-  /// offset past this budget is linear for the same reason. Both are 1× in input the caller
-  /// supplied, so they are pass-through rather than amplification — the distinction
+  /// # It is spent by slicing, because a check is one cluster too late
+  ///
+  /// The budget used to be a test inside the loop, and a test runs *after* the segmenter has read
+  /// the unit it rejects. A grapheme cluster has no length limit — a base with eight megabytes of
+  /// combining marks is one — so the first unit could cost eight megabytes against a budget of
+  /// sixty-four kilobytes, and it did: measured against a one-megabyte cluster, 8.21×. "Bytes
+  /// examined" was false by up to one cluster, and one cluster is unbounded.
+  ///
+  /// So the segmenter is handed this many bytes and no more. What that costs is precision at the
+  /// edge, in the safe direction: the last unit of a cut slice may be half of a cluster that
+  /// continues past the cap, so it is not drawn, and a cluster that happened to end exactly at the
+  /// cap is elided one unit early on a row that was being elided anyway. Half a cluster is not
+  /// something a terminal can draw, and drawing it would be the other kind of wrong.
+  ///
+  /// # What it does not reach
+  ///
+  /// Written down rather than left to be discovered. Resolving a byte offset to a line and column
+  /// is layer 2's scan, linear in the offset, as is finding where the line ENDS — and that one is
+  /// linear in the line however small the span. Both are 1× in input the caller supplied, so they
+  /// are pass-through rather than amplification — the distinction
   /// [`max_rendered_width`](Self::max_rendered_width) draws — but neither is bounded by this
   /// number, and no number placed here could bound them.
   ///

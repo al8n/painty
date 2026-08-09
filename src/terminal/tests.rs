@@ -1676,3 +1676,84 @@ fn a_combining_mark_run_is_bounded_the_same_way() {
     row.drawn_end
   );
 }
+
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "an asymptotic measurement over sixteen megabytes of input, which Miri would take hours \
+            to walk and is not checking anyway"
+)]
+fn the_byte_budget_bounds_what_is_examined_and_not_only_what_is_drawn() {
+  // The budget said "bytes examined" and checked a unit's end AFTER the segmenter had produced it.
+  // A grapheme cluster has no length limit, so the first unit can be the whole line: the check
+  // fired once, having read every byte to get there.
+  //
+  // A RATIO, and for the reason `the_geometry_costs_the_window_and_not_the_line` uses one — machine
+  // speed cancels, so this cannot flake on a loaded runner or pass on a fast one, and it states the
+  // property rather than a number. Eight times the input for the same budget: a walk that follows
+  // the cluster shows up as very nearly eight, one that stops at the budget as very nearly one.
+  // With the check restored in place of the slice it measures 8.12x here, which is the 8.21x the
+  // audit reported; sliced, it is 1.00x.
+  fn one_cluster(megabytes: usize) -> core::time::Duration {
+    // One base and as many combining marks as fit, which UAX#29 calls a single cluster.
+    let text = format!("a{}", "\u{301}".repeat(megabytes * 500_000));
+    let cells = measured(&text, 4);
+    assert_eq!(cells.width(), 1, "the premise: one cluster, one cell");
+    let budget = super::width::Budget {
+      cells: 4_096,
+      bytes: 65_536,
+    };
+
+    let _ = one_mark(&cells, Span::new(0, 1), budget);
+    let started = std::time::Instant::now();
+    for _ in 0..20 {
+      let (_, row) = one_mark(&cells, Span::new(0, 1), budget);
+      core::hint::black_box(row.drawn_end);
+    }
+    started.elapsed()
+  }
+
+  let small = one_cluster(2);
+  let large = one_cluster(16);
+  assert!(
+    small > core::time::Duration::from_micros(50),
+    "the smaller measurement is {small:?}, too close to the timer to divide by"
+  );
+
+  let growth = large.as_secs_f64() / small.as_secs_f64();
+  assert!(
+    growth < 3.0,
+    "eight times the cluster cost {growth:.2} times the walk ({small:?} then {large:?}) — the \
+     budget is being checked after the segmenter has read the unit rather than spent before it"
+  );
+}
+
+#[test]
+fn slicing_a_line_at_the_budget_does_not_change_the_units_before_the_cut() {
+  // What the slice rests on. Handing the segmenter a prefix could in principle move a boundary
+  // inside it, and a moved boundary is a marker in the wrong cell — the defect class three rounds
+  // of review were about. It cannot move one, because a cluster's start is decided by what precedes
+  // it and by the cluster before it, both of which are in the prefix; only the LAST cluster of the
+  // prefix can be a fragment, and the walk drops it.
+  //
+  // Asserted rather than argued, at every cap of every corpus member.
+  use unicode_segmentation::UnicodeSegmentation;
+
+  for (text, why) in CORPUS {
+    let whole: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+    for cap in 0..=text.len() {
+      if !text.is_char_boundary(cap) {
+        continue;
+      }
+      let prefix: Vec<(usize, &str)> = text[..cap].grapheme_indices(true).collect();
+      // Every cluster of the prefix but its last must be a cluster of the whole line, at the same
+      // offset and with the same extent.
+      let kept = prefix.len().saturating_sub(usize::from(cap < text.len()));
+      assert_eq!(
+        prefix[..kept],
+        whole[..kept],
+        "{text:?} cut at {cap}: the units before the cut moved — {why}"
+      );
+    }
+  }
+}
