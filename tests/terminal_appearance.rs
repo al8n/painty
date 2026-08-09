@@ -979,6 +979,118 @@ fn no_control_character_at_all_survives_a_caller_string() {
   }
 }
 
+/// A writer that accepts a fixed number of characters and then declines, keeping a copy of
+/// everything it was OFFERED — including what it refused.
+///
+/// What painty writes is painty's; how much is taken is the writer's. So the property below is
+/// asserted over what was offered: a writer bounded at any point must never be left holding an
+/// opener that painty did not follow with a reset. A record of what was ACCEPTED could not show it,
+/// because a writer that refuses the body refuses the reset too.
+struct Recording {
+  budget: usize,
+  taken: usize,
+  offered: String,
+}
+
+impl core::fmt::Write for Recording {
+  fn write_str(&mut self, text: &str) -> core::fmt::Result {
+    self.offered.push_str(text);
+    for _ in text.chars() {
+      if self.taken == self.budget {
+        return Err(core::fmt::Error);
+      }
+      self.taken += 1;
+    }
+    Ok(())
+  }
+}
+
+/// Whether the text finishes with a style still open.
+///
+/// Counting openers against resets does NOT work here, and the first draft of this test failed on a
+/// correct frame because of it: `anstyle` renders bold and colour as two separate sequences and
+/// closes both with one reset, so a balanced frame has more openers than resets. What has to hold is
+/// the state at the END — walk the sequences in order, and the last complete one must be the reset.
+///
+/// An incomplete sequence is skipped rather than parsed, because a refused write can leave one: the
+/// terminal does not act on a sequence it never received the end of, so neither does this.
+fn ends_styled(text: &str) -> bool {
+  let characters: Vec<char> = text.chars().collect();
+  let mut open = false;
+  let mut at = 0;
+  while at < characters.len() {
+    if characters[at] == '\u{1b}' && characters.get(at + 1) == Some(&'[') {
+      let mut end = at + 2;
+      while end < characters.len() && (characters[end].is_ascii_digit() || characters[end] == ';') {
+        end += 1;
+      }
+      if characters.get(end) == Some(&'m') {
+        let parameters: String = characters[at + 2..end].iter().collect();
+        open = parameters != "0";
+        at = end + 1;
+        continue;
+      }
+    }
+    at += 1;
+  }
+  open
+}
+
+#[test]
+fn a_style_this_opened_is_closed_however_far_the_writer_gets() {
+  // The claim that justified the closure form was wrong, and precisely so: a closure stops a caller
+  // FORGETTING the reset, and does nothing about the body NOT REACHING it. The `?` on a failing
+  // write was exactly that second thing, so a coloured render into a bounded writer returned with an
+  // SGR still open and everything the caller's terminal printed afterwards wearing it.
+  //
+  // Swept over every budget rather than one chosen to land somewhere interesting: WHICH write fails
+  // is the whole subject, so this refuses at each position in turn instead of at a position picked
+  // by someone who believed the code was already right.
+  let text = "type Widget {\n  width: Int\n}\n";
+  let message = "`width` is defined twice";
+  let diagnostic = Diagnostic::new(
+    "mylang::schema::duplicate-field",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(16, 21)),
+  )
+  .with_primary_label("redefined here");
+  let terminal = Terminal::with_palette(Theme::new()).with_capability(ColorCapability::TrueColor);
+  let inputs = [Input::new(Source::new(text)).with_origin("widget.graphql")];
+
+  let mut full = String::new();
+  terminal
+    .render(&diagnostic, &inputs, &mut full)
+    .expect("a String is writable");
+  assert!(
+    !escape_families(&full).is_empty(),
+    "nothing in this frame is styled, so refusing inside it would prove nothing: {full:?}"
+  );
+  assert!(
+    !ends_styled(&full),
+    "the frame ends styled even when nothing refuses: {full:?}"
+  );
+
+  let length = full.chars().count();
+  for budget in 0..length {
+    let mut out = Recording {
+      budget,
+      taken: 0,
+      offered: String::new(),
+    };
+    let result = terminal.render(&diagnostic, &inputs, &mut out);
+    assert!(
+      result.is_err(),
+      "refusing after {budget} of {length} characters was reported as success"
+    );
+    assert!(
+      !ends_styled(&out.offered),
+      "refusing after {budget} characters left a style open: {:?}",
+      out.offered
+    );
+  }
+}
+
 /// Bytes this thread has asked the allocator for.
 ///
 /// The property below is a resource one — whether a row exists as a value before the writer is

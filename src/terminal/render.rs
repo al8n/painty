@@ -317,9 +317,23 @@ impl<P: Palette> Terminal<P> {
   /// and it goes through to `out` as it is written. That is what lets a row whose length is decided
   /// by the input be produced without ever existing as one value.
   ///
-  /// A closure and not a pair of open/close calls, because the two escape sequences have to stay
-  /// balanced: a caller holding an opener would be one early return away from leaving the rest of
-  /// the frame in whatever colour the last row asked for.
+  /// # The reset is not conditional on the body succeeding
+  ///
+  /// The opener and the reset have to be balanced, and a closure alone does not balance them. It
+  /// stops a caller *forgetting* the reset; it does nothing about the body *not reaching* it, and a
+  /// `?` on a failing write is exactly that — which is how this shipped leaving an SGR open whenever
+  /// a bounded writer refused mid-row. Two different failure modes, and only the first is a
+  /// consequence of the shape.
+  ///
+  /// So the body's result is held rather than propagated, the reset is attempted either way, and the
+  /// body's error is the one returned — it says what actually went wrong, where the reset's would
+  /// only say that the writer is still refusing.
+  ///
+  /// **Panics are deliberately not covered.** Restoring the terminal while unwinding means writing
+  /// to the writer from a `Drop`, and a panic there during an unwind aborts the process: it would
+  /// trade a caller's recoverable bug for a dead one, using the very writer that just misbehaved,
+  /// and buy nothing at all under `panic = "abort"`. The reset is best-effort on the error path,
+  /// which is the path a caller can actually reach by design.
   fn styled_with<W: fmt::Write>(
     &self,
     out: &mut W,
@@ -331,9 +345,14 @@ impl<P: Palette> Terminal<P> {
       return body(&mut Shown(out));
     }
     let ansi = to_anstyle(style);
-    write!(out, "{}", ansi.render())?;
-    body(&mut Shown(out))?;
-    write!(out, "{}", ansi.render_reset())
+    // Once an opener has been offered a reset is offered too, including when the opener was itself
+    // refused. That keeps the rule total — an opener is never the last thing this writes — instead
+    // of leaving a case where it depends on how far the writer got. `and_then` is what holds the
+    // other half: a refused opener must not run the body, which is the expensive part.
+    let opened = write!(out, "{}", ansi.render());
+    let written = opened.and_then(|()| body(&mut Shown(out)));
+    let reset = write!(out, "{}", ansi.render_reset());
+    written.and(reset)
   }
 
   /// Brings a style down to what the output can carry.
