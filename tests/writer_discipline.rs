@@ -625,6 +625,75 @@ mod the_size_contract {
   }
 
   #[test]
+  fn alternating_inputs_do_not_multiply_their_origins() {
+    // Caller text is pass-through at 1x — that is the contract — and this path made it k.
+    //
+    // The header is emitted on a CHANGE of input, and a change was only the last one seen, so
+    // labels alternating between two files re-emitted both origins on every switch. Two large
+    // origins and many small labels multiply the caller's own strings by the number of runs, which
+    // is amplification of exactly the kind the contract says never happens to them.
+    let origin_one = format!("src/{}.rs", "a".repeat(20_000));
+    let origin_two = format!("src/{}.rs", "b".repeat(20_000));
+    let first = "alpha bravo charlie\n";
+    let second = "delta echo foxtrot\n";
+    let message = "a message";
+
+    // Alternating deliberately: grouped input would pass even with the defect present.
+    let labels: Vec<_> = (0..8)
+      .map(|index| {
+        painty::Label::new(
+          Location::new(index % 2, Span::new(0, 5)),
+          if index % 2 == 0 { "here" } else { "there" },
+        )
+      })
+      .collect();
+    let diagnostic = Diagnostic::new(
+      "mylang::test::rule",
+      Severity::Error,
+      &message,
+      Location::new(0, Span::new(6, 11)),
+    )
+    .with_primary_label("primary")
+    .with_labels(&labels);
+
+    let mut out = String::new();
+    Terminal::plain()
+      .render(
+        &diagnostic,
+        &[
+          Input::new(Source::new(first)).with_origin(&origin_one),
+          Input::new(Source::new(second)).with_origin(&origin_two),
+        ],
+        &mut out,
+      )
+      .expect("a String is writable");
+
+    assert_eq!(
+      out.matches(origin_one.as_str()).count(),
+      1,
+      "the first origin was emitted {} times",
+      out.matches(origin_one.as_str()).count()
+    );
+    assert_eq!(
+      out.matches(origin_two.as_str()).count(),
+      1,
+      "the second origin was emitted {} times",
+      out.matches(origin_two.as_str()).count()
+    );
+
+    // Every excerpt is still drawn — grouping reorders, it does not drop.
+    assert_eq!(out.matches("alpha bravo charlie").count(), 5);
+    assert_eq!(out.matches("delta echo foxtrot").count(), 4);
+
+    // And the primary's file still leads, so grouping has not moved another file above the position
+    // the diagnostic is actually about.
+    assert!(
+      out.find(origin_one.as_str()) < out.find(origin_two.as_str()),
+      "grouping reordered the inputs away from where the primary is"
+    );
+  }
+
+  #[test]
   fn a_large_label_is_printed_in_full_and_not_cut() {
     // The half painty does NOT own, pinned deliberately so that a future change which starts
     // truncating fails here rather than passing quietly.

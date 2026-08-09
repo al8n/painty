@@ -297,6 +297,33 @@ impl<P: Palette> Terminal<P> {
       }
     }
 
+    // Grouped by input before anything is written, because the header is emitted on a CHANGE of
+    // input and a change is only the last one seen. Labels alternating between two files re-emitted
+    // both origins on every switch — the caller's own text, multiplied by the number of runs, which
+    // is the amplification the size contract says caller text never suffers. Pass-through is 1x and
+    // that was k.
+    //
+    // By the order each input FIRST appears, not by its index: the primary is pushed first, so
+    // sorting by index would move another file's label above the position the diagnostic is
+    // actually about. Stable, so labels keep the caller's order within a file.
+    //
+    // The lookup is linear in the number of distinct inputs, which is bounded by the list the
+    // caller passed and is dwarfed by the layer-2 resolve each excerpt has already cost.
+    // Inferred rather than annotated: these are `Location::source` keys, which painty never computes
+    // and only carries, so spelling the width here would be declaring a ceiling that is not ours.
+    let mut order = Vec::new();
+    for (_, _, _, source, _) in &excerpts {
+      if !order.contains(source) {
+        order.push(*source);
+      }
+    }
+    excerpts.sort_by_cached_key(|(_, _, _, source, _)| {
+      order
+        .iter()
+        .position(|listed| listed == source)
+        .unwrap_or(order.len())
+    });
+
     let gutter = excerpts
       .iter()
       .map(|(drawn, _, _, _, _)| digits(drawn.line().number()))
