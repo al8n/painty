@@ -15,6 +15,43 @@ use crate::{Line, Span};
 /// mark is one character in none, and a tab is one character in however many cells the next tab
 /// stop is away.
 ///
+/// # The model, and what it promises
+///
+/// > A line is its sequence of UAX#29 extended grapheme clusters, after painty's sanitization. Each
+/// > cluster occupies exactly `unicode-width`'s width of that cluster **measured in isolation**. A
+/// > byte offset's column is one plus the cells of the whole clusters before it. A span widens
+/// > outward to cluster boundaries. Cross-cluster width adjustments — `unicode-width`'s
+/// > string-level script ligatures — are **rejected by specification**, because no
+/// > cursor-addressable terminal can implement them: a grid device must have a definite cursor
+/// > position between any two characters it receives, and the first cluster has closed and may
+/// > already have been reported past before the second arrives.
+///
+/// **What that promises.** painty places markers in the logical cell grid of a grapheme-aware
+/// fixed-width terminal. A marker covers exactly the cells of every cluster its span touches, and
+/// on a terminal that advances the cursor per grapheme cluster the marker row aligns with the
+/// source row cell for cell.
+///
+/// **Four things it does not promise**, each a real limit rather than a gap to close later:
+///
+/// 1. **Agreement with `unicode-width`'s whole-string width.** Its cross-cluster script ligatures
+///    describe shaped text, not a cell grid. [`width`](Self::width) is the sum of the clusters'
+///    widths and is not obliged to equal `str::width` of the same line — on current data six
+///    families differ, and they are pinned at both values in the tests.
+/// 2. **Visual alignment under bidi reordering.** Columns are logical. A terminal that reorders an
+///    RTL run moves glyphs after painty has written both rows; no column model can place a caret
+///    under a visually reordered glyph. This is where every grid diagnostic tool stands.
+/// 3. **Font shaping and ligation.** A font may draw `لا`, or `=>`, as one glyph across the cells
+///    the grid allotted. Underlining half of such a pair marks that half's cell — deliberately: the
+///    two code points are two addressable source positions, and collapsing them would erase a
+///    distinction the caller's span made.
+/// 4. **Legacy per-codepoint cell counts.** On wcwidth-era terminals a ZWJ emoji sequence occupies
+///    more cells than its cluster width, so markers after one sit left of the glyphs there. painty
+///    matches where terminals are converging, not where they have been.
+///
+/// Two consequences the model settles rather than leaves open: a zero-width cluster occupies no
+/// cell, and a marker for it is the never-empty caret on the following unit's cell; an empty span
+/// at or inside a cluster anchors to the whole of that cluster.
+///
 /// Resolution stays free of this on purpose — measuring cells needs a Unicode table, and layer 2
 /// has no dependencies. So the conversion lives here, behind the `terminal` feature, and it is
 /// built **on** layer 2's answers rather than beside them: everything below is a function of the
@@ -247,14 +284,36 @@ impl<'a> LineCells<'a> {
 /// hold this file now are in the tests' `PLACEMENTS` table: cells a terminal paints, written by
 /// hand, agreeing with no library.
 ///
-/// # A cluster and a display unit are not defined to be the same thing
+/// # Why the string-level rules are rejected, and not merely unimplemented
 ///
-/// `unicode-width` applies rules over a whole string, so the sum of the clusters' widths is not
-/// obliged to equal the width of the line they came from. painty measures per cluster, because a
-/// marker has to start and stop at a boundary and a single number for the line cannot be
-/// decomposed into the clusters it spans. [`width`](LineCells::width) is therefore that sum. The
-/// two agree on every case in the corpus, and the test that says so records that this is an
-/// observation about a table version rather than a guarantee.
+/// `unicode-width` also applies rules **across** cluster boundaries — Arabic lam followed by alef
+/// scores 1 for the pair where the clusters score 1 + 1 — and painty does not. That is a decision,
+/// with a reason no future review should have to rediscover.
+///
+/// **No cursor-addressable terminal can implement them.** A grid terminal must have a definite
+/// cursor position between any two characters it receives: `CSI 6n` can be issued between the lam
+/// and the alef, and the lam's cell can be painted, wrapped past, or addressed before the alef
+/// arrives. The lam's cluster *closes* when the alef arrives, because the alef starts a new one.
+/// For the pair to occupy one cell the alef would have to advance zero cells into a cell the
+/// terminal may already have reported past — cursor regression against the device's own report.
+/// Legacy per-codepoint terminals advance 1 + 1 here too. Terminals that visually ligate Arabic do
+/// it by glyph substitution *inside* the two cells the grid already allotted, exactly as a font
+/// draws `=>` as one glyph across two cells.
+///
+/// So the cluster boundary is not a convenience. It is the **maximum lookahead a cursor-addressable
+/// device can hold without contradicting its own cursor reports**, which is why it is the unit.
+///
+/// Two further reasons, either sufficient on its own. Adopting the string model would not fix
+/// placement, it would *remove* it: a column is a prefix sum, and a non-compositional width
+/// function has no fact of the matter about where a string's interior is. And a rule that coalesced
+/// clusters when the concatenation measures narrower would infer structure from a width
+/// measurement — the exact shape of the two defects above — over a rule set `unicode-width`'s own
+/// documentation calls string-only exceptions that "may be tweaked in the future".
+///
+/// On Unicode 17 data exactly six families diverge: Arabic lam-alef, Hebrew alef-ZWJ-lamed,
+/// Buginese, Lisu, Old Turkic and Tifinagh. Each is pinned in the tests at **both** values, so a
+/// data update that adds, drops or reshapes one fails loudly with the input in hand. Khmer coeng is
+/// pinned as the canary that already moved: it is listed among those rules and agrees on this data.
 #[derive(Debug, Clone, Copy)]
 struct Unit {
   start: usize,

@@ -242,12 +242,28 @@ line scanner decides what a public item is. `anstyle` is what `clap` and `cargo`
 consumer's `--color` flag and this crate's theme interoperate without a conversion layer. All three
 sit behind `terminal`; the HTML and model outputs pull in none of them.
 
-A grapheme cluster and a display unit are not defined to be the same thing — `unicode-width` applies
-rules over a whole string, so the clusters' widths need not sum to the line's. painty measures per
-cluster and `LineCells::width` is that sum, because a marker starts and stops at a boundary and one
-number for the line cannot be decomposed into the clusters it spans. The two agree on every case in
-the corpus, and the test that says so records that as an observation about a table version rather
-than a guarantee.
+### The placement model
+
+A line is its sequence of UAX#29 extended grapheme clusters, after sanitization. Each cluster
+occupies exactly `unicode-width`'s width of that cluster **measured in isolation**. A byte offset's
+column is one plus the cells of the whole clusters before it, and a span widens outward to cluster
+boundaries.
+
+`unicode-width` also applies rules *across* cluster boundaries — Arabic lam followed by alef scores
+1 for the pair where the clusters score 1 + 1 — and painty **rejects those by specification**. Not
+an omission: no cursor-addressable terminal can implement them. A grid device must have a definite
+cursor position between any two characters it receives, `CSI 6n` can be issued between the lam and
+the alef, and the lam's cluster has closed before the alef arrives. For the pair to occupy one cell
+the alef would have to advance zero cells into a cell the terminal may already have reported past.
+Every real terminal advances two. The cluster boundary is the maximum lookahead a cursor-addressable
+device can hold without contradicting its own cursor reports, which is why it is the unit.
+
+So painty promises exact cell alignment on a grapheme-aware terminal, and declines four things:
+agreement with whole-string width (six families differ on Unicode 17 data, each pinned in the tests
+at *both* values); visual alignment under bidi reordering, since columns are logical; font shaping,
+so underlining half a ligature marks half the span — deliberately, because those are two addressable
+source positions; and legacy per-codepoint cell counts, where a wcwidth-era terminal gives a ZWJ
+emoji sequence more cells than its cluster width.
 
 `tokora` is taken with `default-features = false`, so it stays `no_std` and brings only the
 diagnostic contract the adapter reads — `--features tokora` is one of the bare-metal legs the

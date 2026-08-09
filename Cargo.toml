@@ -64,10 +64,23 @@ tokora = ["dep:tokora"]
 
 # The three the terminal renderer costs, and why each is a dependency rather than code here.
 #
-# Default features are left ON for `unicode-width` and `anstyle`, on purpose. `unicode-width`'s
-# default is `cjk`, and CJK being two cells wide is the entire reason the dependency is taken;
-# `anstyle`'s default is `std`, which `terminal` already implies. Turning either off would produce
-# a build that compiles and renders wrongly.
+# Default features are left ON for `unicode-width` and `anstyle`. `anstyle`'s default is `std`,
+# which `terminal` already implies.
+#
+# `unicode-width`'s default is `cjk`, and what that feature does is NOT what this comment used to
+# say. It claimed CJK being two cells wide was the entire reason the dependency is taken and that
+# turning it off would render wrongly. False mechanism, on both halves: East Asian Wide and
+# Fullwidth are two cells from the base table, and `cjk` gates only the `*_cjk` method variants —
+# where East Asian *Ambiguous* is two cells instead of one — plus the trait's sealing
+# (unicode-width 0.2.2, `Cargo.toml:49-50` and the `#[cfg(feature = "cjk")]` sites in `lib.rs`).
+# painty calls `.width()` and never a `*_cjk` variant, so disabling it would change nothing
+# rendered; it would only shrink the static tables.
+#
+# It stays on because it is the default and nothing is bought by diverging from it. The convention
+# painty actually measures against — ambiguous characters at one cell — is not left to a feature
+# flag: `the_ambiguous_width_convention_is_the_one_painty_measures_against` pins it at a character
+# that distinguishes the two, and that test needs `cjk` to compile, so turning the feature off is a
+# visible change rather than a silent one.
 #
 # `unicode-segmentation` is taken for the reason `syn` is taken below: it is the AUTHORITY for a
 # question this crate kept answering by recognising a pattern. Where a placement unit ENDS is

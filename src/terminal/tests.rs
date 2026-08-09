@@ -6,7 +6,7 @@ use crate::{Source, Span};
 /// A corpus whose members are not individually justified is a corpus the next person trims. Each
 /// of these defeats a *different* wrong definition of "column", and the first entry is the one
 /// that makes all the wrong definitions look right.
-const CORPUS: [(&str, &str); 17] = [
+const CORPUS: [(&str, &str); 21] = [
   (
     "abc",
     "the baseline where every wrong definition agrees: one byte, one character, one cell",
@@ -74,6 +74,25 @@ const CORPUS: [(&str, &str); 17] = [
     "\u{e01}\u{e33}x",
     "Thai sara am — a cluster whose second character ADDS a cell, the mirror of a combining mark \
      that adds none",
+  ),
+  (
+    "\u{644}\u{627}x",
+    "Arabic lam-alef — two clusters the STRING model scores as one cell, and the reason the model \
+     is written down: painty reports two, which is what every terminal advances",
+  ),
+  (
+    "\u{2d31}\u{2d7f}\u{2d3e}x",
+    "Tifinagh with a joiner — the same rejection at its widest, three cells against one",
+  ),
+  (
+    "a\u{200b}bx",
+    "a zero-width space — a cluster of NO cells in the middle of a line, so a column can repeat \
+     without going backwards",
+  ),
+  (
+    "\u{301}ab",
+    "a combining mark with nothing to combine with, at the very start — a defective sequence is \
+     still a cluster, and it is the first one",
   ),
 ];
 
@@ -191,16 +210,33 @@ fn a_display_column_equals_a_character_column_exactly_when_every_character_is_on
     assert_eq!(plain.column_at(offset), plain.line().column_at(offset));
   }
 
+  // Which inputs must differ is DERIVED rather than listed: the two coordinate systems coincide
+  // everywhere exactly when every cluster is one character occupying one cell, and must part
+  // company otherwise. A cluster of several characters shifts the character count; a cluster of
+  // other than one cell shifts the display count.
+  //
+  // The premise this replaced was "not pure ASCII, therefore it differs", and Arabic lam-alef
+  // falsified it: two clusters, one character and one cell each, so the two agree — on the very
+  // input the round was about. A listed exemption there would have been an allowlist hiding the
+  // one case that mattered.
+  use unicode_segmentation::UnicodeSegmentation;
+  use unicode_width::UnicodeWidthStr;
+
   for (text, why) in CORPUS {
-    if text.is_ascii() && !text.contains('\t') {
-      continue;
-    }
     let cells = measured(text, 4);
+    let one_for_one = !text.contains('\t')
+      && text
+        .graphemes(true)
+        .all(|cluster| cluster.chars().count() == 1 && cluster.width() == 1);
     let differs = (0..=text.len()).any(|offset| {
       cells.line().text().is_char_boundary(offset)
         && cells.column_at(offset) != cells.line().column_at(offset)
     });
-    assert!(differs, "{text:?} measures the same as characters — {why}");
+    assert_eq!(
+      !differs, one_for_one,
+      "{text:?}: display and character columns agree exactly when every cluster is one character \
+       in one cell — {why}"
+    );
   }
 }
 
@@ -905,10 +941,22 @@ fn a_span_touching_a_cluster_is_widened_to_the_whole_cluster() {
         }
         inner += 1;
       }
-      assert!(
-        whole.end > whole.start,
-        "{text:?}: cluster {start}..{end} has no cells"
-      );
+      // A cluster with cells marks them; a cluster with none marks nothing, and anchors where the
+      // next unit starts. The never-empty caret is the RENDERER's rule — `an_underline_is_never_
+      // empty` — not this layer's, and conflating the two would hide a zero-width cluster's real
+      // geometry behind a widening that happens somewhere else.
+      let cluster_cells = cells.column_at(end.min(text.len())) - cells.column_at(start);
+      if cluster_cells == 0 && end < text.len() {
+        assert_eq!(
+          whole.start, whole.end,
+          "{text:?}: cluster {start}..{end} occupies no cells, so it marks none — {why}"
+        );
+      } else {
+        assert!(
+          whole.end > whole.start,
+          "{text:?}: cluster {start}..{end} has cells but marks none — {why}"
+        );
+      }
     }
   }
 }
@@ -965,36 +1013,97 @@ fn a_tab_width_is_bounded_at_both_ends() {
 /// Hand-written rather than computed, and that is the point: a table derived from the crate's own
 /// units would agree with any implementation of them. These are the columns a terminal paints, and
 /// a wrong implementation has to produce a different number.
-const PLACEMENTS: [(&str, u64, &str); 6] = [
+/// Where a terminal paints each cluster of a line, written from the terminal side.
+///
+/// A row is the clusters in order with the cells each occupies, and the line is their
+/// concatenation — so the BOUNDARIES are hand-written too, not read out of the segmenter. That is
+/// what makes this an oracle rather than a restatement: the crate's units are checked against a
+/// table computed by no library, and the segmenter is checked against it as well.
+///
+/// Multi-cluster rows exist for the divergence set. `لا` is two clusters of one cell each, and
+/// `unicode-width` scores the pair 1 — the whole subject of the round that produced this table. It
+/// is pinned at two because that is what every terminal does, and because a row that pins it is
+/// what makes the rejection falsifiable instead of merely asserted.
+type Placement = (&'static [(&'static str, u64)], &'static str);
+
+const PLACEMENTS: [Placement; 17] = [
   (
-    "\u{2603}\u{fe0f}x",
-    2,
+    &[("\u{2603}\u{fe0f}", 2), ("x", 1)],
     "an emoji-presentation snowman is two cells, not the one its base character measures",
   ),
   (
-    "1\u{fe0f}\u{20e3}x",
-    2,
+    &[("1\u{fe0f}\u{20e3}", 2), ("x", 1)],
     "a keycap is drawn as one two-cell key",
   ),
   (
-    "\u{1f1ef}\u{1f1f5}x",
-    2,
+    &[("\u{231a}\u{fe0e}", 1), ("x", 1)],
+    "and VS15 the other way: text presentation narrows the watch to one cell",
+  ),
+  (
+    &[("\u{1f1ef}\u{1f1f5}", 2), ("x", 1)],
     "a flag is one two-cell glyph, not two halves",
   ),
   (
-    "\u{915}\u{94d}\u{937}\u{93f}x",
-    3,
+    &[("\u{1f1ef}\u{1f1f5}", 2), ("\u{1f1ef}", 1), ("x", 1)],
+    "and a THIRD regional indicator starts a new cluster — GB12/13 pair from the left, so an odd \
+     one is alone and one cell",
+  ),
+  (
+    &[("\u{1f44d}\u{1f3fd}", 2), ("x", 1)],
+    "a skin-tone modifier joins its base: two cells, where a legacy terminal advances four",
+  ),
+  (
+    &[("\u{915}\u{94d}\u{937}\u{93f}", 3), ("x", 1)],
     "a conjunct is one cluster, and its cells are the whole of it",
   ),
   (
-    "\u{e01}\u{e33}x",
-    2,
+    &[("\u{e01}\u{e33}", 2), ("x", 1)],
     "the vowel sign adds a cell to its base's cluster",
   ),
   (
-    "\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}x",
-    2,
+    &[("\u{1100}\u{1161}\u{11a8}", 2), ("x", 1)],
+    "Hangul lead, vowel and trail are one syllable in two cells",
+  ),
+  (
+    &[("\u{1f468}\u{200d}\u{1f469}\u{200d}\u{1f467}", 2), ("x", 1)],
     "the joined family, kept from the round before so that fix stays fixed",
+  ),
+  (
+    &[("a\u{200d}", 1), ("b", 1), ("x", 1)],
+    "a lone ZWJ between letters does NOT join them — merging these was the retired oracle's own \
+     defect, so it is pinned here",
+  ),
+  (
+    &[("\u{644}", 1), ("\u{627}", 1), ("x", 1)],
+    "Arabic lam then alef: two cells. `unicode-width` scores the pair 1, and this row is the \
+     rejection of that rule made falsifiable — every terminal advances two, because the lam's \
+     cluster has closed and may already have been reported past before the alef arrives",
+  ),
+  (
+    &[("\u{644}\u{651}", 1), ("\u{627}", 1), ("x", 1)],
+    "and with a transparent between them: the shadda folds into the lam's cluster, so the shape is \
+     unchanged and the pair is still two cells",
+  ),
+  (
+    &[("\u{5d0}\u{200d}", 1), ("\u{5dc}", 1), ("x", 1)],
+    "Hebrew alef-ZWJ-lamed, the same rejection through a different rule: the ZWJ joins the alef's \
+     cluster and the lamed still starts its own",
+  ),
+  (
+    &[("\u{2d31}\u{2d7f}", 2), ("\u{2d3e}", 1), ("x", 1)],
+    "Tifinagh with a consonant joiner — three cells against the string model's one, the widest gap \
+     between the two models and so the row that would move furthest if anyone adopted it",
+  ),
+  (
+    &[("\u{1780}\u{17d2}\u{1781}", 1), ("x", 1)],
+    "Khmer coeng is listed among those same string rules and AGREES on this data: it is one \
+     cluster. The canary — the divergence set moves with Unicode versions, and this row is where \
+     that shows up",
+  ),
+  (
+    &[("\u{1161}", 0), ("x", 1)],
+    "a lone jungseong is a cluster of no cells at all, so the model has to place a marker for \
+     something that occupies nothing",
   ),
 ];
 
@@ -1003,43 +1112,82 @@ fn a_cluster_occupies_its_own_cells_and_the_next_character_follows_them() {
   // R1 was prefix slicing; R2 was prefix-width extension. Both derived a unit's EXTENT from
   // incremental prefix measurement, which is how neither grapheme segmentation nor display width is
   // defined, and both put every marker after a variation-selector sequence one cell early.
-  for (text, cells_of_first, why) in PLACEMENTS {
-    let at = text.rfind('x').expect("each placement ends in an x");
-    let cells = measured(text, 4);
+  for (row, why) in PLACEMENTS {
+    let text: String = row.iter().map(|(cluster, _)| *cluster).collect();
+    let cells = measured(&text, 4);
 
-    assert_eq!(
-      cells.column_at(at),
-      cells_of_first + 1,
-      "{text:?}: the x follows a {cells_of_first}-cell cluster — {why}"
-    );
-    assert_eq!(
-      cells.width(),
-      cells_of_first + 1,
-      "{text:?}: the line is the cluster plus the x — {why}"
-    );
-    assert_eq!(
-      cells.columns_for(Span::new(at, at + 1)),
-      cells_of_first + 1..cells_of_first + 2,
-      "{text:?}: the marker for the x — {why}"
-    );
+    let mut at = 0;
+    let mut column = 1;
+    for (cluster, expected) in row {
+      let end = at + cluster.len();
+      let after = column + expected;
 
-    // Every interior boundary of the leading cluster marks the whole of it, at columns 1..=n.
-    let mut inner = 0;
-    while inner < at {
-      let mut outer = inner + 1;
-      while outer <= at {
-        if text.is_char_boundary(inner) && text.is_char_boundary(outer) {
+      // Every offset inside the cluster reports where the cluster begins.
+      for inside in at..end {
+        if text.is_char_boundary(inside) {
           assert_eq!(
-            cells.columns_for(Span::new(inner, outer)),
-            1..cells_of_first + 1,
-            "{text:?}: {inner}..{outer} is inside the leading cluster — {why}"
+            cells.column_at(inside),
+            column,
+            "{text:?}: offset {inside} in cluster {cluster:?} — {why}"
           );
         }
-        outer += 1;
       }
-      inner += 1;
+      // And a span over the cluster covers exactly its own cells — the whole of them, and none of
+      // its neighbours'. A zero-cell cluster is the exception the model names: its marker is the
+      // never-empty caret, which sits on the next unit's cell.
+      let marked = cells.columns_for(Span::new(at, end));
+      if *expected == 0 {
+        assert_eq!(marked, column..column, "{text:?}: {cluster:?} — {why}");
+      } else {
+        assert_eq!(marked, column..after, "{text:?}: {cluster:?} — {why}");
+      }
+
+      at = end;
+      column = after;
     }
+
+    assert_eq!(
+      cells.width(),
+      column - 1,
+      "{text:?}: the line is its clusters' cells — {why}"
+    );
   }
+}
+
+#[test]
+fn the_hand_written_boundaries_are_the_ones_uax29_gives() {
+  // The other direction on the table above, and the reason it is worth having twice: those rows are
+  // hand-written, so they can be wrong. If the segmenter disagrees with a row, one of the two is
+  // and the test says which input to look at — rather than the crate quietly agreeing with whichever
+  // of them it happens to be built on.
+  use unicode_segmentation::UnicodeSegmentation;
+
+  for (row, why) in PLACEMENTS {
+    let text: String = row.iter().map(|(cluster, _)| *cluster).collect();
+    let written: Vec<&str> = row.iter().map(|(cluster, _)| *cluster).collect();
+    let segmented: Vec<&str> = text.graphemes(true).collect();
+    assert_eq!(written, segmented, "{text:?}: {why}");
+  }
+}
+
+#[test]
+fn the_width_authority_and_the_boundary_authority_carry_the_same_data() {
+  // Two crates, two Unicode tables, and they version independently. A skew moves cluster boundaries
+  // under width numbers that were measured against the old ones — which is silent, because both
+  // crates keep working. Named here so it becomes a failure instead.
+  // Spelled with different integer types by the two crates, so compared component by component
+  // rather than as tuples.
+  let (width_major, width_minor, width_patch) = unicode_width::UNICODE_VERSION;
+  let (seg_major, seg_minor, seg_patch) = unicode_segmentation::UNICODE_VERSION;
+  assert_eq!(
+    (
+      u64::from(width_major),
+      u64::from(width_minor),
+      u64::from(width_patch)
+    ),
+    (seg_major, seg_minor, seg_patch),
+    "the width authority and the boundary authority are on different Unicode data"
+  );
 }
 
 #[test]
@@ -1076,31 +1224,99 @@ fn a_placement_unit_is_a_grapheme_cluster() {
   }
 }
 
+/// The inputs where per-cluster placement and whole-string measurement give different answers.
+///
+/// Both values, exactly. A one-sided assertion would let a `unicode-width` bump that drops a rule
+/// reclassify an input as agreeing and stay green — the divergence set is the subject of the model,
+/// so it is pinned from both ends and a change fails loudly with the input in hand.
+///
+/// Six families on Unicode 17 data. That is the whole set: every rule that operates INSIDE one
+/// cluster agrees, and those are in `PLACEMENTS` above.
+const DIVERGENCE: [(&str, u64, u64, &str); 8] = [
+  ("\u{644}\u{627}", 2, 1, "Arabic lam-alef"),
+  ("\u{644}\u{622}", 2, 1, "and the alef-madda form of it"),
+  (
+    "\u{644}\u{651}\u{627}",
+    2,
+    1,
+    "and with a transparent interposed, which folds into the lam's cluster",
+  ),
+  ("\u{5d0}\u{200d}\u{5dc}", 2, 1, "Hebrew alef-ZWJ-lamed"),
+  ("\u{1a15}\u{1a17}\u{200d}\u{1a10}", 2, 1, "Buginese"),
+  ("\u{a4f8}\u{a4fc}", 2, 1, "Lisu tone pair"),
+  ("\u{10c32}\u{200d}\u{10c03}", 2, 1, "Old Turkic"),
+  (
+    "\u{2d31}\u{2d7f}\u{2d3e}",
+    3,
+    1,
+    "Tifinagh, the widest gap between the two models",
+  ),
+];
+
 #[test]
 fn a_lines_width_is_the_sum_of_its_clusters() {
-  // The residual the review named, pinned rather than papered over. painty measures WHOLE CLUSTERS
-  // and adds them up, because a marker has to be placed at a cluster boundary and a single number
-  // for the line cannot be decomposed into the clusters it spans. `unicode-width`'s string-level
-  // rules operate over a whole string and are not obliged to agree with that sum.
-  //
-  // On this corpus and this table they do agree, and that agreement is an observation rather than a
-  // guarantee. If this ever fires, the answer is to record the divergent input here and keep the
-  // per-cluster model — not to switch the code to whole-string measurement, which cannot place a
-  // marker.
+  // The model, stated as an assertion: `width` is the clusters' cells added up. Held over every
+  // input, including the ones where whole-string measurement disagrees — which is the next test.
   use unicode_segmentation::UnicodeSegmentation;
   use unicode_width::UnicodeWidthStr;
 
+  let divergent = DIVERGENCE.map(|(text, _, _, _)| text);
   for (text, why) in CORPUS {
     if text.contains('\t') {
       continue;
     }
     let summed: u64 = text.graphemes(true).map(|c| c.width() as u64).sum();
     assert_eq!(measured(text, 4).width(), summed, "{text:?}: {why}");
+    // And for everything outside the named set the two models coincide, so a NEW divergence — a
+    // rule added to `unicode-width`, or a boundary moved under it — is reported rather than
+    // absorbed.
+    if !divergent.iter().any(|member| text.contains(member)) {
+      assert_eq!(
+        summed,
+        text.width() as u64,
+        "{text:?} has started diverging from whole-string width. Add it to `DIVERGENCE` with both \
+         values and keep the per-cluster model — do not switch to whole-string measurement, which \
+         cannot place a marker: {why}"
+      );
+    }
+  }
+}
+
+#[test]
+fn the_rejected_string_rules_are_pinned_at_both_values() {
+  // The rejection made falsifiable. Each of these is a case where `unicode-width` scores the whole
+  // string narrower than its clusters, and painty deliberately reports the clusters, because the
+  // first one has closed — and may already have been reported past by a `CSI 6n` — before the
+  // second arrives. No cursor-addressable terminal can implement the narrowing.
+  //
+  // Pinned at BOTH numbers so the set cannot change quietly in either direction: a rule dropped
+  // upstream fires the second assertion, a boundary moved fires the first.
+  use unicode_segmentation::UnicodeSegmentation;
+  use unicode_width::UnicodeWidthStr;
+
+  for (text, clustered, whole, why) in DIVERGENCE {
+    let summed: u64 = text.graphemes(true).map(|c| c.width() as u64).sum();
+    assert_eq!(summed, clustered, "{why}: the clusters' cells moved");
     assert_eq!(
-      summed,
       text.width() as u64,
-      "{text:?}: per-cluster and whole-string width have diverged — record the input, keep the \
-       per-cluster model: {why}"
+      whole,
+      "{why}: `unicode-width`'s rule for this changed"
+    );
+    assert_ne!(clustered, whole, "{why} is in the wrong table — it agrees");
+    assert_eq!(
+      measured(text, 4).width(),
+      clustered,
+      "{why}: painty followed the string model"
+    );
+
+    // And the placement consequence, which is the thing that would actually be wrong: the follower
+    // sits after all the clusters' cells, not after the ligature's.
+    let line = format!("{text}x");
+    let cells = measured(&line, 4);
+    assert_eq!(
+      cells.column_at(text.len()),
+      clustered + 1,
+      "{why}: the character after the pair moved to where no terminal puts it"
     );
   }
 }
@@ -1141,4 +1357,54 @@ fn control_picture_for(character: char) -> char {
     '\u{80}'..='\u{9f}' => '\u{fffd}',
     _ => char::from_u32(0x2400 + character as u32).expect("the block is contiguous"),
   }
+}
+
+#[test]
+fn a_line_terminator_never_reaches_this_layer() {
+  // Layer 2 hands out line text with the break excluded, and every column here depends on that:
+  // `"\r\n"` is ONE cluster of one cell, so a terminator that slipped through would not merely add
+  // a trailing cell — it would make the line's last cluster the break, and any marker resolved
+  // against a following line would be measured against the wrong text. Pinned as its own class
+  // rather than left as a property of another layer's implementation.
+  for text in ["alpha\nbeta\n", "alpha\r\nbeta\r\n", "alpha\rbeta\r"] {
+    let source = Source::new(text);
+    let mut number = 1;
+    while let Some(line) = source.line(number) {
+      assert!(
+        !line.text().contains(['\r', '\n', '\u{2028}']),
+        "{text:?} line {number} carries its terminator: {:?}",
+        line.text()
+      );
+      number += 1;
+    }
+  }
+
+  // And the converse, so the set is closed rather than open-ended: LF, CRLF and CR are the breaks,
+  // and U+2028 LINE SEPARATOR is ordinary text that measures like any other cluster. A renderer
+  // that started splitting on it would put half a line under a marker measured against the whole.
+  let separator = Source::new("alpha\u{2028}beta");
+  assert!(separator.line(2).is_none(), "U+2028 split a line");
+  assert_eq!(measured("alpha\u{2028}beta", 4).width(), 10);
+}
+
+#[test]
+fn the_ambiguous_width_convention_is_the_one_painty_measures_against() {
+  // `unicode-width` also ships `width_cjk`, where East Asian Ambiguous characters are two cells
+  // instead of one. Every number in `PLACEMENTS` and `DIVERGENCE` was written against the plain
+  // one, so a call to the CJK variant appearing anywhere in the crate would silently reinterpret
+  // the whole table. Asserted at a character that distinguishes them rather than by grepping for a
+  // name, so a re-export or an alias cannot get past it.
+  use unicode_width::UnicodeWidthStr;
+
+  assert_eq!(
+    "\u{2018}".width(),
+    1,
+    "the ambiguous convention has changed"
+  );
+  assert_eq!("\u{2018}".width_cjk(), 2, "and this is the one not taken");
+  assert_eq!(
+    measured("\u{2018}x", 4).column_at(3),
+    2,
+    "painty has started measuring ambiguous characters as two cells"
+  );
 }
