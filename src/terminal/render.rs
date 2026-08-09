@@ -218,7 +218,8 @@ impl<P: Palette> Terminal<P> {
       if shown_input != Some(*source) {
         let column =
           LineCells::new(drawn.line(), self.tab_width).column_at(drawn.covered().start());
-        write!(out, "{:width$}--> ", "", width = gutter as usize)?;
+        pad(out, gutter)?;
+        out.write_str("--> ")?;
         if let Some(origin) = origin {
           write_shown(out, origin)?;
           out.write_char(':')?;
@@ -232,7 +233,8 @@ impl<P: Palette> Terminal<P> {
     }
 
     if let Some(help) = diagnostic.help() {
-      write!(out, "{:width$}= ", "", width = gutter as usize + 1)?;
+      pad(out, gutter + 1)?;
+      out.write_str("= ")?;
       self.styled(out, Role::Help, "help")?;
       out.write_str(": ")?;
       self.styled(out, Role::Help, help)?;
@@ -243,7 +245,7 @@ impl<P: Palette> Terminal<P> {
 
   /// One `  |` separator row.
   fn bar(&self, out: &mut impl fmt::Write, gutter: u64) -> fmt::Result {
-    write!(out, "{:width$}", "", width = gutter as usize + 1)?;
+    pad(out, gutter + 1)?;
     self.styled(out, Role::Gutter, "|")?;
     out.write_char('\n')
   }
@@ -260,12 +262,7 @@ impl<P: Palette> Terminal<P> {
     let cells = LineCells::new(drawn.line(), self.tab_width);
 
     let number = drawn.line().number();
-    write!(
-      out,
-      "{:width$}",
-      "",
-      width = (gutter - digits(number)) as usize
-    )?;
+    pad(out, gutter - digits(number))?;
     self.styled(out, Role::LineNumber, &number.to_string())?;
     out.write_char(' ')?;
     self.styled(out, Role::Gutter, "|")?;
@@ -279,10 +276,10 @@ impl<P: Palette> Terminal<P> {
     out.write_char('\n')?;
 
     let marks = self.underline(drawn);
-    write!(out, "{:width$}", "", width = gutter as usize + 1)?;
+    pad(out, gutter + 1)?;
     self.styled(out, Role::Gutter, "|")?;
     out.write_char(' ')?;
-    write!(out, "{:width$}", "", width = (marks.start - 1) as usize)?;
+    pad(out, marks.start - 1)?;
 
     let role = if primary {
       Role::PrimaryLabel
@@ -414,6 +411,33 @@ impl<W: fmt::Write> fmt::Write for Shown<'_, W> {
     }
     Ok(())
   }
+}
+
+/// Writes `count` spaces.
+///
+/// # Why this is not `{:width$}`
+///
+/// The formatter's width is a `usize`, and a display column is a `u64` — rule 1 of
+/// [the numeric widths](crate#numeric-widths), because it is painty's own rendered geometry and not
+/// anything about the machine. Passing one to the other needs an `as usize`, which is exact on a
+/// 64-bit target and **narrows on a 32-bit one**: a line of tabs a few tens of MiB long reaches a
+/// column past `u32::MAX`, the cast wraps it to a small number, and the marker is drawn near the
+/// gutter under nothing at all. The tab bound does not save this. Clamping the tab width bounds the
+/// multiplier; the line length is the caller's and still owns the product.
+///
+/// So the count stays `u64` and is spent in chunks a `usize` certainly holds. Streamed rather than
+/// refused, because totality is the rule here — a diagnostic that declines to draw is a diagnostic
+/// lost — and chunked rather than one space at a time so an ordinary gutter costs one `write_str`.
+/// The writer is consulted once per chunk, so a bounded one still stops early.
+pub(super) fn pad(out: &mut impl fmt::Write, count: u64) -> fmt::Result {
+  const SPACES: &str = "                                                                ";
+  let mut left = count;
+  while left >= SPACES.len() as u64 {
+    out.write_str(SPACES)?;
+    left -= SPACES.len() as u64;
+  }
+  // Below the chunk length now, so this is the one narrowing in the file that cannot lose anything.
+  out.write_str(&SPACES[..left as usize])
 }
 
 /// How many decimal digits a line number occupies.

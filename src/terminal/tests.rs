@@ -1008,6 +1008,70 @@ fn a_tab_width_is_bounded_at_both_ends() {
   }
 }
 
+/// A writer that takes a fixed number of characters and then declines.
+struct Budgeted {
+  budget: usize,
+  taken: usize,
+}
+
+impl core::fmt::Write for Budgeted {
+  fn write_str(&mut self, text: &str) -> core::fmt::Result {
+    for _ in text.chars() {
+      if self.taken == self.budget {
+        return Err(core::fmt::Error);
+      }
+      self.taken += 1;
+    }
+    Ok(())
+  }
+}
+
+#[test]
+fn padding_is_counted_in_rendered_columns_and_not_in_pointer_width() {
+  // A display column is a `u64` by rule 1, and `{:width$}` takes a `usize`. The two met at an
+  // `as usize` in the marker row's indent, which is exact where this test runs and NARROWS on a
+  // 32-bit target — where a line of tabs a few tens of MiB long reaches a column past `u32::MAX`
+  // and the marker is drawn back near the gutter, under nothing.
+  //
+  // Tested at the helper rather than through a render, because the defect is arithmetic and
+  // reproducing it through the renderer would mean building a 32-bit target and gigabytes of cells.
+  use super::render::pad;
+
+  // Exact counts around the chunk boundary, so an off-by-one in the loop or the remainder shows up
+  // rather than being absorbed.
+  for count in [0u64, 1, 63, 64, 65, 127, 128, 129, 500] {
+    let mut out = String::new();
+    pad(&mut out, count).expect("a String is writable");
+    assert_eq!(out.len() as u64, count, "{count} spaces were not written");
+    assert!(out.chars().all(|c| c == ' '), "{out:?} is not all spaces");
+  }
+
+  // Past `u32::MAX`, which is where a 32-bit `usize` would wrap. Measured against a writer that
+  // stops early rather than by writing four billion spaces: the question is whether the count is
+  // treated as the large number it is, and a narrowing implementation would think it had 99 left to
+  // write, satisfy this writer, and report success.
+  let past = u64::from(u32::MAX) + 100;
+  let narrowed = past as u32 as u64;
+  assert!(
+    narrowed < 1_000,
+    "the discriminator needs a count that wraps to something small, and this wraps to {narrowed}"
+  );
+
+  let mut out = Budgeted {
+    budget: 1_000,
+    taken: 0,
+  };
+  assert!(
+    pad(&mut out, past).is_err(),
+    "a count past u32::MAX was satisfied by a writer that only took 1000 characters"
+  );
+  assert_eq!(
+    out.taken, 1_000,
+    "the writer was filled to {} rather than its budget, so padding stopped short",
+    out.taken
+  );
+}
+
 /// Where a terminal paints each cluster of a line, written from the terminal side.
 ///
 /// Hand-written rather than computed, and that is the point: a table derived from the crate's own
