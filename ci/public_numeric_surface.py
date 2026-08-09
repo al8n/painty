@@ -62,6 +62,7 @@ EXPECTED = {
     "LineCells::new": ["u64"],
     "LineCells::tab_width": ["u64"],
     "LineCells::width": ["u64"],
+    "Terminal::max_rendered_width": ["u64"],
     "Terminal::underline": ["u64"],
     "Terminal::with_tab_width": ["u64"],
     "Line::char_count": ["u64"],

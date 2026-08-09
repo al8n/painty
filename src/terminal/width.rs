@@ -218,9 +218,47 @@ impl<'a> LineCells<'a> {
   /// reader has to be able to see that something was there, and every stand-in is one cell so
   /// nothing placed against this line moves. It happens here rather than in the renderer because
   /// here is where the same walk measures it.
+  /// Writes the whole line, however wide it is. A caller drawing its own excerpt owns the size of
+  /// what it asked for; [`Terminal`](super::Terminal) bounds it instead — see
+  /// [`Terminal::max_rendered_width`](super::Terminal::max_rendered_width).
   pub fn write_expanded(&self, out: &mut impl fmt::Write) -> fmt::Result {
-    let text = self.line.text();
+    self.write_expanded_within(out, u64::MAX)
+  }
+
+  /// How much of the line a ceiling of `limit` cells leaves drawable, and whether it cut anything.
+  ///
+  /// The **one authority for where a row stops**, and it exists because the stop is not simply
+  /// `limit`. A unit is drawn whole or not at all — the rule the placement model rests on — so the
+  /// walk halts before the first one that would straddle the ceiling, and a tab can be 256 cells
+  /// wide. The row can therefore end well short of `limit`.
+  ///
+  /// That is exactly why this is a function and not a subtraction at each call site. The elision
+  /// mark sits at `cells + 1` and the marker row is clipped to the same place; two call sites each
+  /// deciding where the row ended would put the caret past the row it belongs to.
+  pub(crate) fn visible_within(&self, limit: u64) -> (u64, bool) {
+    let mut drawn = 0;
     for unit in self.units() {
+      // A subtraction against the budget rather than `drawn + unit.cells > limit`, which overflows
+      // for the unbounded caller above. `drawn` never passes `limit`, so this cannot.
+      if limit - drawn < unit.cells {
+        return (drawn, true);
+      }
+      drawn += unit.cells;
+    }
+    (drawn, false)
+  }
+
+  /// The same walk as [`write_expanded`](Self::write_expanded), stopping at `limit` cells.
+  ///
+  /// Handed the figure [`visible_within`](Self::visible_within) already decided, so the two agree by
+  /// construction rather than by both being careful.
+  pub(crate) fn write_expanded_within(&self, out: &mut impl fmt::Write, limit: u64) -> fmt::Result {
+    let text = self.line.text();
+    let mut drawn = 0;
+    for unit in self.units() {
+      if limit - drawn < unit.cells {
+        return Ok(());
+      }
       let cluster = &text[unit.start..unit.end];
       // Before the control arm, and that ORDER is the tab's whole exception. `control_picture` has
       // a picture for a tab like every other C0 character, so reaching it first would draw one `␉`
@@ -238,6 +276,7 @@ impl<'a> LineCells<'a> {
       } else {
         out.write_str(cluster)?;
       }
+      drawn += unit.cells;
     }
     Ok(())
   }

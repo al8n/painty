@@ -141,14 +141,58 @@ impl<P: Palette> Terminal<P> {
   /// agreeing with a defect. The renderer and its invariants call this same function.
   ///
   /// Never empty: a zero-width span is a caret, and a caret a reader cannot see is not a caret.
+  ///
+  /// Clipped to [`max_rendered_width`](Self::max_rendered_width) plus the cell holding the elision
+  /// mark, and clipped HERE rather than where the row is drawn so that the two cannot disagree: the
+  /// marker row is drawn from this range, so a span out past the ceiling puts the caret under the
+  /// `…` — which is where a reader should look for it — rather than under a cell the source row
+  /// never drew.
   pub fn underline(&self, drawn: RegionLine<'_>) -> core::ops::Range<u64> {
     let cells = LineCells::new(drawn.line(), self.tab_width);
     let marks = cells.columns_for(drawn.covered());
-    if marks.end > marks.start {
-      marks
+    // Clipped to where the SOURCE ROW actually stopped, which is not the ceiling: a unit is drawn
+    // whole, so the row halts before one that would straddle it and a tab can be 256 cells. Asking
+    // `visible_within` — the same function `excerpt` draws from — is what keeps the elision mark and
+    // the caret in the same column.
+    let (visible, elided) = cells.visible_within(Self::max_rendered_width());
+    let (start, end) = if elided {
+      let mark = visible + 1;
+      (marks.start.min(mark), marks.end.min(mark + 1))
     } else {
-      marks.start..marks.start + 1
+      (marks.start, marks.end)
+    };
+    if end > start {
+      start..end
+    } else {
+      start..start + 1
     }
+  }
+
+  /// The widest an excerpt is drawn, in cells.
+  ///
+  /// # A budget on one factor of a product bounds nothing
+  ///
+  /// A rendered row is the source line's length times the tab width, and three rounds of review
+  /// bounded neither. The tab width is clamped by [`LineCells::max_tab_width`] — that is the
+  /// multiplier. The line length is the caller's, and it is the other factor. Neither cap reaches
+  /// the product, so a file of tabs a few tens of MiB long asks for billions of cells: first as an
+  /// allocation, and then, once the rows were streamed instead, as output to any writer willing to
+  /// take it. A writer that refuses early stops it. A `String` or a log sink says yes to all of it.
+  ///
+  /// So the bound is on the thing that actually grows. Past this many cells an excerpt stops and
+  /// says so with `…` rather than cutting in silence, and the marker row is clipped to the same
+  /// window — a diagnostic that quietly truncates is worse than one that admits it. Beyond the
+  /// ceiling the output is a function of this number rather than of the input: two files an order
+  /// of magnitude apart in width render byte for byte the same.
+  ///
+  /// Wider than any terminal anybody uses, so no real diagnostic reaches it, and small enough that
+  /// a row cannot become a denial of service. It bounds what this renderer DRAWS;
+  /// [`LineCells::write_expanded`] still writes whatever it is handed, because a caller drawing its
+  /// own excerpt owns the size of what it asked for.
+  #[inline]
+  #[must_use]
+  pub const fn max_rendered_width() -> u64 {
+    4096
   }
 
   /// Writes `diagnostic` against the caller's inputs.
@@ -267,12 +311,22 @@ impl<P: Palette> Terminal<P> {
     out.write_char(' ')?;
     self.styled(out, Role::Gutter, "|")?;
     out.write_char(' ')?;
-    // Straight to `out`, not through a `String` first. Both rows below are as long as the line is
-    // wide, which is caller geometry: the source text's length times the tab width, and bounding
-    // the tab width bounds the multiplier rather than the product. Materialising either one commits
-    // the allocation before `out` is ever consulted, so a caller with a bounded or refusing
-    // `fmt::Write` — the whole reason this takes one — cannot decline what it never saw.
-    self.styled_with(out, Role::SourceText, |shown| cells.write_expanded(shown))?;
+    // Straight to `out`, not through a `String` first: materialising the row commits the allocation
+    // before `out` is ever consulted, so a caller with a bounded or refusing `fmt::Write` — the
+    // whole reason this takes one — cannot decline what it never saw.
+    //
+    // And bounded, because streaming only moves the cost to a writer that accepts: a row is the
+    // line's length times the tab width, both caller-owned, so the ceiling is on the product. The
+    // `…` is inside the styled run deliberately — it stands where source would have stood, occupies
+    // the one cell `underline` reserved for it, and is what stops the cut being silent.
+    let (visible, elided) = cells.visible_within(Self::max_rendered_width());
+    self.styled_with(out, Role::SourceText, |shown| {
+      cells.write_expanded_within(shown, visible)?;
+      if elided {
+        fmt::Write::write_char(shown, '…')?;
+      }
+      Ok(())
+    })?;
     out.write_char('\n')?;
 
     let marks = self.underline(drawn);

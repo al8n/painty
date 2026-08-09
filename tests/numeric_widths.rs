@@ -770,6 +770,9 @@ fn pin<'a>(_witness: &'a ()) {
     let _: fn(Terminal<Theme>, Ordinal) -> Terminal<Theme> = Terminal::<Theme>::with_tab_width;
     let _: fn(&Terminal<Theme>, RegionLine<'a>) -> core::ops::Range<Ordinal> =
       Terminal::<Theme>::underline;
+    // The ceiling on a drawn row is a distance across that same geometry, so it is rule 1 for the
+    // same reason the tab width is — and it is the one number the output-size contract rests on.
+    let _: fn() -> Ordinal = Terminal::<Theme>::max_rendered_width;
   }
 
   // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and
