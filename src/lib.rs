@@ -13,6 +13,10 @@ mod diagnostic;
 mod source;
 mod style;
 
+#[cfg(feature = "terminal")]
+#[cfg_attr(docsrs, doc(cfg(feature = "terminal")))]
+pub mod terminal;
+
 #[cfg(feature = "tokora")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokora")))]
 pub mod tokora;

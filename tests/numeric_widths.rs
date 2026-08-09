@@ -111,7 +111,7 @@ use syn::{
 /// [`the_file_list_is_the_whole_crate`] walks `src/` and checks it. `src/tokora.rs` is here whether
 /// or not its feature is on: `include_str!` reads the disk, not the build, which is what keeps the
 /// adapter under the same censuses as everything else.
-const CRATE: [(&str, &str); 12] = [
+const CRATE: [(&str, &str); 14] = [
   ("src/lib.rs", include_str!("../src/lib.rs")),
   (
     "src/diagnostic/mod.rs",
@@ -141,6 +141,14 @@ const CRATE: [(&str, &str); 12] = [
   ),
   ("src/style/color.rs", include_str!("../src/style/color.rs")),
   ("src/style/mod.rs", include_str!("../src/style/mod.rs")),
+  (
+    "src/terminal/mod.rs",
+    include_str!("../src/terminal/mod.rs"),
+  ),
+  (
+    "src/terminal/width.rs",
+    include_str!("../src/terminal/width.rs"),
+  ),
   ("src/tokora.rs", include_str!("../src/tokora.rs")),
 ];
 
@@ -731,6 +739,21 @@ fn pin<'a>(_witness: &'a ()) {
   let _: fn(&Source<'a>) -> Count = Source::len;
   let _: fn(&Source<'a>, Count) -> Line<'a> = Source::line_at;
   let _: fn(&Source<'a>, Count) -> Position = Source::position;
+
+  // The terminal renderer's geometry, behind its feature. A cell measure is rule 1: the rule
+  // covers painty's own geometry, and a distance across that geometry is in the same unit as a
+  // position in it — mixing a `usize` tab width into `u64` column arithmetic is exactly the seam
+  // an off-by-one hides in.
+  #[cfg(feature = "terminal")]
+  {
+    use painty::terminal::LineCells;
+    let _: fn(Line<'a>, Ordinal) -> LineCells<'a> = LineCells::new;
+    let _: fn(&LineCells<'a>) -> Ordinal = LineCells::tab_width;
+    let _: fn(&LineCells<'a>, Count) -> Ordinal = LineCells::column_at;
+    let _: fn(&LineCells<'a>) -> Ordinal = LineCells::width;
+    let _: fn(&LineCells<'a>, Count, Count) -> Ordinal = LineCells::cells_between;
+    let _: fn() -> Ordinal = LineCells::default_tab_width;
+  }
 
   // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and
   // buying that exactness meant walking a caller's `Diagnose` impl to exhaustion, so they are
