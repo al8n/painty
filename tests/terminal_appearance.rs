@@ -978,3 +978,121 @@ fn no_control_character_at_all_survives_a_caller_string() {
     );
   }
 }
+
+/// Bytes this thread has asked the allocator for.
+///
+/// The property below is a resource one — whether a row exists as a value before the writer is
+/// consulted — and no amount of reading the output can see it, because a streamed row and a
+/// materialised one produce the same bytes. That is the point of the fix and the reason this
+/// harness is here instead of an assertion about text.
+///
+/// Thread-local rather than a single counter: the harness runs tests in parallel, and a shared one
+/// would be measuring every other test at the same time. `const`-initialised so that reading it
+/// cannot itself allocate and re-enter the allocator. `realloc` is counted as well as `alloc`,
+/// because a `String` reaching its size mostly does it by growing.
+struct Counting;
+
+thread_local! {
+  static ALLOCATED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+}
+
+fn allocated() -> usize {
+  ALLOCATED.with(core::cell::Cell::get)
+}
+
+unsafe impl core::alloc::GlobalAlloc for Counting {
+  unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+    let _ = ALLOCATED.try_with(|bytes| bytes.set(bytes.get() + layout.size()));
+    unsafe { core::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
+  }
+
+  unsafe fn dealloc(&self, pointer: *mut u8, layout: core::alloc::Layout) {
+    unsafe { core::alloc::GlobalAlloc::dealloc(&std::alloc::System, pointer, layout) }
+  }
+
+  unsafe fn realloc(
+    &self,
+    pointer: *mut u8,
+    layout: core::alloc::Layout,
+    new_size: usize,
+  ) -> *mut u8 {
+    let _ = ALLOCATED.try_with(|bytes| bytes.set(bytes.get() + new_size));
+    unsafe { core::alloc::GlobalAlloc::realloc(&std::alloc::System, pointer, layout, new_size) }
+  }
+}
+
+#[global_allocator]
+static COUNTING: Counting = Counting;
+
+/// A writer that takes a fixed number of characters and then declines.
+///
+/// Holds no buffer, so anything the measurement below sees was allocated by the renderer.
+struct Refusing {
+  budget: usize,
+  taken: usize,
+}
+
+impl core::fmt::Write for Refusing {
+  fn write_str(&mut self, text: &str) -> core::fmt::Result {
+    for _ in text.chars() {
+      if self.taken == self.budget {
+        return Err(core::fmt::Error);
+      }
+      self.taken += 1;
+    }
+    Ok(())
+  }
+}
+
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "measures allocation volume, which is not what Miri is checking, and walks tens of \
+            thousands of cells to do it"
+)]
+fn a_row_is_written_to_the_caller_rather_than_built_before_it() {
+  // Both rows of an excerpt are as long as the line is WIDE, and that is caller geometry: the
+  // source length times the tab width. Bounding the tab width — which `LineCells` does — bounds the
+  // multiplier and not the product, so the line below is 256 tabs and 65,536 cells from 257 bytes.
+  //
+  // Building either row into a `String` first spends that memory before `out` is ever asked, so a
+  // caller whose writer is bounded or failing cannot decline what it never saw. `render` takes an
+  // `fmt::Write` precisely so that it can.
+  let text = format!("{}\n", "\t".repeat(256));
+  let width = 256 * 256;
+  let message = "a message";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, 256)),
+  )
+  .with_primary_label("all of it");
+  let terminal = Terminal::plain().with_tab_width(256);
+  let inputs = [Input::new(Source::new(&text))];
+
+  // Well above what the renderer legitimately allocates — a handful of small vectors and one line
+  // number — and far below either row, so neither a spurious pass nor a spurious failure is close.
+  let ceiling = 8 * 1024;
+
+  for (budget, row) in [(1_024, "the source row"), (70_000, "the marker row")] {
+    let mut out = Refusing { budget, taken: 0 };
+    let before = allocated();
+    let result = terminal.render(&diagnostic, &inputs, &mut out);
+    let spent = allocated() - before;
+
+    assert!(
+      result.is_err(),
+      "{row}: the writer refused at {budget} of {width} cells and the render reported success"
+    );
+    assert_eq!(
+      out.taken, budget,
+      "{row}: the writer was not filled, so the refusal did not happen where this test aims it"
+    );
+    assert!(
+      spent < ceiling,
+      "{row}: refusing after {budget} cells still cost {spent} bytes, over the {ceiling} allowed — \
+       a row of {width} was built before the writer was consulted"
+    );
+  }
+}

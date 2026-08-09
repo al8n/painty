@@ -270,9 +270,12 @@ impl<P: Palette> Terminal<P> {
     out.write_char(' ')?;
     self.styled(out, Role::Gutter, "|")?;
     out.write_char(' ')?;
-    let mut expanded = String::new();
-    cells.write_expanded(&mut expanded)?;
-    self.styled(out, Role::SourceText, &expanded)?;
+    // Straight to `out`, not through a `String` first. Both rows below are as long as the line is
+    // wide, which is caller geometry: the source text's length times the tab width, and bounding
+    // the tab width bounds the multiplier rather than the product. Materialising either one commits
+    // the allocation before `out` is ever consulted, so a caller with a bounded or refusing
+    // `fmt::Write` — the whole reason this takes one — cannot decline what it never saw.
+    self.styled_with(out, Role::SourceText, |shown| cells.write_expanded(shown))?;
     out.write_char('\n')?;
 
     let marks = self.underline(drawn);
@@ -287,8 +290,12 @@ impl<P: Palette> Terminal<P> {
       Role::SecondaryLabel
     };
     let marker = if primary { '^' } else { '-' };
-    let row: String = core::iter::repeat_n(marker, (marks.end - marks.start) as usize).collect();
-    self.styled(out, role, &row)?;
+    self.styled_with(out, role, |shown| {
+      for _ in 0..marks.end - marks.start {
+        fmt::Write::write_char(shown, marker)?;
+      }
+      Ok(())
+    })?;
     if let Some(text) = text {
       out.write_char(' ')?;
       self.styled(out, role, text)?;
@@ -299,13 +306,33 @@ impl<P: Palette> Terminal<P> {
   /// Writes `text` in the style the palette gives `role`, and nothing at all when it asks for
   /// nothing.
   fn styled(&self, out: &mut impl fmt::Write, role: Role, text: &str) -> fmt::Result {
+    // Fully qualified for the reason `write_shown` is, below: the numeric census cannot see through
+    // an imported `fmt::Write`, and this file keeps the trait out of scope rather than exempt.
+    self.styled_with(out, role, |shown| fmt::Write::write_str(shown, text))
+  }
+
+  /// The same, for a row that is written rather than held.
+  ///
+  /// `body` receives the sanitizer, so what it writes is substituted exactly as a `&str` would be,
+  /// and it goes through to `out` as it is written. That is what lets a row whose length is decided
+  /// by the input be produced without ever existing as one value.
+  ///
+  /// A closure and not a pair of open/close calls, because the two escape sequences have to stay
+  /// balanced: a caller holding an opener would be one early return away from leaving the rest of
+  /// the frame in whatever colour the last row asked for.
+  fn styled_with<W: fmt::Write>(
+    &self,
+    out: &mut W,
+    role: Role,
+    body: impl FnOnce(&mut Shown<'_, W>) -> fmt::Result,
+  ) -> fmt::Result {
     let style = self.narrow(self.palette.style(role));
     if style.is_plain() {
-      return write_shown(out, text);
+      return body(&mut Shown(out));
     }
     let ansi = to_anstyle(style);
     write!(out, "{}", ansi.render())?;
-    write_shown(out, text)?;
+    body(&mut Shown(out))?;
     write!(out, "{}", ansi.render_reset())
   }
 
