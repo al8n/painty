@@ -11,6 +11,7 @@ extern crate std;
 
 mod diagnostic;
 mod source;
+mod style;
 
 #[cfg(feature = "tokora")]
 #[cfg_attr(docsrs, doc(cfg(feature = "tokora")))]
@@ -18,3 +19,4 @@ pub mod tokora;
 
 pub use diagnostic::{Diagnostic, Label, Location, PathSegment, Severity, Span};
 pub use source::{Line, LineBreak, Lines, Position, Region, RegionLine, RegionLines, Source};
+pub use style::{Ansi16, Color, Palette, Role, Style, Theme};

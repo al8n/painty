@@ -49,6 +49,11 @@ EXPECTED_FORMAT_VERSION = 61
 # checked in, so that adding a public numeric fails until somebody writes it down here as well as
 # pinning it in `tests/numeric_widths.rs`.
 EXPECTED = {
+    "Ansi16::from_index": ["u8"],
+    "Ansi16::index": ["u8"],
+    "Ansi16::to_rgb": ["u8"],
+    "Color::Ansi256": ["u8"],
+    "Color::Rgb": ["u8"],
     "Line::char_count": ["u64"],
     "Line::column_at": ["u64", "usize"],
     "Line::number": ["u64"],

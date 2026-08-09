@@ -118,15 +118,16 @@ renderer can say what shape it needs.
 
 A published model's integer widths cannot be changed later without breaking every consumer, and
 this one is meant to cross a C ABI as well as a Rust API. So the width of a numeric member is not
-a local choice — it follows from what the number *is*, by four rules read in order. The first that
+a local choice — it follows from what the number *is*, by five rules read in order. The first that
 matches wins, and the last matches everything, so there is no member the rule fails to place.
 
 | # | what the number is | width | why |
 | - | ------------------ | ----- | --- |
-| 1 | a line or column in the resolved model — including a count of lines, which is the last line's own number | `u64` | it crosses a C ABI, so not `usize`; and it must not imply a ceiling the domain does not have, so not `u32` |
+| 1 | a line or column in painty's own geometry, resolved **or rendered** — including a count of lines, which is the last line's own number | `u64` | it crosses a C ABI, so not `usize`; and it must not imply a ceiling the domain does not have, so not `u32` |
 | 2 | an ordinal in data the **producer** built, that painty neither computes nor bounds | `u64` | same ceiling argument, and there is no protocol cap to point at instead |
 | 3 | a key into a structure painty does not own and never computes | that contract's width | it has to round-trip; matching the width is what makes it lossless in both directions |
-| 4 | anything else — an index or a count of things in memory | `usize` | exactly as `slice::len` is |
+| 4 | a value painty itself **emits into a wire format** that fixes its width | that format's width | the format is not negotiable and the value has to be legal in it |
+| 5 | anything else — an index or a count of things in memory | `usize` | exactly as `slice::len` is |
 
 Worked through the whole public surface, that gives:
 
@@ -136,7 +137,9 @@ Worked through the whole public surface, that gives:
 - **rule 2** — `PathSegment::Index`, a position in a *result* the producer assembled;
 - **rule 3** — `Location::source`, a `u32` index into the caller's own list of inputs, which is
   what every producer of one already spells it;
-- **rule 4** — `Position::offset`, `Span::{new, empty, start, end, len, contains}`,
+- **rule 4** — `Color::Ansi256`, `Color::Rgb`, `Ansi16::{index, from_index, to_rgb}`: a colour
+  channel painty writes into an SGR escape sequence, which fixes it at one byte;
+- **rule 5** — `Position::offset`, `Span::{new, empty, start, end, len, contains}`,
   `LineBreak::byte_len`, and `Source::{len, line_at, position}`.
 
 The adapter's overflow reports used to be here, as exact `usize` counts. They are booleans now and
@@ -144,6 +147,23 @@ have left the numeric surface entirely: an exact count of what did not fit can o
 looking at everything that did not fit, and those are answers from a caller-implemented trait, so
 the count was buying an unbounded walk through somebody else's code to fill a four-element array.
 `painty::tokora::Adapted` documents the trade.
+
+Rule 4 was added when the terminal renderer arrived, and it is the residual this document had been
+carrying — *the rule set itself being wrong* — actually firing. A colour channel is not an ordinal,
+and rule 3 excludes it on its own terms because painty **does** compute it: narrowing `Rgb → 256 →
+16` is painty's arithmetic. The catch-all then claimed it and gave a pointer-sized colour channel,
+which is absurd. The alternative considered was widening rule 3 from *authorship of the value* to
+*ownership of the contract*, which covers both with one rule instead of two; it was rejected because
+dropping rule 3's "never computes" clause lets it also claim every byte offset — Rust's slicing
+contract fixes those at `usize` — which would leave rule 3 swallowing rule 5 and the procedure with
+nothing to discriminate on. Five rules that each decide something beat four where one decides
+everything.
+
+Rule 1's wording widened at the same time, from *the resolved model* to *painty's own geometry,
+resolved or rendered*, so that a renderer's display column is placed. Checked against all
+twenty-four members that existed before: none is re-placed, and the near misses — `Source::line_at`,
+`LineBreak::byte_len`, `PathSegment::Index`, `Location::source`, `Position::offset` — are byte
+offsets and foreign indices rather than lines or columns.
 
 Two consequences worth stating, because they are why the rules are ordered rather than merely
 listed. A line count is *both* a count of things in memory and a line ordinal; rule 1 comes first,

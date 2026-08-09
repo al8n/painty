@@ -96,7 +96,9 @@
 //! panics if that reasoning is ever wrong — which is the direction to fail in. A saturating
 //! increment would instead hand back a number indistinguishable from a real one.
 
-use painty::{Line, LineBreak, Location, PathSegment, Position, Region, RegionLine, Source, Span};
+use painty::{
+  Ansi16, Color, Line, LineBreak, Location, PathSegment, Position, Region, RegionLine, Source, Span,
+};
 use syn::{
   Item, Type, Visibility,
   spanned::Spanned,
@@ -109,7 +111,7 @@ use syn::{
 /// [`the_file_list_is_the_whole_crate`] walks `src/` and checks it. `src/tokora.rs` is here whether
 /// or not its feature is on: `include_str!` reads the disk, not the build, which is what keeps the
 /// adapter under the same censuses as everything else.
-const CRATE: [(&str, &str); 10] = [
+const CRATE: [(&str, &str); 12] = [
   ("src/lib.rs", include_str!("../src/lib.rs")),
   (
     "src/diagnostic/mod.rs",
@@ -137,6 +139,8 @@ const CRATE: [(&str, &str); 10] = [
     "src/source/region.rs",
     include_str!("../src/source/region.rs"),
   ),
+  ("src/style/color.rs", include_str!("../src/style/color.rs")),
+  ("src/style/mod.rs", include_str!("../src/style/mod.rs")),
   ("src/tokora.rs", include_str!("../src/tokora.rs")),
 ];
 
@@ -661,7 +665,14 @@ mod rule {
   pub type DomainOrdinal = u64;
   /// Rule 3 — a key into a structure painty does not own, at that contract's width.
   pub type ForeignKey = u32;
-  /// Rule 4 — an index or a count of things in memory.
+  /// Rule 4 — a value painty emits into a wire format that fixes its width.
+  ///
+  /// An SGR escape sequence carries a colour channel in one byte, and a value outside that is not
+  /// expressible in the format at all. Distinct from rule 1's refusal to adopt LSP's 32-bit cap:
+  /// painty does not emit LSP — a consumer does — so that cap is somebody else's to honour, while
+  /// this one is painty's own output.
+  pub type Emitted = u8;
+  /// Rule 5 — an index or a count of things in memory.
   pub type Count = usize;
 }
 
@@ -684,7 +695,7 @@ mod rule {
 /// regression against all three. `tests/source_borrows.rs` asserts the same property from the side
 /// a caller feels, and does not depend on anybody getting a function-pointer type right.
 fn pin<'a>(_witness: &'a ()) {
-  use rule::{Count, DomainOrdinal, ForeignKey, Ordinal};
+  use rule::{Count, DomainOrdinal, Emitted, ForeignKey, Ordinal};
 
   let _: fn(&Position) -> Ordinal = Position::line;
   let _: fn(&Position) -> Ordinal = Position::column;
@@ -697,6 +708,13 @@ fn pin<'a>(_witness: &'a ()) {
   let _: fn(&RegionLine<'a>) -> core::ops::Range<Ordinal> = RegionLine::columns;
 
   let _: fn(DomainOrdinal) -> PathSegment<'a> = PathSegment::Index;
+
+  // Rule 4 — emitted into an SGR escape, which fixes the width at one byte.
+  let _: fn(&Ansi16) -> Emitted = Ansi16::index;
+  let _: fn(Emitted) -> Option<Ansi16> = Ansi16::from_index;
+  let _: fn(&Ansi16) -> (Emitted, Emitted, Emitted) = Ansi16::to_rgb;
+  let _: fn(Emitted) -> Color = Color::Ansi256;
+  let _: fn(Emitted, Emitted, Emitted) -> Color = Color::Rgb;
 
   let _: fn(ForeignKey, Span) -> Location = Location::new;
   let _: fn(ForeignKey) -> Location = Location::entire;
