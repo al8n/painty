@@ -1072,6 +1072,80 @@ fn padding_is_counted_in_rendered_columns_and_not_in_pointer_width() {
   );
 }
 
+#[test]
+fn bounding_the_geometry_walk_did_not_change_what_it_answers() {
+  // `marks_within` exists because asking `columns_for` for exact columns and clipping them
+  // afterwards costs a walk of the whole line for a span that will not be drawn. The risk in
+  // rewriting a walk to stop early is that it also changes what the walk SAYS, and that would be a
+  // marker in the wrong cell — the defect class three earlier rounds were about.
+  //
+  // So the rewrite is held against the original: given no ceiling to stop at, the two must agree at
+  // every span of every corpus member, not merely on the spans someone thought to try.
+  for (text, why) in CORPUS {
+    let cells = measured(text, 4);
+    for start in 0..=text.len() {
+      if !text.is_char_boundary(start) {
+        continue;
+      }
+      for end in start..=text.len() {
+        if !text.is_char_boundary(end) {
+          continue;
+        }
+        let span = Span::new(start, end);
+        assert_eq!(
+          cells.marks_within(span, u64::MAX).columns,
+          cells.columns_for(span),
+          "{text:?}: the bounded walk disagrees with `columns_for` at {start}..{end} — {why}"
+        );
+      }
+    }
+  }
+}
+
+#[test]
+fn a_ceiling_stops_the_walk_where_a_whole_unit_stops() {
+  // The stop is NOT the ceiling, and everything placed against the row depends on knowing that. A
+  // unit is drawn whole or not at all, so the walk halts before one that would straddle — and a tab
+  // can be 256 cells, so the row can end far short of what was allowed.
+  //
+  // Four tabs at a width of 4, so the line is 16 cells in units of 4 and a ceiling can be asked to
+  // land inside one.
+  let cells = measured("\t\t\t\t", 4);
+  assert_eq!(cells.width(), 16);
+  for (limit, visible, elided) in [
+    (16, 16, false),
+    (15, 12, true),
+    (13, 12, true),
+    (12, 12, true),
+    (11, 8, true),
+    (3, 0, true),
+    (0, 0, true),
+  ] {
+    let marks = cells.marks_within(Span::new(0, 4), limit);
+    assert_eq!(
+      (marks.visible, marks.elided),
+      (visible, elided),
+      "a ceiling of {limit} cells over four four-cell tabs"
+    );
+    assert!(
+      marks.visible <= limit,
+      "a ceiling of {limit} let {} cells through",
+      marks.visible
+    );
+  }
+
+  // And a span reaching past the drawn text is marked over the elision cell, which sits at
+  // `visible + 1`. Without that the underline would stop at the last drawn cell and claim the span
+  // ended with the row.
+  let marks = cells.marks_within(Span::new(0, 4), 11);
+  assert_eq!(marks.visible, 8);
+  assert_eq!(marks.columns, 1..10, "the mark does not reach the `…` cell");
+
+  // A span that begins past the window has nowhere of its own, so it anchors on that same cell.
+  let marks = cells.marks_within(Span::new(3, 4), 11);
+  assert_eq!(marks.columns, 9..10);
+}
+
 /// Where a terminal paints each cluster of a line, written from the terminal side.
 ///
 /// Hand-written rather than computed, and that is the point: a table derived from the crate's own

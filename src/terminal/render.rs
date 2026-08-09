@@ -142,30 +142,20 @@ impl<P: Palette> Terminal<P> {
   ///
   /// Never empty: a zero-width span is a caret, and a caret a reader cannot see is not a caret.
   ///
-  /// Clipped to [`max_rendered_width`](Self::max_rendered_width) plus the cell holding the elision
-  /// mark, and clipped HERE rather than where the row is drawn so that the two cannot disagree: the
-  /// marker row is drawn from this range, so a span out past the ceiling puts the caret under the
-  /// `…` — which is where a reader should look for it — rather than under a cell the source row
-  /// never drew.
+  /// Confined to the drawable window, and confined by the WALK rather than by clipping its result:
+  /// asking for exact columns first and cutting them down afterwards costs work proportional to the
+  /// whole line to place a caret that ends up under the elision mark. `marks_within` stops at the
+  /// ceiling, so a span out past it costs the window and not the file.
+  ///
+  /// A span reaching past the drawn text is marked over the `…`, which is where a reader should
+  /// look for the rest of it.
   pub fn underline(&self, drawn: RegionLine<'_>) -> core::ops::Range<u64> {
     let cells = LineCells::new(drawn.line(), self.tab_width);
-    let marks = cells.columns_for(drawn.covered());
-    // Clipped to where the SOURCE ROW actually stopped, which is not the ceiling: a unit is drawn
-    // whole, so the row halts before one that would straddle it and a tab can be 256 cells. Asking
-    // `visible_within` — the same function `excerpt` draws from — is what keeps the elision mark and
-    // the caret in the same column.
-    let (visible, elided) = cells.visible_within(Self::max_rendered_width());
-    let (start, end) = if elided {
-      let mark = visible + 1;
-      (marks.start.min(mark), marks.end.min(mark + 1))
-    } else {
-      (marks.start, marks.end)
-    };
-    if end > start {
-      start..end
-    } else {
-      start..start + 1
-    }
+    never_empty(
+      cells
+        .marks_within(drawn.covered(), Self::max_rendered_width())
+        .columns,
+    )
   }
 
   /// The widest an excerpt is drawn, in cells.
@@ -319,17 +309,21 @@ impl<P: Palette> Terminal<P> {
     // line's length times the tab width, both caller-owned, so the ceiling is on the product. The
     // `…` is inside the styled run deliberately — it stands where source would have stood, occupies
     // the one cell `underline` reserved for it, and is what stops the cut being silent.
-    let (visible, elided) = cells.visible_within(Self::max_rendered_width());
+    //
+    // One walk for the whole excerpt's geometry. `underline` would answer the same — it is
+    // `never_empty` over this same call — but asking twice would walk the window twice, and the
+    // marker row has to be placed against the stop this walk found.
+    let geometry = cells.marks_within(drawn.covered(), Self::max_rendered_width());
     self.styled_with(out, Role::SourceText, |shown| {
-      cells.write_expanded_within(shown, visible)?;
-      if elided {
+      cells.write_expanded_within(shown, geometry.visible)?;
+      if geometry.elided {
         fmt::Write::write_char(shown, '…')?;
       }
       Ok(())
     })?;
     out.write_char('\n')?;
 
-    let marks = self.underline(drawn);
+    let marks = never_empty(geometry.columns);
     pad(out, gutter + 1)?;
     self.styled(out, Role::Gutter, "|")?;
     out.write_char(' ')?;
@@ -492,6 +486,18 @@ pub(super) fn pad(out: &mut impl fmt::Write, count: u64) -> fmt::Result {
   }
   // Below the chunk length now, so this is the one narrowing in the file that cannot lose anything.
   out.write_str(&SPACES[..left as usize])
+}
+
+/// A marker range that a reader can see.
+///
+/// A zero-width span is a caret, and a caret of no cells is not a caret. Shared by
+/// [`Terminal::underline`] and the row that draws it so the two cannot disagree about it.
+fn never_empty(columns: core::ops::Range<u64>) -> core::ops::Range<u64> {
+  if columns.end > columns.start {
+    columns
+  } else {
+    columns.start..columns.start + 1
+  }
 }
 
 /// How many decimal digits a line number occupies.

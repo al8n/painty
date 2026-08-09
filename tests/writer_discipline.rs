@@ -19,7 +19,7 @@
 //! shared table of adversarial inputs rather than over whatever input each finding happened to
 //! arrive with.
 //!
-//! # The four dimensions
+//! # The five dimensions
 //!
 //! 1. **How much it emits**, against a writer that accepts everything. Bounded by policy —
 //!    `Terminal::max_rendered_width` — rather than by the input.
@@ -29,6 +29,21 @@
 //!    a property of a render, so it is pinned at the helper it lives in —
 //!    `padding_is_counted_in_rendered_columns_and_not_in_pointer_width`, in `src/terminal/tests.rs`
 //!    — and named here so the list of dimensions stays in one place.
+//! 5. **How much WORK it does.** Not implied by any of the four above, and that is how the fourth
+//!    defect survived: the ceiling bounded what was emitted and said nothing about what was computed
+//!    in order to emit it. A span past the window cost a walk of the whole line to place one caret
+//!    under an elision mark.
+//!
+//! # What dimension 5 does not cover, said plainly
+//!
+//! A whole render cannot be bounded in work, and no ceiling can change that: layer 2 turns a byte
+//! offset into a line and column by scanning to it, so finding the line is proportional to the
+//! offset. On an eight-megabyte line that scan measures around 58 ms and dominates everything else.
+//!
+//! So what is asserted is the property that CAN hold — the renderer's own geometry costs the window
+//! and not the line — and it is asserted at `Terminal::underline`, the public entry to that
+//! geometry, rather than at `render`, where the scan would drown it. Claiming a bound the code
+//! cannot keep is the failure this file exists to prevent.
 //!
 //! # Why the counting allocator lives in its own test binary
 //!
@@ -461,4 +476,61 @@ fn a_refused_write_is_reported_and_leaves_no_style_open() {
       );
     }
   }
+}
+
+/// How long the renderer's own geometry takes on a line of `megabytes`, with the span placed past
+/// the drawable window so that the answer is an elision marker either way.
+///
+/// Repeated, because one call at this size is a few hundred microseconds and a single sample of
+/// that is mostly timer.
+fn geometry_cost(megabytes: usize) -> core::time::Duration {
+  let text = format!("{}\n", "a".repeat(megabytes * 1_000_000));
+  let source = Source::new(&text);
+  let far = megabytes * 1_000_000 - 10;
+  let region = source.resolve(Span::new(far, far + 5));
+  let line = region.lines().next().expect("a line");
+  let terminal = Terminal::plain();
+  let _ = terminal.underline(line);
+
+  let started = std::time::Instant::now();
+  for _ in 0..20 {
+    core::hint::black_box(terminal.underline(core::hint::black_box(line)));
+  }
+  started.elapsed()
+}
+
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "an asymptotic measurement over nine megabytes of input, which Miri would take hours to \
+            walk and is not checking anyway"
+)]
+fn the_geometry_costs_the_window_and_not_the_line() {
+  // Dimension 5. `underline` asked `columns_for` for exact columns and clipped them afterwards, so
+  // a span past the window walked every placement unit in the line — grapheme segmentation over
+  // twenty million of them — to produce a caret under an elision mark. Work with no output at all.
+  //
+  // A RATIO and not a threshold, deliberately. Machine speed cancels, so this cannot flake on a
+  // loaded runner or pass on a fast one, and it states the actual property: the cost does not
+  // depend on the length of the line. Measured while writing it, in the same debug profile the
+  // suite runs in:
+  //
+  //   bounded    1 MB 0.7689 ms/call   8 MB 0.7720 ms/call   ratio 1.004
+  //   unbounded  1 MB 187.53 ms/call   8 MB 1482.90 ms/call  ratio 7.91
+  //
+  // Eight times the line for the same window, so a walk of the line shows up as very nearly eight
+  // and a walk of the window as very nearly one. Three is a wide corridor between them.
+  let small = geometry_cost(1);
+  let large = geometry_cost(8);
+  assert!(
+    small > core::time::Duration::from_micros(50),
+    "the smaller measurement is {small:?}, too close to the timer to divide by"
+  );
+
+  let growth = large.as_secs_f64() / small.as_secs_f64();
+  assert!(
+    growth < 3.0,
+    "eight times the line cost {growth:.2} times the geometry ({small:?} then {large:?}) — the walk \
+     is following the line rather than stopping at the window"
+  );
 }

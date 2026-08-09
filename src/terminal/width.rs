@@ -225,27 +225,75 @@ impl<'a> LineCells<'a> {
     self.write_expanded_within(out, u64::MAX)
   }
 
-  /// How much of the line a ceiling of `limit` cells leaves drawable, and whether it cut anything.
+  /// Everything the renderer needs about one line, in a single walk that stops at `limit` cells.
   ///
-  /// The **one authority for where a row stops**, and it exists because the stop is not simply
-  /// `limit`. A unit is drawn whole or not at all — the rule the placement model rests on — so the
-  /// walk halts before the first one that would straddle the ceiling, and a tab can be 256 cells
-  /// wide. The row can therefore end well short of `limit`.
+  /// # Why this is one function and not three
   ///
-  /// That is exactly why this is a function and not a subtraction at each call site. The elision
-  /// mark sits at `cells + 1` and the marker row is clipped to the same place; two call sites each
-  /// deciding where the row ended would put the caret past the row it belongs to.
-  pub(crate) fn visible_within(&self, limit: u64) -> (u64, bool) {
+  /// The obvious shape — ask [`columns_for`](Self::columns_for) for the exact span columns, then
+  /// clip them to a separately computed stop — is what shipped, and it does work proportional to
+  /// the WHOLE LINE for a span that is not going to be drawn at all. A span starting past the
+  /// ceiling walked twenty million units to place one caret under an elision mark. The ceiling
+  /// bounded what was emitted and said nothing about what was computed in order to emit nothing.
+  ///
+  /// So the ceiling is applied to the walk rather than to its result. Three things come out of it,
+  /// and the reason they come out together is that they have to agree: the stop is not `limit` — a
+  /// unit is drawn whole or not at all, and a tab can be 256 cells, so the row can end well short —
+  /// and the elision mark sits at `visible + 1`, and the marker row is placed against that same
+  /// column. Two callers each deciding where the row ended would put the caret past the row.
+  ///
+  /// Inside the window the answer is [`columns_for`](Self::columns_for)'s, exactly; the tests hold
+  /// the two together over the corpus so that bounding the walk cannot quietly change the geometry.
+  pub(crate) fn marks_within(&self, span: Span, limit: u64) -> Marks {
+    let start = self.clamp(span.start());
+    let end = self.clamp(span.end());
+    let mut first = None;
+    let mut last = None;
+    let mut anchor = None;
     let mut drawn = 0;
+    let mut drawn_end = 0;
+    let mut elided = false;
     for unit in self.units() {
       // A subtraction against the budget rather than `drawn + unit.cells > limit`, which overflows
-      // for the unbounded caller above. `drawn` never passes `limit`, so this cannot.
+      // for an unbounded caller. `drawn` never passes `limit`, so this cannot.
       if limit - drawn < unit.cells {
-        return (drawn, true);
+        elided = true;
+        break;
+      }
+      // `columns_for`'s predicate, so the two cannot answer differently inside the window.
+      let touches = unit.start < end || (unit.start <= start && start < unit.end);
+      if touches && unit.end > start {
+        first.get_or_insert(unit.column);
+        last = Some(unit.column + unit.cells);
+      }
+      // What `column_at` would answer for `start`, carried along rather than fetched by a second
+      // walk when the span turns out to touch nothing.
+      if anchor.is_none() && start < unit.end {
+        anchor = Some(unit.column);
       }
       drawn += unit.cells;
+      drawn_end = unit.end;
     }
-    (drawn, false)
+
+    let stop = drawn + 1;
+    // A span running past the drawn text reaches the elision mark, so it is drawn over it: that is
+    // what tells a reader the span continues out there. Without this the underline would stop at
+    // the last drawn cell and claim the span ended with the row.
+    if elided && end > drawn_end {
+      first.get_or_insert(stop);
+      last = Some(stop + 1);
+    }
+    let columns = match (first, last) {
+      (Some(from), Some(to)) => from..to,
+      _ => {
+        let at = anchor.unwrap_or(stop);
+        at..at
+      }
+    };
+    Marks {
+      columns,
+      visible: drawn,
+      elided,
+    }
   }
 
   /// The same walk as [`write_expanded`](Self::write_expanded), stopping at `limit` cells.
@@ -300,6 +348,20 @@ impl<'a> LineCells<'a> {
       column: 1,
     }
   }
+}
+
+/// One line's drawable geometry under a ceiling: where the marker goes, where the row stops, and
+/// whether anything was left over.
+///
+/// Returned together because they are computed together and must agree — see
+/// [`LineCells::marks_within`].
+pub(crate) struct Marks {
+  /// The display columns the span occupies, already inside the drawable window.
+  pub(crate) columns: core::ops::Range<u64>,
+  /// Cells of the line that fit under the ceiling. The elision mark, if any, is at `visible + 1`.
+  pub(crate) visible: u64,
+  /// Whether the ceiling cut the line short.
+  pub(crate) elided: bool,
 }
 
 /// One grapheme cluster, and the cells a terminal gives it.
