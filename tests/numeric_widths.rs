@@ -773,6 +773,10 @@ fn pin<'a>(_witness: &'a ()) {
     // The ceiling on a drawn row is a distance across that same geometry, so it is rule 1 for the
     // same reason the tab width is — and it is the one number the output-size contract rests on.
     let _: fn() -> Ordinal = Terminal::<Theme>::max_rendered_width;
+    // A count of source bytes the renderer will examine. Rule 1 as well: it is a measure over
+    // painty's own rendered geometry rather than an index into anything, and it is the number the
+    // resource bound rests on.
+    let _: fn() -> Ordinal = Terminal::<Theme>::max_source_bytes;
   }
 
   // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and

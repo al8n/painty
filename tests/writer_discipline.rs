@@ -212,6 +212,17 @@ struct Case {
   tab_width: u64,
   span: Span,
   cells: u64,
+  /// Bytes of the LINE, which is what the resource bound is denominated in. A case can be extreme
+  /// in this and cost nothing in cells — that is the whole reason the two are separate.
+  bytes: u64,
+}
+
+impl Case {
+  /// Whether the excerpt must be cut, derived from both budgets rather than from either.
+  fn is_cut(&self) -> bool {
+    self.cells > Terminal::<Theme>::max_rendered_width()
+      || self.bytes > Terminal::<Theme>::max_source_bytes()
+  }
 }
 
 fn cases() -> Vec<Case> {
@@ -223,6 +234,7 @@ fn cases() -> Vec<Case> {
       tab_width: 4,
       span: Span::new(16, 21),
       cells: 12,
+      bytes: 12,
     },
     Case {
       what: "a line of tabs: 257 bytes asking for 65,536 cells",
@@ -230,6 +242,7 @@ fn cases() -> Vec<Case> {
       tab_width: 256,
       span: Span::new(0, 256),
       cells: 256 * 256,
+      bytes: 256,
     },
     Case {
       what: "the same shape ten times over, which must render identically",
@@ -237,6 +250,7 @@ fn cases() -> Vec<Case> {
       tab_width: 256,
       span: Span::new(0, 2560),
       cells: 2560 * 256,
+      bytes: 2560,
     },
     Case {
       what: "a long plain line, where the ceiling is reached without any tab multiplier",
@@ -244,6 +258,7 @@ fn cases() -> Vec<Case> {
       tab_width: 4,
       span: Span::new(0, 5),
       cells: 20_000,
+      bytes: 20_000,
     },
     Case {
       what: "a span out PAST the ceiling, whose caret has nowhere of its own to sit",
@@ -251,6 +266,7 @@ fn cases() -> Vec<Case> {
       tab_width: 4,
       span: Span::new(19_000, 19_010),
       cells: 20_000,
+      bytes: 20_000,
     },
     Case {
       what: "a line that stops just under the ceiling and must not be cut",
@@ -258,6 +274,23 @@ fn cases() -> Vec<Case> {
       tab_width: 4,
       span: Span::new(0, 5),
       cells: ceiling,
+      bytes: ceiling,
+    },
+    Case {
+      what: "ninety kilobytes of zero-width spaces, which cost no cells whatever",
+      text: format!("{}\n", "\u{200b}".repeat(30_000)),
+      tab_width: 4,
+      span: Span::new(0, 3),
+      cells: 0,
+      bytes: 90_000,
+    },
+    Case {
+      what: "one base and forty thousand combining marks: one cluster, one cell, eighty kilobytes",
+      text: format!("a{}\n", "\u{301}".repeat(40_000)),
+      tab_width: 4,
+      span: Span::new(0, 1),
+      cells: 1,
+      bytes: 80_001,
     },
   ]
 }
@@ -355,7 +388,7 @@ fn a_cut_row_says_that_it_was_cut() {
   for case in cases() {
     let mut out = String::new();
     render_into(&case, &mut out).expect("a String is writable");
-    let cut = case.cells > ceiling;
+    let cut = case.is_cut();
     assert_eq!(
       out.contains('…'),
       cut,
@@ -562,14 +595,19 @@ mod the_size_contract {
       .unwrap_or(usize::MAX)
       .saturating_mul(8);
 
+    let mut examined = 0;
     for case in cases() {
+      // Only a SMALL input can demonstrate amplification. The cases that are large in themselves —
+      // the zero-width and combining runs — are about the resource bound instead, and are covered
+      // by the dimensions above; counting them here would let a case that proves nothing look like
+      // evidence.
+      if case.text.len() >= allowed {
+        continue;
+      }
+      examined += 1;
+
       let mut out = Accepting::default();
       render_into(&case, &mut out).expect("a counting writer never refuses");
-      assert!(
-        case.text.len() < allowed,
-        "{}: the INPUT is already over the allowance, so this case cannot show amplification",
-        case.what
-      );
       assert!(
         out.taken < allowed,
         "{}: {} bytes of source became {} characters, over the {allowed} a ceiling of {ceiling} \
@@ -579,6 +617,11 @@ mod the_size_contract {
         out.taken
       );
     }
+    assert!(
+      examined >= 4,
+      "only {examined} cases were small enough to show amplification, so the table has drifted away \
+       from what this test is for"
+    );
   }
 
   #[test]

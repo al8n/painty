@@ -218,32 +218,40 @@ impl<'a> LineCells<'a> {
   /// reader has to be able to see that something was there, and every stand-in is one cell so
   /// nothing placed against this line moves. It happens here rather than in the renderer because
   /// here is where the same walk measures it.
+  ///
   /// Writes the whole line, however wide it is. A caller drawing its own excerpt owns the size of
-  /// what it asked for; [`Terminal`](super::Terminal) bounds it instead — see
-  /// [`Terminal::max_rendered_width`](super::Terminal::max_rendered_width).
+  /// what it asked for; [`Terminal`](super::Terminal) bounds what IT draws instead — see
+  /// [`Terminal::max_source_bytes`](super::Terminal::max_source_bytes).
   pub fn write_expanded(&self, out: &mut impl fmt::Write) -> fmt::Result {
-    self.write_expanded_within(out, u64::MAX)
+    self.write_expanded_upto(out, self.line.text().len())
   }
 
-  /// Everything the renderer needs about one line, in a single walk that stops at `limit` cells.
+  /// Everything the renderer needs about one line, in a single walk that stops at `budget`.
   ///
   /// # Why this is one function and not three
   ///
   /// The obvious shape — ask [`columns_for`](Self::columns_for) for the exact span columns, then
-  /// clip them to a separately computed stop — is what shipped, and it does work proportional to
-  /// the WHOLE LINE for a span that is not going to be drawn at all. A span starting past the
-  /// ceiling walked twenty million units to place one caret under an elision mark. The ceiling
-  /// bounded what was emitted and said nothing about what was computed in order to emit nothing.
+  /// clip them to a separately computed stop — does work proportional to the WHOLE LINE for a span
+  /// that is not going to be drawn at all. A span starting past the ceiling walked twenty million
+  /// units to place one caret under an elision mark. So the budget is applied to the walk rather
+  /// than to its result.
   ///
-  /// So the ceiling is applied to the walk rather than to its result. Three things come out of it,
-  /// and the reason they come out together is that they have to agree: the stop is not `limit` — a
-  /// unit is drawn whole or not at all, and a tab can be 256 cells, so the row can end well short —
-  /// and the elision mark sits at `visible + 1`, and the marker row is placed against that same
-  /// column. Two callers each deciding where the row ended would put the caret past the row.
+  /// Four things come out together because they have to agree. The stop is not the ceiling — a unit
+  /// is drawn whole or not at all, and a tab can be 256 cells — the elision mark sits at
+  /// `visible + 1`, and the marker row is placed against that same column. Two callers each
+  /// deciding where the row ended would put the caret past the row.
+  ///
+  /// # The stop is a BYTE OFFSET, and that is the point
+  ///
+  /// [`drawn_end`](Marks::drawn_end) is what the writer replays to, rather than a cell count it
+  /// re-derives a stop from. Handing it a cell count is what let zero-width clusters through: a run
+  /// of U+200B advances no cells, so a cell check never trips, and the writer walked and emitted the
+  /// whole line while the geometry thought it had stopped. Two walks with different stopping rules
+  /// is how that class recurs, so there is one rule and it produces one number.
   ///
   /// Inside the window the answer is [`columns_for`](Self::columns_for)'s, exactly; the tests hold
   /// the two together over the corpus so that bounding the walk cannot quietly change the geometry.
-  pub(crate) fn marks_within(&self, span: Span, limit: u64) -> Marks {
+  pub(crate) fn marks_within(&self, span: Span, budget: Budget) -> Marks {
     let start = self.clamp(span.start());
     let end = self.clamp(span.end());
     let mut first = None;
@@ -253,9 +261,16 @@ impl<'a> LineCells<'a> {
     let mut drawn_end = 0;
     let mut elided = false;
     for unit in self.units() {
-      // A subtraction against the budget rather than `drawn + unit.cells > limit`, which overflows
-      // for an unbounded caller. `drawn` never passes `limit`, so this cannot.
-      if limit - drawn < unit.cells {
+      // Two budgets, and the second is the one that matters. Cells bound the LAYOUT — where the
+      // elision mark goes — and are blind to a unit that occupies none: a run of U+200B or of
+      // combining marks advances zero cells for as many bytes as the caller cares to supply, so a
+      // cell check alone never trips. Bytes bound the WORK, and every input that has cost anything
+      // over five rounds of review had first to be supplied as bytes.
+      //
+      // A subtraction against the cell budget rather than `drawn + unit.cells > cells`, which
+      // overflows for an unbounded caller. `drawn` never passes it, so this cannot. The byte side
+      // widens `usize` into `u64`, which loses nothing on any target painty builds for.
+      if budget.cells - drawn < unit.cells || unit.end as u64 > budget.bytes {
         elided = true;
         break;
       }
@@ -291,20 +306,25 @@ impl<'a> LineCells<'a> {
     };
     Marks {
       columns,
-      visible: drawn,
+      drawn_end,
       elided,
     }
   }
 
-  /// The same walk as [`write_expanded`](Self::write_expanded), stopping at `limit` cells.
+  /// The same walk as [`write_expanded`](Self::write_expanded), replaying to a byte offset.
   ///
-  /// Handed the figure [`visible_within`](Self::visible_within) already decided, so the two agree by
-  /// construction rather than by both being careful.
-  pub(crate) fn write_expanded_within(&self, out: &mut impl fmt::Write, limit: u64) -> fmt::Result {
+  /// Takes [`Marks::drawn_end`] — the offset the geometry walk already stopped at — rather than a
+  /// budget it would have to re-derive a stop from. There is one stopping rule and this is not it;
+  /// this only replays the decision, so the row drawn and the row measured cannot disagree about
+  /// where it ended whatever the budget was denominated in.
+  pub(crate) fn write_expanded_upto(
+    &self,
+    out: &mut impl fmt::Write,
+    byte_end: usize,
+  ) -> fmt::Result {
     let text = self.line.text();
-    let mut drawn = 0;
     for unit in self.units() {
-      if limit - drawn < unit.cells {
+      if unit.end > byte_end {
         return Ok(());
       }
       let cluster = &text[unit.start..unit.end];
@@ -324,7 +344,6 @@ impl<'a> LineCells<'a> {
       } else {
         out.write_str(cluster)?;
       }
-      drawn += unit.cells;
     }
     Ok(())
   }
@@ -350,7 +369,32 @@ impl<'a> LineCells<'a> {
   }
 }
 
-/// One line's drawable geometry under a ceiling: where the marker goes, where the row stops, and
+/// What one excerpt may spend.
+///
+/// # Two budgets, because one resource was the wrong denomination
+///
+/// Four rounds of review each bounded the resource the previous round's defect had consumed, and
+/// each was bypassed through one it had not: rows were materialised, then streamed, then streamed
+/// without limit, then limited in cells — and a zero-width cluster walks past a cell limit without
+/// touching it.
+///
+/// `cells` is a **layout rule**. It decides how wide a row is drawn and where the elision mark
+/// goes. It is not a bound on anything, because a unit can cost bytes and time while costing no
+/// cells at all.
+///
+/// `bytes` is the **resource bound**, and it is denominated in the one thing an adversary must
+/// spend to reach any of the others. Tabs, long lines, off-window spans, zero-width runs and
+/// combining sequences all have to be supplied as source bytes first, so a bound here is not one
+/// more patch against the class that was just found — it is upstream of the class.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Budget {
+  /// How many cells a row may occupy before it is cut and marked.
+  pub(crate) cells: u64,
+  /// How many bytes of the line may be examined at all.
+  pub(crate) bytes: u64,
+}
+
+/// One line's drawable geometry under a [`Budget`]: where the marker goes, where the row stops, and
 /// whether anything was left over.
 ///
 /// Returned together because they are computed together and must agree — see
@@ -358,9 +402,11 @@ impl<'a> LineCells<'a> {
 pub(crate) struct Marks {
   /// The display columns the span occupies, already inside the drawable window.
   pub(crate) columns: core::ops::Range<u64>,
-  /// Cells of the line that fit under the ceiling. The elision mark, if any, is at `visible + 1`.
-  pub(crate) visible: u64,
-  /// Whether the ceiling cut the line short.
+  /// The byte offset the walk stopped at: the only thing the writer is told, and the only unit in
+  /// which the stop is expressed anywhere. A cell count was here too and nothing production read
+  /// it — carrying the stop in two units is how the walk and the row came to disagree.
+  pub(crate) drawn_end: usize,
+  /// Whether the budget cut the line short.
   pub(crate) elided: bool,
 }
 

@@ -1093,7 +1093,7 @@ fn bounding_the_geometry_walk_did_not_change_what_it_answers() {
         }
         let span = Span::new(start, end);
         assert_eq!(
-          cells.marks_within(span, u64::MAX).columns,
+          cells.marks_within(span, unbounded()).columns,
           cells.columns_for(span),
           "{text:?}: the bounded walk disagrees with `columns_for` at {start}..{end} — {why}"
         );
@@ -1112,37 +1112,39 @@ fn a_ceiling_stops_the_walk_where_a_whole_unit_stops() {
   // land inside one.
   let cells = measured("\t\t\t\t", 4);
   assert_eq!(cells.width(), 16);
-  for (limit, visible, elided) in [
-    (16, 16, false),
-    (15, 12, true),
-    (13, 12, true),
-    (12, 12, true),
-    (11, 8, true),
+  // The stop is reported in BYTES, which is the unit the row is replayed to. One tab is one byte
+  // and four cells, so a stop of `n` bytes is `4n` cells and the two are the same statement.
+  for (limit, tabs, elided) in [
+    (16, 4, false),
+    (15, 3, true),
+    (13, 3, true),
+    (12, 3, true),
+    (11, 2, true),
     (3, 0, true),
     (0, 0, true),
   ] {
-    let marks = cells.marks_within(Span::new(0, 4), limit);
+    let marks = cells.marks_within(Span::new(0, 4), cells_only(limit));
     assert_eq!(
-      (marks.visible, marks.elided),
-      (visible, elided),
+      (marks.drawn_end, marks.elided),
+      (tabs, elided),
       "a ceiling of {limit} cells over four four-cell tabs"
     );
     assert!(
-      marks.visible <= limit,
+      marks.drawn_end as u64 * 4 <= limit,
       "a ceiling of {limit} let {} cells through",
-      marks.visible
+      marks.drawn_end * 4
     );
   }
 
   // And a span reaching past the drawn text is marked over the elision cell, which sits at
   // `visible + 1`. Without that the underline would stop at the last drawn cell and claim the span
   // ended with the row.
-  let marks = cells.marks_within(Span::new(0, 4), 11);
-  assert_eq!(marks.visible, 8);
+  let marks = cells.marks_within(Span::new(0, 4), cells_only(11));
+  assert_eq!(marks.drawn_end, 2, "two whole tabs fit under eleven cells");
   assert_eq!(marks.columns, 1..10, "the mark does not reach the `…` cell");
 
   // A span that begins past the window has nowhere of its own, so it anchors on that same cell.
-  let marks = cells.marks_within(Span::new(3, 4), 11);
+  let marks = cells.marks_within(Span::new(3, 4), cells_only(11));
   assert_eq!(marks.columns, 9..10);
 }
 
@@ -1571,5 +1573,91 @@ fn the_ambiguous_width_convention_is_the_one_painty_measures_against() {
     measured("\u{2018}x", 4).column_at(3),
     2,
     "painty has started measuring ambiguous characters as two cells"
+  );
+}
+
+/// No ceiling at all, for holding the bounded walk against the unbounded one.
+fn unbounded() -> super::width::Budget {
+  super::width::Budget {
+    cells: u64::MAX,
+    bytes: u64::MAX,
+  }
+}
+
+/// A cell ceiling with no byte bound, for the cases that are about layout.
+fn cells_only(cells: u64) -> super::width::Budget {
+  super::width::Budget {
+    cells,
+    bytes: u64::MAX,
+  }
+}
+
+#[test]
+fn a_zero_width_run_is_stopped_by_the_byte_budget_and_by_nothing_else() {
+  // The denomination defect, at the unit that has it. A cell budget cannot see a cluster that
+  // occupies no cells: `drawn` never advances, the check never trips, and a line of U+200B is
+  // walked and written in full however long it is. Five rounds of ceilings each measured the
+  // resource the last defect spent, and this one spends none of them.
+  //
+  // Bytes are what it does spend, because it had to be supplied.
+  let zero_width = "\u{200b}".repeat(4_000);
+  let cells = measured(&zero_width, 4);
+  assert_eq!(cells.width(), 0, "the premise: this line occupies no cells");
+
+  // Under a cell ceiling alone the walk reaches the end, which is exactly the hole.
+  let unstopped = cells.marks_within(Span::new(0, 3), cells_only(4_096));
+  assert!(
+    !unstopped.elided,
+    "a cell ceiling cannot stop a line of no cells, and this test would be proving nothing"
+  );
+  assert_eq!(unstopped.drawn_end, zero_width.len());
+
+  // Under a byte budget it stops, and stops where the budget says.
+  let budget = super::width::Budget {
+    cells: 4_096,
+    bytes: 900,
+  };
+  let stopped = cells.marks_within(Span::new(0, 3), budget);
+  assert!(stopped.elided, "the byte budget did not stop the walk");
+  assert!(
+    stopped.drawn_end <= 900,
+    "the walk examined {} bytes against a budget of 900",
+    stopped.drawn_end
+  );
+
+  // And the writer replays to that offset rather than re-deriving one, so it cannot disagree.
+  let mut written = String::new();
+  cells
+    .write_expanded_upto(&mut written, stopped.drawn_end)
+    .expect("a String is writable");
+  assert_eq!(
+    written.len(),
+    stopped.drawn_end,
+    "the row written is not the row the geometry measured"
+  );
+}
+
+#[test]
+fn a_combining_mark_run_is_bounded_the_same_way() {
+  // The other member of the class, and a different shape: these clusters are not zero-width because
+  // they are invisible, but because they attach. A base followed by ten thousand combining marks is
+  // ONE cluster of one cell, so a cell budget sees a single unit and stops nowhere at all.
+  let combining = format!("a{}", "\u{301}".repeat(10_000));
+  let cells = measured(&combining, 4);
+  assert_eq!(cells.width(), 1, "the premise: one base, one cell");
+
+  let budget = super::width::Budget {
+    cells: 4_096,
+    bytes: 900,
+  };
+  let marks = cells.marks_within(Span::new(0, 1), budget);
+  assert!(
+    marks.elided,
+    "a twenty-kilobyte cluster passed a nine-hundred-byte budget"
+  );
+  assert!(
+    marks.drawn_end <= 900,
+    "the walk examined {} bytes against a budget of 900",
+    marks.drawn_end
   );
 }

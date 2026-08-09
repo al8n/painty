@@ -1,6 +1,9 @@
 use core::fmt;
 
-use super::{ColorCapability, LineCells, width::control_picture};
+use super::{
+  ColorCapability, LineCells,
+  width::{Budget, control_picture},
+};
 use crate::{Color, Diagnostic, Palette, RegionLine, Role, Source, Style, Theme};
 
 /// One of the caller's inputs: its text, and whatever the caller calls it.
@@ -151,11 +154,7 @@ impl<P: Palette> Terminal<P> {
   /// look for the rest of it.
   pub fn underline(&self, drawn: RegionLine<'_>) -> core::ops::Range<u64> {
     let cells = LineCells::new(drawn.line(), self.tab_width);
-    never_empty(
-      cells
-        .marks_within(drawn.covered(), Self::max_rendered_width())
-        .columns,
-    )
+    never_empty(cells.marks_within(drawn.covered(), Self::budget()).columns)
   }
 
   /// The widest an excerpt is drawn, in cells.
@@ -205,6 +204,47 @@ impl<P: Palette> Terminal<P> {
   #[must_use]
   pub const fn max_rendered_width() -> u64 {
     4096
+  }
+
+  /// How many bytes of a source line an excerpt will examine.
+  ///
+  /// # This is the bound; the cell ceiling is a layout rule
+  ///
+  /// [`max_rendered_width`](Self::max_rendered_width) says how wide a row is DRAWN. It does not
+  /// bound cost, and treating it as though it did is how five rounds of review kept finding one
+  /// class a door along. Each budget was denominated in the resource the previous defect had
+  /// consumed — allocation, then emission, then cells — and each was walked past through one it was
+  /// not. A run of `U+200B` occupies no cells at all, so a cell ceiling is structurally unable to
+  /// see it, and so would be a sixth ceiling denominated in whatever the sixth defect costs.
+  ///
+  /// Bytes are different in kind. Every input that has cost painty anything — tabs amplifying into
+  /// cells, long lines, spans past the window, zero-width runs, combining sequences — first had to
+  /// be **supplied**, and supplying it costs the caller a byte. A bound here sits upstream of the
+  /// class rather than beside it: in this layer nothing consumes unbounded work without unbounded
+  /// input, so one number bounds the walk, the row, the marker row and the segmentation under them.
+  ///
+  /// What it does not reach is written down rather than left to be discovered. Resolving a byte
+  /// offset to a line and column is layer 2's scan, linear in the offset; the display column of an
+  /// offset past this budget is linear for the same reason. Both are 1× in input the caller
+  /// supplied, so they are pass-through rather than amplification — the distinction
+  /// [`max_rendered_width`](Self::max_rendered_width) draws — but neither is bounded by this
+  /// number, and no number placed here could bound them.
+  ///
+  /// Sixteen times the cell ceiling, so a line reaches it only by averaging under one cell per
+  /// sixteen bytes. Ordinary text does not come close: ASCII is one to one, CJK three bytes to two
+  /// cells, a long emoji sequence far denser than that. A line that trips this was built to.
+  #[inline]
+  #[must_use]
+  pub const fn max_source_bytes() -> u64 {
+    65_536
+  }
+
+  /// What one excerpt of this renderer may spend.
+  fn budget() -> Budget {
+    Budget {
+      cells: Self::max_rendered_width(),
+      bytes: Self::max_source_bytes(),
+    }
   }
 
   /// Writes `diagnostic` against the caller's inputs.
@@ -335,9 +375,9 @@ impl<P: Palette> Terminal<P> {
     // One walk for the whole excerpt's geometry. `underline` would answer the same — it is
     // `never_empty` over this same call — but asking twice would walk the window twice, and the
     // marker row has to be placed against the stop this walk found.
-    let geometry = cells.marks_within(drawn.covered(), Self::max_rendered_width());
+    let geometry = cells.marks_within(drawn.covered(), Self::budget());
     self.styled_with(out, Role::SourceText, |shown| {
-      cells.write_expanded_within(shown, geometry.visible)?;
+      cells.write_expanded_upto(shown, geometry.drawn_end)?;
       if geometry.elided {
         fmt::Write::write_char(shown, '…')?;
       }
