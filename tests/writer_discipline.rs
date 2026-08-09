@@ -874,7 +874,28 @@ mod the_size_contract {
 /// them is another walk from the top and another scan for where the line ends — and it is also the
 /// shape that coalesces to a single excerpt, so the output stays small and what is being timed is
 /// the WORK rather than the writing.
+///
+/// # How the two sides are sampled, because the first version of this flaked
+///
+/// It timed three iterations of each side, one loop after the other, and divided the totals. That
+/// reported 2.12 on a contended macOS runner for a ratio that is 1.06 — enough to fail a bound of
+/// two — and the reason is structural rather than bad luck. The numerator and the denominator are
+/// DIFFERENT functions timed at DIFFERENT moments, so their noise does not cancel the way it does
+/// in `the_geometry_costs_the_window_and_not_the_line`, where both sides are one function at two
+/// sizes. A total over three iterations also has no defence at all against one interruption.
+///
+/// So: the two sides ALTERNATE, so that a runner which slows down partway through slows both; and
+/// each side keeps its FASTEST iteration rather than its total. Both are pure deterministic
+/// computation over warm memory, so the true cost is what the machine does when nothing interrupts
+/// it, and every source of noise here is one-sided — an interruption can only add time. The
+/// fastest sample of several is the standard estimator for that, and one clean sample per side is
+/// all it needs.
 fn passes_over_layer_two(megabytes: usize, offset: usize, positions: usize) -> f64 {
+  /// Enough that one clean sample of each side is overwhelmingly likely, and few enough that this
+  /// stays affordable: `cargo hack test --feature-powerset` runs this test once per feature
+  /// combination that includes `terminal`.
+  const ROUNDS: usize = 5;
+
   let text = format!("{}\n", "a".repeat(megabytes * 1_000_000));
   let span = Span::new(offset, offset + 5);
   let message = "a message";
@@ -892,24 +913,34 @@ fn passes_over_layer_two(megabytes: usize, offset: usize, positions: usize) -> f
   )
   .with_primary_label("here")
   .with_labels(&labels);
-
   let source = Source::new(&text);
-  let _ = source.resolve(span).lines().next();
-  let started = std::time::Instant::now();
-  for _ in 0..3 {
-    core::hint::black_box(source.resolve(span).lines().next());
-  }
-  let layer_two = started.elapsed().as_secs_f64();
+  let inputs = [Input::new(Source::new(&text))];
 
-  let started = std::time::Instant::now();
-  for _ in 0..3 {
+  let resolve = || core::hint::black_box(source.resolve(span).lines().next());
+  let render = || {
     let mut out = String::new();
     Terminal::plain()
-      .render(&diagnostic, &[Input::new(Source::new(&text))], &mut out)
+      .render(&diagnostic, &inputs, &mut out)
       .expect("a String is writable");
     core::hint::black_box(out);
+  };
+
+  // Warmed first, so neither side pays for the other's cold pages or first-call code paths.
+  resolve();
+  render();
+
+  let mut layer_two = f64::MAX;
+  let mut rendered = f64::MAX;
+  for _ in 0..ROUNDS {
+    let started = std::time::Instant::now();
+    resolve();
+    layer_two = layer_two.min(started.elapsed().as_secs_f64());
+
+    let started = std::time::Instant::now();
+    render();
+    rendered = rendered.min(started.elapsed().as_secs_f64());
   }
-  started.elapsed().as_secs_f64() / layer_two
+  rendered / layer_two
 }
 
 #[test]
@@ -938,29 +969,49 @@ fn the_renderer_adds_a_bounded_number_of_passes_over_the_input() {
   // claim is that the pass count does not depend on the label count at all. Measured while writing
   // this, in the same debug profile the suite runs in:
   //
-  //   near span   k=1 1.05x   k=8 1.06x
+  //   near span   k=1 1.05x   k=8 1.05x
   //   far span    k=1 1.02x   k=8 1.02x
   //
-  // Two allows that nearly twice over and refuses a doubling. It is not a precise instrument and
-  // does not need to be: with the carried cursor removed so that each label resolves from the top
-  // again, k=8 measures 7.97x near and 5.71x far, because eight labels are eight walks to their
-  // own offsets and eight scans for where the line ends. Both ends of k=1 stay green under that
-  // same plant, at 1.06x and 1.02x, which is the whole reason this axis exists.
-  const ALLOWED: f64 = 2.0;
+  // Repeated five times end to end, the widest reading of any of the four was 1.057 and the
+  // narrowest 1.016 — a spread of about one and a half per cent, where the version this replaced
+  // could report 2.12 for the same property.
+  //
+  // # What the bound can and cannot discriminate, stated rather than implied
+  //
+  // Two and a half, and it is worth being exact about what that buys, because the first draft of
+  // this claimed more than a wall clock can deliver and failed on a contended runner for it.
+  //
+  // It catches what this test exists for, by a wide margin. With the carried cursor removed so
+  // that each label resolves from the top again, k=8 measures 8.16x near and 5.79x far — two to
+  // three times the bound — while both ends of k=1 stay green under that same plant, at 1.05x and
+  // 1.02x, which is the whole reason the k axis exists. Restoring the header's grapheme walk
+  // measures around 16x.
+  //
+  // It does NOT discriminate a single extra pass over the input, which would land near 2.0 and
+  // inside the noise this instrument has. Pretending otherwise is what a tighter number here would
+  // be doing. A pass that cannot be seen at this resolution has to be caught by reading the code,
+  // or by the shape tests above that count output rather than time it.
+  const ALLOWED: f64 = 2.5;
+
+  // Re-measured once before failing. A genuine regression is deterministic and fails both times; a
+  // scheduling hiccup that survives the fastest-of-five sampling twice in a row is not a thing this
+  // suite should be reporting as a defect in the renderer. It costs nothing on the passing path.
+  let measure = |what: &str, offset: usize, positions: usize| {
+    let first = passes_over_layer_two(8, offset, positions);
+    if first < ALLOWED {
+      return;
+    }
+    let again = passes_over_layer_two(8, offset, positions);
+    assert!(
+      again < ALLOWED,
+      "a render of {positions} positions {what} cost {first:.2} and then {again:.2} times layer 2 \
+       alone; one forward pass over the input is the bound, and it does not widen with the label \
+       count"
+    );
+  };
 
   for positions in [1, 8] {
-    let near = passes_over_layer_two(8, 0, positions);
-    assert!(
-      near < ALLOWED,
-      "a render of {positions} positions at the start of the line cost {near:.2} times layer 2 \
-       alone, so the renderer has taken on a pass that does not depend on where the span is"
-    );
-
-    let far = passes_over_layer_two(8, 8_000_000 - 10, positions);
-    assert!(
-      far < ALLOWED,
-      "a render of {positions} positions along the line cost {far:.2} times layer 2 alone; one \
-       forward pass over the input is the bound, and it does not widen with the label count"
-    );
+    measure("at the start of the line", 0, positions);
+    measure("along the line", 8_000_000 - 10, positions);
   }
 }
