@@ -111,7 +111,7 @@ use syn::{
 /// [`the_file_list_is_the_whole_crate`] walks `src/` and checks it. `src/tokora.rs` is here whether
 /// or not its feature is on: `include_str!` reads the disk, not the build, which is what keeps the
 /// adapter under the same censuses as everything else.
-const CRATE: [(&str, &str); 15] = [
+const CRATE: [(&str, &str); 16] = [
   ("src/lib.rs", include_str!("../src/lib.rs")),
   (
     "src/diagnostic/mod.rs",
@@ -144,6 +144,10 @@ const CRATE: [(&str, &str); 15] = [
   (
     "src/terminal/detect.rs",
     include_str!("../src/terminal/detect.rs"),
+  ),
+  (
+    "src/terminal/render.rs",
+    include_str!("../src/terminal/render.rs"),
   ),
   (
     "src/terminal/mod.rs",
@@ -757,6 +761,13 @@ fn pin<'a>(_witness: &'a ()) {
     let _: fn(&LineCells<'a>) -> Ordinal = LineCells::width;
     let _: fn(&LineCells<'a>, Count, Count) -> Ordinal = LineCells::cells_between;
     let _: fn() -> Ordinal = LineCells::default_tab_width;
+
+    // The renderer's own geometry. A tab width is a distance across the rendered geometry and a
+    // marker range is a pair of positions in it, so both are rule 1 for the same reason.
+    use painty::{Theme, terminal::Terminal};
+    let _: fn(Terminal<Theme>, Ordinal) -> Terminal<Theme> = Terminal::<Theme>::with_tab_width;
+    let _: fn(&Terminal<Theme>, RegionLine<'a>) -> core::ops::Range<Ordinal> =
+      Terminal::<Theme>::underline;
   }
 
   // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and

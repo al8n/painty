@@ -541,3 +541,276 @@ fn a_capability_orders_from_none_upwards() {
   assert!(ColorCapability::Ansi16 < ColorCapability::Ansi256);
   assert!(ColorCapability::Ansi256 < ColorCapability::TrueColor);
 }
+
+// ── The renderer ────────────────────────────────────────────────────────────────────────────
+//
+// Written before any golden, and stated from what must hold rather than from what the code
+// prints. A golden written first records whatever the renderer did that day, and then the
+// invariant gets written to agree with the golden instead of with the definition — which is
+// exactly how the cell test above came to compare against a guessed eight.
+
+use super::Terminal;
+use crate::{Diagnostic, Label, Location, Severity, Span, Theme};
+
+/// A diagnostic assembled over `text`, with whatever positions the caller names.
+fn diagnose<'a>(
+  primary: Location,
+  labels: &'a [Label<'a>],
+  message: &'a dyn core::fmt::Display,
+) -> Diagnostic<'a> {
+  Diagnostic::new("mylang::test::rule", Severity::Error, message, primary)
+    .with_primary_label("here")
+    .with_labels(labels)
+}
+
+fn render(diagnostic: &Diagnostic<'_>, text: &str) -> String {
+  let mut out = String::new();
+  Terminal::plain()
+    .render(diagnostic, Source::new(text), None, &mut out)
+    .expect("a String never fails to be written to");
+  out
+}
+
+#[test]
+fn an_underline_covers_exactly_the_cells_its_span_occupies() {
+  // The first invariant, and the one the corpus is for: a marker row that is not the width of the
+  // text above it points at the wrong characters. Cross-checked against `LineCells`, which is
+  // separately invariant-tested, rather than against the renderer's own arithmetic.
+  for (text, why) in CORPUS {
+    if text.is_empty() {
+      continue;
+    }
+    let source = Source::new(text);
+    let line = source.line(1).expect("a first line");
+    let cells = LineCells::new(line, 4);
+    let terminal = Terminal::plain();
+
+    let mut start = 0;
+    while start < text.len() {
+      if !text.is_char_boundary(start) {
+        start += 1;
+        continue;
+      }
+      let mut end = start;
+      while end <= text.len() {
+        if text.is_char_boundary(end) {
+          let region = source.resolve(Span::new(start, end));
+          if let Some(drawn) = region.lines().next() {
+            let marks = terminal.underline(drawn);
+            let expected = cells
+              .cells_between(drawn.covered().start(), drawn.covered().end())
+              .max(1);
+            assert_eq!(
+              marks.end - marks.start,
+              expected,
+              "{text:?} {start}..{end}: {why}"
+            );
+            assert_eq!(
+              marks.start,
+              cells.column_at(drawn.covered().start()),
+              "{text:?} {start}..{end}: the marker starts off the span"
+            );
+          }
+        }
+        end += 1;
+      }
+      start += 1;
+    }
+  }
+}
+
+#[test]
+fn an_underline_is_never_empty() {
+  // A zero-width span is a caret, and a caret a reader cannot see is not a caret. Asserted over
+  // every position in the corpus rather than at one hand-picked offset.
+  for (text, why) in CORPUS {
+    let source = Source::new(text);
+    let terminal = Terminal::plain();
+    for offset in 0..=text.len() {
+      let region = source.resolve(Span::empty(offset));
+      if let Some(drawn) = region.lines().next() {
+        let marks = terminal.underline(drawn);
+        assert!(marks.end > marks.start, "{text:?} @ {offset}: {why}");
+      }
+    }
+  }
+}
+
+#[test]
+fn the_gutter_is_as_wide_as_the_widest_line_number_it_shows() {
+  // Stated as a property of the output's shape: every row that carries the bar puts it in the same
+  // column, and that column is one past the widest number. A gutter sized from the first number
+  // rather than the widest is the defect, and it only shows when a diagnostic crosses a power of
+  // ten — so the case is constructed rather than waited for.
+  let text: String = (1..=12).map(|n| format!("line {n}\n")).collect();
+  let source = Source::new(&text);
+  let first = source.line(9).expect("line nine");
+  let second = source.line(10).expect("line ten");
+  let message = "crossing a power of ten";
+  let labels = [Label::new(
+    Location::new(
+      0,
+      Span::new(second.span().start(), second.span().start() + 4),
+    ),
+    "the wider number",
+  )];
+  let diagnostic = diagnose(
+    Location::new(0, Span::new(first.span().start(), first.span().start() + 4)),
+    &labels,
+    &message,
+  );
+
+  let out = render(&diagnostic, &text);
+  let bars: Vec<usize> = out
+    .lines()
+    .filter(|row| row.contains('|'))
+    .map(|row| row.find('|').expect("a bar"))
+    .collect();
+  assert!(bars.len() >= 4, "expected several rows carrying a bar");
+  assert!(
+    bars.iter().all(|column| *column == bars[0]),
+    "the bar moves between rows: {bars:?}\n{out}"
+  );
+  // Two digits, then a space: the bar sits in column three. Compared against the value the DEFECT
+  // would produce — a gutter sized from the first number seen, which is one digit wide — so the
+  // wrong implementation cannot satisfy this.
+  let sized_from_the_first_number = 1 + 1;
+  assert_ne!(
+    bars[0], sized_from_the_first_number,
+    "gutter sized from the first number\n{out}"
+  );
+  assert_eq!(bars[0], 2 + 1);
+}
+
+#[test]
+fn nothing_is_emitted_for_a_style_that_asks_for_nothing() {
+  // Two claims. A palette that asks for nothing produces no escape at all — not an escape that
+  // sets nothing and immediately resets. And a capability of none produces no escape whatever the
+  // palette asks for, because a bold sequence written into a file is as wrong as a red one.
+  let text = "let x = 1;\n";
+  let message = "a message";
+  let diagnostic = diagnose(Location::new(0, Span::new(4, 5)), &[], &message);
+
+  let plain = render(&diagnostic, text);
+  assert!(
+    !plain.contains('\u{1b}'),
+    "an escape from a plain render:\n{plain:?}"
+  );
+
+  let mut monochrome_at_none = String::new();
+  Terminal::with_palette(Theme::monochrome())
+    .render(
+      &diagnostic,
+      Source::new(text),
+      None,
+      &mut monochrome_at_none,
+    )
+    .expect("a String is writable");
+  assert!(!monochrome_at_none.contains('\u{1b}'));
+
+  // ...and the same theme at a capability that can carry escapes does emit them, or the assertion
+  // above would be satisfied by a renderer that never styles anything.
+  let mut monochrome_in_colour = String::new();
+  Terminal::with_palette(Theme::monochrome())
+    .with_capability(ColorCapability::Ansi16)
+    .render(
+      &diagnostic,
+      Source::new(text),
+      None,
+      &mut monochrome_in_colour,
+    )
+    .expect("a String is writable");
+  assert!(
+    monochrome_in_colour.contains('\u{1b}'),
+    "monochrome still asks for bold, so something must be emitted"
+  );
+}
+
+#[test]
+fn rendering_is_total() {
+  // The fourth invariant. Every diagnostic the model can hold produces output rather than a panic
+  // or an empty string — including the shapes a producer reaches by accident.
+  let message = "a message";
+  let cases: [(&str, Location, &str); 8] = [
+    (
+      "abc\n",
+      Location::new(0, Span::new(0, 3)),
+      "an ordinary span",
+    ),
+    (
+      "abc\n",
+      Location::new(0, Span::empty(1)),
+      "a label of zero width",
+    ),
+    (
+      "abc\n",
+      Location::new(0, Span::new(3, 3)),
+      "a label at end of line",
+    ),
+    (
+      "\n\nabc\n",
+      Location::new(0, Span::empty(0)),
+      "a label whose line is empty",
+    ),
+    (
+      "abc",
+      Location::new(0, Span::new(2, 3)),
+      "the final byte with no trailing newline",
+    ),
+    ("", Location::new(0, Span::empty(0)), "an empty source"),
+    ("abc\n", Location::entire(0), "no position at all"),
+    (
+      "abc\n",
+      Location::new(0, Span::new(99, 120)),
+      "a span past the end",
+    ),
+  ];
+
+  for (text, primary, why) in cases {
+    let bare = Diagnostic::new("mylang::test::rule", Severity::Advice, &message, primary);
+    for diagnostic in [bare, bare.with_primary_label("here").with_help("do this")] {
+      let out = render(&diagnostic, text);
+      assert!(!out.is_empty(), "{why}: nothing was written");
+      assert!(out.ends_with('\n'), "{why}: no trailing newline\n{out:?}");
+      assert!(
+        out.starts_with("advice[mylang::test::rule]: "),
+        "{why}: no header\n{out:?}"
+      );
+    }
+  }
+}
+
+#[test]
+fn a_diagnostic_with_no_labels_still_shows_its_position() {
+  // The "no labels" case is not the same as "no excerpt": a primary position with no phrase
+  // attached still has a line worth showing.
+  let text = "alpha\nbeta\n";
+  let message = "a message";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Warning,
+    &message,
+    Location::new(0, Span::new(6, 10)),
+  );
+  let out = render(&diagnostic, text);
+  assert!(out.contains("2 | beta\n"), "{out}");
+  assert!(out.contains("^^^^"), "{out}");
+}
+
+#[test]
+fn a_whole_input_position_shows_no_excerpt_rather_than_a_fabricated_one() {
+  // Layer 2 keeps the difference between "at this span" and "about this input as a whole", and the
+  // renderer must not spend it: pointing at line one would be a coordinate the producer never gave.
+  let text = "alpha\nbeta\n";
+  let message = "a message";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::entire(0),
+  );
+  let out = render(&diagnostic, text);
+  assert!(!out.contains("-->"), "{out}");
+  assert!(!out.contains('^'), "{out}");
+  assert_eq!(out.lines().count(), 1, "{out}");
+}

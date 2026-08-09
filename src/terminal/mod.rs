@@ -3,9 +3,11 @@
 //! Public, unlike the other modules, because a caller selects this renderer by name.
 
 mod detect;
+mod render;
 mod width;
 
 pub use detect::{CapturedEnvironment, ColorCapability, ColorChoice, Environment};
+pub use render::Terminal;
 pub use width::LineCells;
 
 #[cfg(test)]

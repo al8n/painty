@@ -19,7 +19,7 @@ Renders a diagnostic and its source text to a terminal, to HTML, or to an export
 
 ## Status
 
-**Layer 2 only — there is no renderer yet.** Resolution has landed: a diagnostic and the source
+**Layer 2, and a single-line terminal renderer.** Resolution has landed: a diagnostic and the source
 text it points into go in, and lines, character columns, excerpts and the lines a multi-line span
 is drawn on come out. The terminal, HTML and model outputs are declared as features and are not
 written.
@@ -201,7 +201,7 @@ crate is `no_std` and dependency-free until a caller asks for something.
 | ----------- | ------- | -------------------------- | --------------------------------------------------- |
 | *(default)* | —       | —                          | layer 2: resolution, `no_std`, no dependencies      |
 | `std`       | —       | —                          | anything needing the standard library               |
-| `terminal`  | `std`   | `unicode-width`, `anstyle` | ANSI output, box drawing, display-width alignment   |
+| `terminal`  | `std`   | `unicode-width`, `anstyle` | the terminal renderer: cell arithmetic, colour detection, ANSI |
 | `html`      | —       | —                          | HTML output: escaping and CSS classes               |
 | `model`     | —       | —                          | a stable C-ABI export of the resolved model         |
 | `tokora`    | —       | `tokora`                   | an adapter from `tokora::diagnostic::Diagnose`      |
