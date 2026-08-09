@@ -315,10 +315,28 @@ impl<'a> LineCells<'a> {
 /// measurement — the exact shape of the two defects above — over a rule set `unicode-width`'s own
 /// documentation calls string-only exceptions that "may be tweaked in the future".
 ///
-/// On Unicode 17 data exactly six families diverge: Arabic lam-alef, Hebrew alef-ZWJ-lamed,
-/// Buginese, Lisu, Old Turkic and Tifinagh. Each is pinned in the tests at **both** values, so a
-/// data update that adds, drops or reshapes one fails loudly with the input in hand. Khmer coeng is
-/// pinned as the canary that already moved: it is listed among those rules and agrees on this data.
+/// Six families diverge on the Unicode 17 data both crates carry: Arabic lam-alef, Hebrew
+/// alef-ZWJ-lamed, Buginese, Lisu, Old Turkic and Tifinagh. That list is a **survey result**, and
+/// the suite does not recompute it — which is worth stating exactly, because "the divergence set is
+/// pinned" is true of three different things to three different extents:
+///
+/// * **A change to one of the six**: caught. Each is asserted at both its clustered and its
+///   whole-string width, so a rule that is dropped, reshaped, or moved under a shifted boundary
+///   fails with the input in hand.
+/// * **A seventh family**: *not* caught by those pins, and caught by the corpus only if its input
+///   happens to be in it. Enumerating the set instead would mean measuring strings, since
+///   `unicode-width` exposes only `UNICODE_VERSION` and two sealed traits — its rules are a private
+///   state machine, not a table anything can read — and the pairs alone are the square of the code
+///   space, before the Arabic rule's arbitrarily many interposed transparents. Restricting the
+///   search to plausible scripts would re-derive the rule list being checked, so finding no seventh
+///   family would be a measurement of the restriction rather than evidence about the set.
+/// * **The trigger**: pinned instead of the result. A Unicode release is what adds a script
+///   ligature rule, and the data version is asserted at a literal, so the update stops the suite
+///   and asks for the survey to be run again. The residual gap is a `unicode-width` release that
+///   changes a rule on unchanged data — its own documentation reserves that right.
+///
+/// Khmer coeng is one sample of the same question, kept because it has already moved once: it is
+/// listed among those rules and agrees on this data.
 #[derive(Debug, Clone, Copy)]
 struct Unit {
   start: usize,

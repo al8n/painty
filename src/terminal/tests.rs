@@ -1188,6 +1188,33 @@ fn the_width_authority_and_the_boundary_authority_carry_the_same_data() {
 }
 
 #[test]
+fn a_unicode_data_update_must_re_derive_this_set() {
+  // `DIVERGENCE` is a survey, and the suite cannot repeat it. `unicode-width` exposes only this
+  // constant and two sealed traits, so the only way to look for a SEVENTH cross-cluster family from
+  // outside is to measure strings — and the pairs alone are the square of the code space, before
+  // the Arabic rule's arbitrarily many interposed transparents. A search narrowed to the scripts
+  // already known to diverge would be re-deriving the list it is checking.
+  //
+  // So the trigger is pinned rather than the result. A Unicode release is what introduces a script
+  // ligature rule, and this stops the suite when one lands, instead of letting six hand-surveyed
+  // families keep describing data they were not surveyed against.
+  //
+  // If this fires, the fix is NOT to bump the literal. Re-run the survey against the new data, and
+  // correct `DIVERGENCE` and `PLACEMENTS` first — bumping it alone converts a caught change into an
+  // uncaught one, which is the whole failure this exists to prevent.
+  //
+  // Only the width authority is spelled out. `the_width_authority_and_the_boundary_authority_carry_
+  // the_same_data` holds the segmenter equal to it, so one literal pins both and there is no second
+  // number to leave behind.
+  assert_eq!(
+    unicode_width::UNICODE_VERSION,
+    (17, 0, 0),
+    "the width tables moved to new Unicode data; the divergence set was surveyed against 17.0.0 and \
+     has to be surveyed again before this number changes"
+  );
+}
+
+#[test]
 fn a_placement_unit_is_a_grapheme_cluster() {
   // A conformance check rather than a cross-check: it restates that the crate asks the authority,
   // and its value is that it fails the moment something starts inferring extents again. The
@@ -1224,11 +1251,14 @@ fn a_placement_unit_is_a_grapheme_cluster() {
 /// The inputs where per-cluster placement and whole-string measurement give different answers.
 ///
 /// Both values, exactly. A one-sided assertion would let a `unicode-width` bump that drops a rule
-/// reclassify an input as agreeing and stay green — the divergence set is the subject of the model,
-/// so it is pinned from both ends and a change fails loudly with the input in hand.
+/// reclassify an input as agreeing and stay green — so each of these is pinned from both ends, and
+/// a change to one of THEM fails loudly with the input in hand.
 ///
-/// Six families on Unicode 17 data. That is the whole set: every rule that operates INSIDE one
-/// cluster agrees, and those are in `PLACEMENTS` above.
+/// Six families, SURVEYED against Unicode 17 data rather than computed. What these rows establish
+/// is the behaviour of the inputs in them; a seventh family arriving upstream is not something they
+/// can report, because nothing here goes looking for one. That gap is named rather than papered
+/// over: `a_unicode_data_update_must_re_derive_this_set` pins the event that would introduce one.
+/// Every rule that operates INSIDE one cluster agrees, and those are in `PLACEMENTS` above.
 const DIVERGENCE: [(&str, u64, u64, &str); 8] = [
   ("\u{644}\u{627}", 2, 1, "Arabic lam-alef"),
   ("\u{644}\u{622}", 2, 1, "and the alef-madda form of it"),
