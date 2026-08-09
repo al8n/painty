@@ -53,4 +53,14 @@ export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbo
 # `error: package ID specification did not match any packages`, exit 101. `--all-features` because
 # the three outputs are independently selectable and the resolution layer they share is what has
 # the pointer arithmetic in it.
-cargo miri test -p painty --all-targets --all-features --target "$TARGET"
+#
+# `--lib --tests` AND NOT `--all-targets`, which also selects benches. The two select the same
+# thing today, because painty declares no bench targets — and that is exactly why the flag has to
+# change now rather than when it starts mattering. The first `[[bench]]` anybody adds reddens both
+# Miri legs with `can't call foreign function posix_spawnattr_init`, an error naming a libc symbol
+# and pointing nowhere near a bench harness. cronp is red on precisely this. `--lib` and `--tests`
+# both name targets that exist, so neither is a filter that would warn and exit 0.
+#
+# `ci/miri_sb.sh` carries the same line and has to keep carrying it: a fix that lands in one of two
+# sibling scripts and not the other is a defect this program keeps repeating.
+cargo miri test -p painty --lib --tests --all-features --target "$TARGET"

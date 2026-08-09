@@ -37,5 +37,6 @@ cargo miri setup --target "$TARGET"
 
 export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
 
-# `-p painty` names the package; see the note in `ci/miri_tb.sh`.
-cargo miri test -p painty --all-targets --all-features --target "$TARGET"
+# `-p painty` names the package, and `--lib --tests` keeps bench targets out of the interpreter;
+# see the note in `ci/miri_tb.sh`, which this line is the sibling of and must stay identical to.
+cargo miri test -p painty --lib --tests --all-features --target "$TARGET"
