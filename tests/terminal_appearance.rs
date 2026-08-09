@@ -656,3 +656,189 @@ fn every_control_picture_is_the_standard_one_for_its_character() {
     );
   }
 }
+
+/// A message whose own `Display` writes a tab.
+///
+/// The sanitizer is an adapter over `fmt::Write` precisely so that this is covered: text a
+/// caller's type writes is as caller-supplied as text it hands over directly.
+struct TabbyMessage;
+
+impl core::fmt::Display for TabbyMessage {
+  fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    write!(out, "written\tby\ta\tDisplay")
+  }
+}
+
+#[test]
+fn a_tab_in_non_source_text_cannot_move_the_cursor_either() {
+  // The hole the escape substitution left behind. It shows every C0 character except U+0009, and
+  // the exclusion was written for SOURCE text, where `write_expanded` prices a tab against a stop
+  // before anything else sees it. Nothing else has a stop. A tab in a message, a code, an origin, a
+  // label or a help line was emitted verbatim at every capability — and a tab MOVES THE CURSOR, so
+  // caller text could still push the frame around, which is the one thing the substitution exists
+  // to stop.
+  //
+  // All six paths at once, because they reach the sanitizer through three different call sites and
+  // the message reaches it through a caller's own `Display`.
+  let code = "mylang::test\u{9}rule";
+  let origin = "src/we\u{9}ird.rs";
+  let primary = "primary\tlabel";
+  let secondary = "second\tlabel";
+  let help = "help\ttext";
+  // Counted from the inputs rather than written down: a literal is a second thing to get wrong, and
+  // one written too low would have passed.
+  let expected = [code, origin, primary, secondary, help]
+    .iter()
+    .map(|text| text.matches('\t').count())
+    .sum::<usize>()
+    + TabbyMessage.to_string().matches('\t').count();
+  assert!(
+    expected > 0,
+    "the inputs carry no tab, so nothing below proves anything"
+  );
+
+  let labels = [Label::new(Location::new(0, Span::new(4, 5)), secondary)];
+  let diagnostic = Diagnostic::new(
+    code,
+    Severity::Error,
+    &TabbyMessage,
+    Location::new(0, Span::new(0, 3)),
+  )
+  .with_primary_label(primary)
+  .with_labels(&labels)
+  .with_help(help);
+
+  for capability in [
+    ColorCapability::None,
+    ColorCapability::Ansi16,
+    ColorCapability::Ansi256,
+    ColorCapability::TrueColor,
+  ] {
+    let mut out = String::new();
+    Terminal::with_palette(Theme::new())
+      .with_capability(capability)
+      .render(
+        &diagnostic,
+        &[Input::new(Source::new("abc\ndef\n")).with_origin(origin)],
+        &mut out,
+      )
+      .expect("a String is writable");
+
+    assert!(
+      !out.contains('\t'),
+      "{capability:?} forwarded a tab from caller text: {out:?}"
+    );
+    // Shown rather than dropped, and counted rather than merely present: a substitution that fired
+    // on one of the six paths and not the rest would satisfy the assertion above.
+    assert_eq!(
+      out.matches('\u{2409}').count(),
+      expected,
+      "{capability:?} did not show every tab: {out:?}"
+    );
+  }
+}
+
+#[test]
+fn a_tab_in_source_text_is_still_expanded_rather_than_shown() {
+  // The other half, and the one the fix above had to be careful of. `control_picture` now answers
+  // `␉` for a tab like it does for every other C0 character, so what keeps a SOURCE tab expanded is
+  // that `write_expanded` matches the tab cluster BEFORE it consults the lookup. Drawing one `␉`
+  // where a stop's worth of cells was counted would misplace every marker on the line — which the
+  // golden in `a_tab_is_expanded_and_the_marker_lands_under_what_it_points_at` pins; this pins the
+  // ordering that the golden depends on, at the character.
+  let message = "a message";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::rule",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(2, 3)),
+  );
+  let mut out = String::new();
+  Terminal::plain()
+    .render(&diagnostic, &[Input::new(Source::new("a\tb\n"))], &mut out)
+    .expect("a String is writable");
+
+  assert!(!out.contains('\u{2409}'), "a source tab was shown: {out:?}");
+  assert!(!out.contains('\t'), "a source tab was forwarded: {out:?}");
+  assert!(
+    out.contains("a   b"),
+    "a source tab was not expanded to its stop: {out:?}"
+  );
+}
+
+#[test]
+fn no_control_character_at_all_survives_a_caller_string() {
+  // The class, rather than the members of it that anyone thought to name. ESC and the tab were each
+  // found by hand and pinned as themselves, and a list of named inputs is not a guarantee — it is
+  // a record of what has been looked for. This is the guarantee: the characters that can steer a
+  // terminal are C0, DEL and C1, that set is finite, and every one of them goes through every
+  // caller string.
+  //
+  // The tab is the evidence that the difference is real. It was the ONE member the substitution
+  // declined, and nothing here knows or cares that it was ever special.
+  //
+  // At no-colour only, and that is what makes the assertion clean rather than weaker: that
+  // capability promises no escape sequences at all, so painty contributes no control character but
+  // the row breaks it writes itself, and anything else in the output came from the input.
+  let source = "abc\ndef\n";
+  let controls = (0u32..=0x1f)
+    .chain(0x7fu32..=0x9f)
+    .filter_map(char::from_u32);
+  for raw in controls {
+    // Stated from the definition, not read back from the crate: the Control Pictures block is
+    // U+2400 upwards in code point order, DEL has its own, and C1 has none at all.
+    let picture = match raw {
+      '\u{7f}' => '\u{2421}',
+      '\u{80}'..='\u{9f}' => '\u{fffd}',
+      _ => char::from_u32(0x2400 + raw as u32).expect("the block is contiguous"),
+    };
+    let code = format!("mylang{raw}rule");
+    let origin = format!("src/a{raw}b.rs");
+    let message = format!("a{raw}message");
+    let primary = format!("primary{raw}label");
+    let secondary = format!("second{raw}label");
+    let help = format!("help{raw}text");
+    let occurrences = 6;
+
+    let labels = [Label::new(
+      Location::new(0, Span::new(4, 5)),
+      secondary.as_str(),
+    )];
+    let diagnostic = Diagnostic::new(
+      &code,
+      Severity::Error,
+      &message,
+      Location::new(0, Span::new(0, 3)),
+    )
+    .with_primary_label(&primary)
+    .with_labels(&labels)
+    .with_help(&help);
+
+    let mut out = String::new();
+    Terminal::plain()
+      .render(
+        &diagnostic,
+        &[Input::new(Source::new(source)).with_origin(&origin)],
+        &mut out,
+      )
+      .expect("a String is writable");
+
+    // LF is the one exception, and it is a limit of the observation rather than of the guarantee:
+    // painty ends every row with one, so a caller's own cannot be told apart from the frame's. The
+    // count below still pins it, because `␊` can only have come from the input.
+    if raw != '\n' {
+      assert!(
+        !out.contains(raw),
+        "U+{:04X} reached the terminal through a caller string: {out:?}",
+        raw as u32
+      );
+    }
+    assert_eq!(
+      out.matches(picture).count(),
+      occurrences,
+      "U+{:04X} was shown on {} of the {occurrences} caller strings: {out:?}",
+      raw as u32,
+      out.matches(picture).count()
+    );
+  }
+}

@@ -332,6 +332,12 @@ impl<P: Palette> Terminal<P> {
 /// [`LineCells::write_expanded`](super::LineCells::write_expanded), because there the walk that
 /// writes a cluster is the walk that counted its cells. The strings here are never measured, so
 /// they are substituted at the point they are written.
+///
+/// A TAB is the sharp edge of that split. Down there a tab is a device unit spent against a stop;
+/// up here there is no stop — the frame's columns are painty's, not the caller's — and U+0009 is a
+/// C0 control that moves the cursor as surely as ESC sets a colour. So it is shown as `␉` like the
+/// rest, and `control_picture` is what says so, rather than an exception at this call site that the
+/// next writer of caller text would not know to repeat.
 fn write_shown(out: &mut impl fmt::Write, text: impl fmt::Display) -> fmt::Result {
   // Fully qualified rather than `write!` over an imported trait: the numeric census rejects a
   // renamed import outright — `Write as _` is a name it cannot see through — and it offers no

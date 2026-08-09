@@ -222,6 +222,11 @@ impl<'a> LineCells<'a> {
     let text = self.line.text();
     for unit in self.units() {
       let cluster = &text[unit.start..unit.end];
+      // Before the control arm, and that ORDER is the tab's whole exception. `control_picture` has
+      // a picture for a tab like every other C0 character, so reaching it first would draw one `␉`
+      // where `unit.cells` cells were counted — a marker misplaced by the width of a stop. A tab is
+      // a device unit here and a glyph nowhere else, so it is spent here and the lookup stays
+      // unconditional for everyone who has no stop to spend it against.
       if cluster == "\t" {
         for _ in 0..unit.cells {
           out.write_char(' ')?;
@@ -376,8 +381,18 @@ impl Iterator for Units<'_> {
 /// character one cell too, so the substitution moves nothing. That is asserted rather than assumed:
 /// a marker's column is compared across a line with a control character and one without.
 ///
-/// Tab is excluded because it is not a glyph at all — its width is a tab stop rather than a
-/// property of the character, and it is expanded before this is reached.
+/// Tab included, and deliberately so — a `None` for it here would be a defect rather than a
+/// refinement. `␉` is the standard picture for U+0009 as much as `␛` is for ESC. What makes a tab
+/// different is not the character but one of its callers: SOURCE text expands a tab against a stop
+/// instead of drawing it, so [`write_expanded`](LineCells::write_expanded) matches the tab cluster
+/// before it consults this and [`Units`] prices it. The exception belongs to the caller that has a
+/// stop, not to the lookup that every caller shares.
+///
+/// Sited here instead, it cost the guarantee above. Text that is not source — a message, a code, an
+/// origin, a label, a help line, a caller's own [`fmt::Display`] — has no stop to expand against and
+/// reaches the terminal through a sanitizer that asks this and nothing else, so a live C0 cursor
+/// movement went into the frame at every capability. A lookup that answers "what is this
+/// character's picture" cannot also answer "does this caller expand it".
 pub(crate) fn control_picture(character: char) -> Option<char> {
   /// The Control Pictures block, U+2400 upwards, in code point order — so the picture for a C0
   /// character is at its own index. Written out rather than computed as `0x2400 + n`, because that
@@ -389,7 +404,6 @@ pub(crate) fn control_picture(character: char) -> Option<char> {
     '␓', '␔', '␕', '␖', '␗', '␘', '␙', '␚', '␛', '␜', '␝', '␞', '␟',
   ];
   match character {
-    '\t' => None,
     '\0'..='\u{1f}' => C0.get(character as usize).copied(),
     '\u{7f}' => Some('\u{2421}'),
     '\u{80}'..='\u{9f}' => Some('\u{fffd}'),
