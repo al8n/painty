@@ -1093,7 +1093,7 @@ fn bounding_the_geometry_walk_did_not_change_what_it_answers() {
         }
         let span = Span::new(start, end);
         assert_eq!(
-          cells.marks_within(span, unbounded()).columns,
+          one_mark(&cells, span, unbounded()).0,
           cells.columns_for(span),
           "{text:?}: the bounded walk disagrees with `columns_for` at {start}..{end} — {why}"
         );
@@ -1123,29 +1123,29 @@ fn a_ceiling_stops_the_walk_where_a_whole_unit_stops() {
     (3, 0, true),
     (0, 0, true),
   ] {
-    let marks = cells.marks_within(Span::new(0, 4), cells_only(limit));
+    let (_, row) = one_mark(&cells, Span::new(0, 4), cells_only(limit));
     assert_eq!(
-      (marks.drawn_end, marks.elided),
+      (row.drawn_end, row.elided),
       (tabs, elided),
       "a ceiling of {limit} cells over four four-cell tabs"
     );
     assert!(
-      marks.drawn_end as u64 * 4 <= limit,
+      row.drawn_end as u64 * 4 <= limit,
       "a ceiling of {limit} let {} cells through",
-      marks.drawn_end * 4
+      row.drawn_end * 4
     );
   }
 
   // And a span reaching past the drawn text is marked over the elision cell, which sits at
   // `visible + 1`. Without that the underline would stop at the last drawn cell and claim the span
   // ended with the row.
-  let marks = cells.marks_within(Span::new(0, 4), cells_only(11));
-  assert_eq!(marks.drawn_end, 2, "two whole tabs fit under eleven cells");
-  assert_eq!(marks.columns, 1..10, "the mark does not reach the `…` cell");
+  let (columns, row) = one_mark(&cells, Span::new(0, 4), cells_only(11));
+  assert_eq!(row.drawn_end, 2, "two whole tabs fit under eleven cells");
+  assert_eq!(columns, 1..10, "the mark does not reach the `…` cell");
 
   // A span that begins past the window has nowhere of its own, so it anchors on that same cell.
-  let marks = cells.marks_within(Span::new(3, 4), cells_only(11));
-  assert_eq!(marks.columns, 9..10);
+  let (columns, _) = one_mark(&cells, Span::new(3, 4), cells_only(11));
+  assert_eq!(columns, 9..10);
 }
 
 /// Where a terminal paints each cluster of a line, written from the terminal side.
@@ -1576,6 +1576,21 @@ fn the_ambiguous_width_convention_is_the_one_painty_measures_against() {
   );
 }
 
+/// One span through the geometry walk, which takes a whole line's worth of them at a time.
+///
+/// The walk is per LINE rather than per mark — one row is drawn, so one walk places everything
+/// under it — and these cases are each about one span, so they go through the same door carrying
+/// one.
+fn one_mark(
+  cells: &LineCells<'_>,
+  span: Span,
+  budget: super::width::Budget,
+) -> (core::ops::Range<u64>, super::width::Row) {
+  let mut marks = [super::width::Mark::new(span, ())];
+  let row = cells.place_marks(&mut marks, budget);
+  (marks[0].columns(), row)
+}
+
 /// No ceiling at all, for holding the bounded walk against the unbounded one.
 fn unbounded() -> super::width::Budget {
   super::width::Budget {
@@ -1605,7 +1620,7 @@ fn a_zero_width_run_is_stopped_by_the_byte_budget_and_by_nothing_else() {
   assert_eq!(cells.width(), 0, "the premise: this line occupies no cells");
 
   // Under a cell ceiling alone the walk reaches the end, which is exactly the hole.
-  let unstopped = cells.marks_within(Span::new(0, 3), cells_only(4_096));
+  let (_, unstopped) = one_mark(&cells, Span::new(0, 3), cells_only(4_096));
   assert!(
     !unstopped.elided,
     "a cell ceiling cannot stop a line of no cells, and this test would be proving nothing"
@@ -1617,7 +1632,7 @@ fn a_zero_width_run_is_stopped_by_the_byte_budget_and_by_nothing_else() {
     cells: 4_096,
     bytes: 900,
   };
-  let stopped = cells.marks_within(Span::new(0, 3), budget);
+  let (_, stopped) = one_mark(&cells, Span::new(0, 3), budget);
   assert!(stopped.elided, "the byte budget did not stop the walk");
   assert!(
     stopped.drawn_end <= 900,
@@ -1650,14 +1665,14 @@ fn a_combining_mark_run_is_bounded_the_same_way() {
     cells: 4_096,
     bytes: 900,
   };
-  let marks = cells.marks_within(Span::new(0, 1), budget);
+  let (_, row) = one_mark(&cells, Span::new(0, 1), budget);
   assert!(
-    marks.elided,
+    row.elided,
     "a twenty-kilobyte cluster passed a nine-hundred-byte budget"
   );
   assert!(
-    marks.drawn_end <= 900,
+    row.drawn_end <= 900,
     "the walk examined {} bytes against a budget of 900",
-    marks.drawn_end
+    row.drawn_end
   );
 }

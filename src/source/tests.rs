@@ -281,3 +281,97 @@ fn lines_is_fused_and_terminates() {
   assert!(lines.next().is_none());
   assert!(lines.next().is_none());
 }
+
+/// Texts a carried cursor can be wrong about, each for a reason a single-span walk never meets.
+#[cfg(feature = "terminal")]
+const WALKED: [(&str, &str); 8] = [
+  (
+    "",
+    "an empty text, where every span resolves to the same place",
+  ),
+  (
+    "one\ntwo\nthree\n",
+    "the ordinary case, three lines and a trailing break",
+  ),
+  (
+    "one\r\ntwo\r\n",
+    "CRLF — two bytes for one break, and a character boundary in the middle of it",
+  ),
+  (
+    "one\rtwo\rthree",
+    "lone CR, which `str::lines` does not break on",
+  ),
+  (
+    "\n\n\na\n",
+    "empty lines, where a line's start and end coincide and a cursor can sit on either",
+  ),
+  (
+    "héllo\nwörld\n",
+    "multi-byte characters, so `floor` and `ceil` have somewhere to move an end to",
+  ),
+  (
+    "🎨a\n日本語\n",
+    "astral and wide characters, whose interior offsets are not character boundaries",
+  ),
+  (
+    "a\u{301}\r\n\u{301}b",
+    "a combining mark either side of a CRLF, and a defective one starting a line",
+  ),
+];
+
+#[test]
+#[cfg(feature = "terminal")]
+fn walking_a_set_of_spans_answers_what_resolving_each_one_does() {
+  // The walk carries a cursor and remembers the line it is standing on, and both are state that a
+  // one-shot `resolve` does not have — so what has to be checked is not that the walk is plausible
+  // but that it is the SAME FUNCTION. Every span of every text, forwards, so a memo that is right
+  // for the offset it was taken at and stale one line later has nowhere to hide.
+  for (text, why) in WALKED {
+    let source = Source::new(text);
+    let mut walk = super::Walk::new(source);
+
+    for start in 0..=text.len() {
+      for end in start..=text.len() {
+        let span = Span::new(start, end);
+        let (at, drawn) = walk.first_line(span);
+
+        let region = source.resolve(span);
+        assert_eq!(at, region.start(), "{text:?} {start}..{end}: {why}");
+        assert_eq!(
+          Some(drawn),
+          region.lines().next(),
+          "{text:?} {start}..{end}: {why}"
+        );
+      }
+    }
+  }
+}
+
+#[test]
+#[cfg(feature = "terminal")]
+fn a_walk_handed_a_span_behind_it_restarts_rather_than_answering_from_where_it_is() {
+  // The one thing a carried cursor must not do. `advance` is forward-only — it walks `while index <
+  // target` and then ASSIGNS the target — so a cursor asked to go backwards would keep the line
+  // number it had reached and hand back a position on a line the offset is not on. Silently wrong
+  // coordinates, which is the failure this crate exists to prevent.
+  //
+  // Answered by making the walk total rather than by documenting an order for callers to keep: the
+  // renderer sorts, and this is what holds when something else does not.
+  for (text, why) in WALKED {
+    let source = Source::new(text);
+    let mut walk = super::Walk::new(source);
+
+    let offsets: Vec<usize> = (0..=text.len()).rev().collect();
+    for offset in offsets {
+      let span = Span::empty(offset);
+      let (at, drawn) = walk.first_line(span);
+      let region = source.resolve(span);
+      assert_eq!(at, region.start(), "{text:?} @ {offset} descending: {why}");
+      assert_eq!(
+        Some(drawn),
+        region.lines().next(),
+        "{text:?} @ {offset} descending: {why}"
+      );
+    }
+  }
+}

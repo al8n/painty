@@ -625,13 +625,20 @@ mod the_size_contract {
   }
 
   #[test]
-  fn alternating_inputs_do_not_multiply_their_origins() {
-    // Caller text is pass-through at 1x — that is the contract — and this path made it k.
+  fn alternating_inputs_do_not_multiply_their_origins_or_their_source_rows() {
+    // Caller text is pass-through at 1x — that is the contract — and this path made it k, twice
+    // over and for two different reasons.
     //
     // The header is emitted on a CHANGE of input, and a change was only the last one seen, so
     // labels alternating between two files re-emitted both origins on every switch. Two large
     // origins and many small labels multiply the caller's own strings by the number of runs, which
     // is amplification of exactly the kind the contract says never happens to them.
+    //
+    // Then the same k in the other column. Every label was its own EXCERPT, so k labels on one line
+    // rewrote that line's source row k times and wrote k copies of the label text under it —
+    // `label_count × excerpt_width`, from a bounded window the size contract says is a function of
+    // the policy. The row is written once now, with k marker rows under it, and k marker rows is
+    // the honest floor: two labels on one line are two things to point at.
     let origin_one = format!("src/{}.rs", "a".repeat(20_000));
     let origin_two = format!("src/{}.rs", "b".repeat(20_000));
     let first = "alpha bravo charlie\n";
@@ -681,15 +688,124 @@ mod the_size_contract {
       out.matches(origin_two.as_str()).count()
     );
 
-    // Every excerpt is still drawn — grouping reorders, it does not drop.
-    assert_eq!(out.matches("alpha bravo charlie").count(), 5);
-    assert_eq!(out.matches("delta echo foxtrot").count(), 4);
+    // One source row per input line, whatever the label count. Nine labels land on two lines, so
+    // the two lines are written once each — and the value a per-label renderer produces is named,
+    // so the wrong implementation cannot satisfy this by accident.
+    for (row, per_label) in [("alpha bravo charlie", 5), ("delta echo foxtrot", 4)] {
+      let drawn = out.matches(row).count();
+      assert_ne!(
+        drawn, per_label,
+        "{row:?} was drawn once per label rather than once per line\n{out}"
+      );
+      assert_eq!(drawn, 1, "{row:?} was drawn {drawn} times\n{out}");
+    }
+
+    // And nothing was dropped to get there: every label still has a marker row of its own, because
+    // coalescing merges the ROW and not what is said under it. Counted with the marker attached, so
+    // that "there" is not also counted as a "here".
+    assert_eq!(
+      out.matches("- here").count(),
+      4,
+      "a label on a shared line lost its marker row\n{out}"
+    );
+    assert_eq!(out.matches("- there").count(), 4, "{out}");
+    assert_eq!(out.matches("^ primary").count(), 1, "{out}");
+    assert_eq!(
+      out.matches('^').count(),
+      5,
+      "the primary's caret is five cells over `bravo`\n{out}"
+    );
 
     // And the primary's file still leads, so grouping has not moved another file above the position
     // the diagnostic is actually about.
     assert!(
       out.find(origin_one.as_str()) < out.find(origin_two.as_str()),
       "grouping reordered the inputs away from where the primary is"
+    );
+    // The primary leads within its line too. Its span starts at byte 6 and the labels sharing the
+    // row start at byte 0, so a renderer ordering marker rows by column would put it second.
+    let primary = out.find("primary").expect("the primary's label");
+    let first_secondary = out.find("here").expect("a secondary label");
+    assert!(
+      primary < first_secondary,
+      "the primary lost its place on a shared line\n{out}"
+    );
+  }
+
+  #[test]
+  fn labels_on_one_line_add_marker_rows_and_not_excerpts() {
+    // The output half of the k axis, and the half no timing can see: an excerpt is bounded by the
+    // ceiling, so drawing k of them costs `k × 4096` characters and no measurable time next to a
+    // walk of an eight-megabyte line. It has to be counted instead.
+    //
+    // A line well over the ceiling, so an excerpt is expensive, and the labels crowded at its start
+    // so that a marker row is cheap — which is what makes the difference between the two shapes
+    // enormous rather than merely visible.
+    let text = format!("{}\n", "a".repeat(20_000));
+    let message = "a message";
+    let emitted = |count: usize| {
+      let labels: Vec<painty::Label<'_>> = (1..count)
+        .map(|nth| painty::Label::new(Location::new(0, Span::new(nth * 10, nth * 10 + 5)), "there"))
+        .collect();
+      let diagnostic = Diagnostic::new(
+        "mylang::test::rule",
+        Severity::Error,
+        &message,
+        Location::new(0, Span::new(0, 5)),
+      )
+      .with_primary_label("here")
+      .with_labels(&labels);
+
+      let mut out = Accepting::default();
+      Terminal::plain()
+        .render(&diagnostic, &[Input::new(Source::new(&text))], &mut out)
+        .expect("a counting writer never refuses");
+      out.taken
+    };
+
+    let one = emitted(1);
+    let eight = emitted(8);
+    let excerpt = usize::try_from(Terminal::<Theme>::max_rendered_width()).unwrap_or(usize::MAX);
+    assert!(
+      one > excerpt,
+      "the line is not over the ceiling, so an extra excerpt would be cheap and this proves nothing"
+    );
+
+    // Seven more labels may add seven marker rows. They may not add seven excerpts, which is what
+    // the value below names: a renderer drawing one excerpt per label grows by `7 × 4096` here.
+    let per_label_excerpts = 7 * excerpt;
+    let grew = eight - one;
+    assert!(
+      grew < excerpt,
+      "seven more labels on one line added {grew} characters, which is an excerpt apiece rather \
+       than a marker row apiece — a per-label renderer grows by about {per_label_excerpts}"
+    );
+
+    // And they really were drawn, so the assertion above cannot be satisfied by dropping them.
+    let mut frame = String::new();
+    let labels: Vec<painty::Label<'_>> = (1..8)
+      .map(|nth| painty::Label::new(Location::new(0, Span::new(nth * 10, nth * 10 + 5)), "there"))
+      .collect();
+    let diagnostic = Diagnostic::new(
+      "mylang::test::rule",
+      Severity::Error,
+      &message,
+      Location::new(0, Span::new(0, 5)),
+    )
+    .with_primary_label("here")
+    .with_labels(&labels);
+    Terminal::plain()
+      .render(&diagnostic, &[Input::new(Source::new(&text))], &mut frame)
+      .expect("a String is writable");
+    assert_eq!(
+      frame.matches("- there").count(),
+      7,
+      "a label lost its marker row"
+    );
+    assert_eq!(
+      frame.matches('…').count(),
+      1,
+      "the line over the ceiling was excerpted more than once"
     );
   }
 
@@ -747,22 +863,35 @@ mod the_size_contract {
   }
 }
 
-/// What layer 2 alone costs to resolve a span and hand back its line, and what a whole render
-/// costs on top.
+/// What layer 2 alone costs to resolve one span and hand back its line, and what a whole render of
+/// `positions` of them costs on top.
 ///
 /// Both are linear in the line, so the figure that means anything is the ratio: how many passes
 /// over the caller's input the renderer adds to the one layer 2 must make.
-fn passes_over_layer_two(megabytes: usize, offset: usize) -> f64 {
+///
+/// The extra positions are spread along the SAME line, from its start to the primary's offset.
+/// That is the shape a renderer resolving each label independently pays most for — every one of
+/// them is another walk from the top and another scan for where the line ends — and it is also the
+/// shape that coalesces to a single excerpt, so the output stays small and what is being timed is
+/// the WORK rather than the writing.
+fn passes_over_layer_two(megabytes: usize, offset: usize, positions: usize) -> f64 {
   let text = format!("{}\n", "a".repeat(megabytes * 1_000_000));
   let span = Span::new(offset, offset + 5);
   let message = "a message";
+  let labels: Vec<painty::Label<'_>> = (1..positions)
+    .map(|nth| {
+      let at = offset * nth / positions;
+      painty::Label::new(Location::new(0, Span::new(at, at + 5)), "there")
+    })
+    .collect();
   let diagnostic = Diagnostic::new(
     "mylang::test::rule",
     Severity::Error,
     &message,
     Location::new(0, span),
   )
-  .with_primary_label("here");
+  .with_primary_label("here")
+  .with_labels(&labels);
 
   let source = Source::new(&text);
   let _ = source.resolve(span).lines().next();
@@ -795,30 +924,43 @@ fn the_renderer_adds_a_bounded_number_of_passes_over_the_input() {
   //
   // What cannot be asserted here is that a render is bounded, because it is not and no budget can
   // make it so: layer 2 turns a byte offset into a line and column by scanning to it, and finding
-  // where a line ENDS is linear in the line whatever the span. Measured at eight megabytes, a
-  // render with the span at offset zero is 1.04x layer 2 alone — the renderer adds essentially
-  // nothing — and everything either of them does is 1x in input the caller supplied.
+  // where a line ENDS is linear in the line whatever the span. So what is asserted is the number of
+  // PASSES, which is a real bound and the thing a regression would move.
   //
-  // So what is asserted is the number of PASSES, which is a real bound and the thing a regression
-  // would move. Measured while writing this:
+  // # The k axis, which is the half that was missing
   //
-  //   near span   1 MB 1.35x   8 MB 1.04x
-  //   far span    1 MB 2.52x   8 MB 2.50x
+  // This measured one label, and one label is exactly the shape that cannot see the defect it was
+  // meant to hold off. Every label was resolved from the top of the input and drawn as its own
+  // excerpt, so the whole cost went as k — 22.7 ms of it per label on an eight-megabyte line — and
+  // a pass count pinned at k=1 stayed green through eight rounds of review while it did.
   //
-  // The far case is above one because the `-->` header reports a DISPLAY column, and a display
-  // column at offset N is a sum over the clusters before it — one grapheme walk, unavoidable while
-  // the header is denominated that way. Four allows that one pass and refuses a second.
-  let near = passes_over_layer_two(8, 0);
-  assert!(
-    near < 2.0,
-    "a render with the span at the start of the line cost {near:.2} times layer 2 alone, so the \
-     renderer has taken on a pass that does not depend on where the span is"
-  );
+  // So both ends are measured, and against the SAME bound rather than a looser one for k=8: the
+  // claim is that the pass count does not depend on the label count at all. Measured while writing
+  // this, in the same debug profile the suite runs in:
+  //
+  //   near span   k=1 1.05x   k=8 1.06x
+  //   far span    k=1 1.02x   k=8 1.02x
+  //
+  // Two allows that nearly twice over and refuses a doubling. It is not a precise instrument and
+  // does not need to be: with the carried cursor removed so that each label resolves from the top
+  // again, k=8 measures 7.97x near and 5.71x far, because eight labels are eight walks to their
+  // own offsets and eight scans for where the line ends. Both ends of k=1 stay green under that
+  // same plant, at 1.06x and 1.02x, which is the whole reason this axis exists.
+  const ALLOWED: f64 = 2.0;
 
-  let far = passes_over_layer_two(8, 8_000_000 - 10);
-  assert!(
-    far < 4.0,
-    "a render with the span at the end of the line cost {far:.2} times layer 2 alone; one walk is \
-     the display column in the header, and a second one is a regression"
-  );
+  for positions in [1, 8] {
+    let near = passes_over_layer_two(8, 0, positions);
+    assert!(
+      near < ALLOWED,
+      "a render of {positions} positions at the start of the line cost {near:.2} times layer 2 \
+       alone, so the renderer has taken on a pass that does not depend on where the span is"
+    );
+
+    let far = passes_over_layer_two(8, 8_000_000 - 10, positions);
+    assert!(
+      far < ALLOWED,
+      "a render of {positions} positions along the line cost {far:.2} times layer 2 alone; one \
+       forward pass over the input is the bound, and it does not widen with the label count"
+    );
+  }
 }

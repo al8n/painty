@@ -2,9 +2,11 @@ use core::fmt;
 
 use super::{
   ColorCapability, LineCells,
-  width::{Budget, control_picture},
+  width::{Budget, Mark, Row, control_picture},
 };
-use crate::{Color, Diagnostic, Palette, RegionLine, Role, Source, Style, Theme};
+use crate::{
+  Color, Diagnostic, Line, Palette, RegionLine, Role, Source, Span, Style, Theme, source::Walk,
+};
 
 /// One of the caller's inputs: its text, and whatever the caller calls it.
 ///
@@ -50,19 +52,81 @@ impl<'a> Input<'a> {
   }
 }
 
+/// One position a diagnostic named that this render can actually draw.
+///
+/// Built once, before anything is resolved, so that the two orders this needs — ascending offsets
+/// to resolve in, and the caller's own to draw in — are both available without asking the
+/// diagnostic twice. `at` is the caller's order, and it is the only thing that survives the sort.
+///
+/// `input` is the INDEX into the list the caller passed, not the `Location::source` it came from.
+/// The two are the same number, and the index is the one this layer owns: rule 5 of
+/// [the numeric widths](crate#numeric-widths) makes it a `usize`, where spelling a `u32` here would
+/// be declaring a ceiling that is `Location`'s to declare and not this file's.
+#[derive(Debug, Clone, Copy)]
+struct Drawable<'a> {
+  at: usize,
+  input: usize,
+  from: Input<'a>,
+  span: Span,
+  text: Option<&'a str>,
+  primary: bool,
+}
+
+/// What one marker row says, and where the position under it starts.
+#[derive(Debug, Clone, Copy)]
+struct Phrase<'a> {
+  text: Option<&'a str>,
+  primary: bool,
+  /// The 1-based CHARACTER column the position begins at, which is what the `-->` line reports for
+  /// the first position of each input. Read off the resolve that found the line rather than
+  /// measured again: layer 2 computed it on the way past, and it is the same number
+  /// [`Position::column`](crate::Position::column) hands any other consumer.
+  column: u64,
+  /// Where this was in the caller's order.
+  at: usize,
+}
+
+/// One source line, and every mark that will be drawn under it.
+///
+/// `marks` indexes one flat run rather than owning a `Vec` of its own: the marker rows of a whole
+/// render are a single allocation, and an excerpt names its slice of them.
+#[derive(Debug, Clone)]
+struct Excerpt<'a> {
+  input: usize,
+  origin: Option<&'a str>,
+  line: Line<'a>,
+  /// The earliest caller position on this line, which is where the line sits within its input.
+  at: usize,
+  /// The earliest caller position anywhere in this input, which is where the input sits.
+  input_at: usize,
+  marks: core::ops::Range<usize>,
+}
+
 /// Renders a diagnostic and its source to a fixed-width terminal.
 ///
 /// # What this draws, and what it does not yet
 ///
-/// One excerpt per position: the line it falls on, and a row of markers under it. `^` for the
-/// primary position, `-` for a secondary one, which is the convention a reader already knows.
+/// One excerpt per source LINE: the line, drawn once, and a row of markers under it for every
+/// position that falls there. `^` for the primary position, `-` for a secondary one, which is the
+/// convention a reader already knows. Marker rows are in the order the caller gave the labels, so
+/// the primary leads whether or not it is the leftmost thing on the line.
 ///
 /// A span covering more than one line is drawn on the **first** line it touches. Brackets and the
 /// connectors that join a span's ends across lines are a row-assignment problem, and they are the
-/// expensive part of a terminal renderer rather than an afterthought; they arrive next. Two labels
-/// on the same line likewise get one excerpt each rather than being merged onto shared rows. What
-/// is here is total and correct about what it draws — it is not yet everything a reader will
-/// eventually want drawn.
+/// expensive part of a terminal renderer rather than an afterthought; they arrive next — as is
+/// merging several markers onto ONE row, which is the same problem. What is here is total and
+/// correct about what it draws, and it is not yet everything a reader will eventually want drawn.
+///
+/// # What k labels cost
+///
+/// Per input: **one forward pass** over its text, whatever the label count — layer 2 walks
+/// forwards, so the positions are resolved in ascending order off a carried cursor. Per drawn line:
+/// **one** scan for where the line ends, **one** bounded walk over its geometry, and **one** source
+/// row. Per label: one marker row, and the label's own text once.
+///
+/// That last one is the honest floor rather than a gap. Two labels on a line are two things to
+/// point at and two things to say, and no arrangement of rows makes them one. Everything that is
+/// painty's — the resolve, the line scan, the geometry, the excerpt — is once per line.
 ///
 /// ```
 /// use painty::{Diagnostic, Location, Severity, Source, Span, terminal::{Input, Terminal}};
@@ -154,7 +218,9 @@ impl<P: Palette> Terminal<P> {
   /// look for the rest of it.
   pub fn underline(&self, drawn: RegionLine<'_>) -> core::ops::Range<u64> {
     let cells = LineCells::new(drawn.line(), self.tab_width);
-    never_empty(cells.marks_within(drawn.covered(), Self::budget()).columns)
+    let mut marks = [Mark::new(drawn.covered(), ())];
+    cells.place_marks(&mut marks, Self::budget());
+    never_empty(marks[0].columns())
   }
 
   /// The widest an excerpt is drawn, in cells.
@@ -279,54 +345,119 @@ impl<P: Palette> Terminal<P> {
     write_shown(out, diagnostic.message())?;
     out.write_char('\n')?;
 
-    // Every excerpt this will draw, so the gutter can be sized before any of them is written.
-    let mut excerpts = Vec::new();
+    // Every position the diagnostic names, in the order the caller gave them, and then only those
+    // that can be drawn at all: an input the caller did not supply and a position with no span both
+    // draw nothing, on the same terms as `Location::entire`.
     let mut positions = Vec::new();
     positions.push((diagnostic.primary(), diagnostic.primary_label(), true));
     for label in diagnostic.labels() {
       positions.push((label.location(), Some(label.text()), false));
     }
-    for (location, text, primary) in positions {
-      let Some(input) = inputs.get(location.source() as usize) else {
-        continue;
+    let mut drawable: Vec<Drawable<'_>> = positions
+      .into_iter()
+      .enumerate()
+      .filter_map(|(at, (location, text, primary))| {
+        let input = location.source() as usize;
+        Some(Drawable {
+          at,
+          input,
+          from: *inputs.get(input)?,
+          span: location.span()?,
+          text,
+          primary,
+        })
+      })
+      .collect();
+
+    // RESOLUTION order, which is not the order any of this is drawn in. Layer 2 walks forwards, so
+    // a set of spans resolved in ascending order over one input costs one pass; resolved in the
+    // caller's order it costs one pass EACH, and on a multi-megabyte line each pass is the whole
+    // line again. The caller's order is carried in `at` and put back below.
+    drawable.sort_unstable_by_key(|position| (position.input, position.span.start(), position.at));
+
+    // One excerpt per input LINE, not per label. Two labels on one line used to be two excerpts,
+    // each re-resolving the span, re-scanning for the line's end and rewriting the whole source row
+    // under its own copy of the label text — so a bounded source window and a borrowed string came
+    // out k times. They share the row now, and the k that remains is k marker rows, which is the
+    // one part of this that genuinely cannot be one.
+    //
+    // Coalescing CONSECUTIVE entries is enough because the sort put them there: line number rises
+    // with the start offset, so every position on one line of one input is a contiguous run.
+    let mut excerpts: Vec<Excerpt<'_>> = Vec::new();
+    let mut marks: Vec<Mark<Phrase<'_>>> = Vec::new();
+    let mut walk: Option<(usize, Walk<'_>)> = None;
+    for position in &drawable {
+      let walking = match &mut walk {
+        Some((input, walking)) if *input == position.input => walking,
+        _ => {
+          &mut walk
+            .insert((position.input, Walk::new(position.from.source)))
+            .1
+        }
       };
-      if let Some(span) = location.span()
-        && let Some(drawn) = input.source.resolve(span).lines().next()
-      {
-        excerpts.push((drawn, text, primary, location.source(), input.origin));
+      let (starts, drawn) = walking.first_line(position.span);
+
+      match excerpts.last_mut() {
+        Some(last)
+          if last.input == position.input && last.line.number() == drawn.line().number() =>
+        {
+          last.at = last.at.min(position.at);
+          last.marks.end += 1;
+        }
+        _ => excerpts.push(Excerpt {
+          input: position.input,
+          origin: position.from.origin,
+          line: drawn.line(),
+          at: position.at,
+          input_at: position.at,
+          marks: marks.len()..marks.len() + 1,
+        }),
       }
+      marks.push(Mark::new(
+        drawn.covered(),
+        Phrase {
+          text: position.text,
+          primary: position.primary,
+          column: starts.column(),
+          at: position.at,
+        },
+      ));
     }
 
-    // Grouped by input before anything is written, because the header is emitted on a CHANGE of
-    // input and a change is only the last one seen. Labels alternating between two files re-emitted
-    // both origins on every switch — the caller's own text, multiplied by the number of runs, which
-    // is the amplification the size contract says caller text never suffers. Pass-through is 1x and
-    // that was k.
+    // DRAWING order, and the two sorts below are what puts the caller's order back.
     //
     // By the order each input FIRST appears, not by its index: the primary is pushed first, so
     // sorting by index would move another file's label above the position the diagnostic is
-    // actually about. Stable, so labels keep the caller's order within a file.
-    //
-    // The lookup is linear in the number of distinct inputs, which is bounded by the list the
-    // caller passed and is dwarfed by the layer-2 resolve each excerpt has already cost.
-    // Inferred rather than annotated: these are `Location::source` keys, which painty never computes
-    // and only carries, so spelling the width here would be declaring a ceiling that is not ours.
-    let mut order = Vec::new();
-    for (_, _, _, source, _) in &excerpts {
-      if !order.contains(source) {
-        order.push(*source);
+    // actually about. An input's first appearance is the earliest caller position anywhere in it,
+    // which the sort above has already made contiguous — so it is one linear pass, where asking
+    // "have I seen this input" per excerpt was a scan of the distinct inputs per excerpt, and k
+    // labels over d empty inputs kept everything else at O(k) while that went quadratic.
+    let mut run = 0;
+    while run < excerpts.len() {
+      let input = excerpts[run].input;
+      let mut end = run;
+      let mut earliest = usize::MAX;
+      while end < excerpts.len() && excerpts[end].input == input {
+        earliest = earliest.min(excerpts[end].at);
+        end += 1;
       }
+      for excerpt in &mut excerpts[run..end] {
+        excerpt.input_at = earliest;
+      }
+      run = end;
     }
-    excerpts.sort_by_cached_key(|(_, _, _, source, _)| {
-      order
-        .iter()
-        .position(|listed| listed == source)
-        .unwrap_or(order.len())
-    });
+    excerpts.sort_unstable_by_key(|excerpt| (excerpt.input_at, excerpt.at));
+    // And the marker rows under one line are in the caller's order too, so the primary — pushed
+    // first — leads whether or not it is the leftmost thing on the line.
+    for excerpt in &excerpts {
+      marks[excerpt.marks.clone()].sort_unstable_by_key(|mark| mark.payload().at);
+    }
 
+    // Sized before anything is written, because the gutter is as wide as the widest number it will
+    // show and the first row does not know what is coming.
     let gutter = excerpts
       .iter()
-      .map(|(drawn, _, _, _, _)| digits(drawn.line().number()))
+      .map(|excerpt| digits(excerpt.line.number()))
       .max()
       .unwrap_or(1);
 
@@ -337,36 +468,44 @@ impl<P: Palette> Terminal<P> {
     // file it did not come from. Two inputs with no origin, or with the same one, are still two
     // inputs, and only the index distinguishes them.
     let mut shown_input = None;
-    for (drawn, text, primary, source, origin) in &excerpts {
-      if shown_input != Some(*source) {
-        // `column_at` and NOT the bounded walk, which is the opposite of what it looks like it
-        // should be. The header reports a DISPLAY column, and a display column at offset N is a sum
-        // over every cluster before N — there is no bounded way to know it, and clipping it to the
-        // window would report a position the error is not at, which is the one thing this crate
-        // exists not to do.
+    for excerpt in &excerpts {
+      let cells = LineCells::new(excerpt.line, self.tab_width);
+      let placed = &mut marks[excerpt.marks.clone()];
+      let Some(leading) = placed.first().map(|mark| *mark.payload()) else {
+        continue;
+      };
+      let row = cells.place_marks(placed, Self::budget());
+
+      if shown_input != Some(excerpt.input) {
+        // A CHARACTER column, and the marker row below is in DISPLAY columns. Two units in one
+        // frame is deliberate, because the two rows are read by different things.
         //
-        // `column_at` is already the smallest walk that answers it: it returns AT the offset rather
-        // than running to the end of the line, so it is linear in the offset and not in the line.
-        // Routing it through `marks_within` instead would walk the whole budget even for a span in
-        // the first few bytes, which is more work and not less.
+        // This line is MACHINE-PARSED. `rustc` writes it, and editors, IDEs and LSP clients read
+        // `file:line:column` off it to move a cursor — in characters, which is what every one of
+        // them means by a column and what `Position::column` already answers. A display column here
+        // is silently wrong on exactly the lines this crate is proudest of getting right: a tab or
+        // a wide character makes the two disagree, and the consumer navigates to the wrong place
+        // with no way to tell. Character's failure mode is visible and conventional; display's is
+        // silent, which is the one thing this crate exists not to do.
         //
-        // So this is one unbounded pass, it is 1x in input the caller supplied, and
-        // `the_renderer_adds_a_bounded_number_of_passes_over_the_input` pins that it stays one.
-        // Removing it altogether needs the header's column to change unit — see the report on
-        // `max_source_bytes`.
-        let column =
-          LineCells::new(drawn.line(), self.tab_width).column_at(drawn.covered().start());
+        // The marker row stays in display columns because it is read by a HUMAN looking at the row
+        // above it, where a caret has to sit under the glyph a terminal painted.
+        //
+        // It costs nothing, which is the smaller half of the argument and worth writing down: the
+        // resolve that found this line computed the character column on its way past, so the header
+        // is a value layer 2 already produced. The display column was a grapheme walk over every
+        // cluster before the offset, unbounded, and the dominant term of a whole render at k=1.
         pad(out, gutter)?;
         out.write_str("--> ")?;
-        if let Some(origin) = origin {
+        if let Some(origin) = excerpt.origin {
           write_shown(out, origin)?;
           out.write_char(':')?;
         }
-        writeln!(out, "{}:{column}", drawn.line().number())?;
+        writeln!(out, "{}:{}", excerpt.line.number(), leading.column)?;
         self.bar(out, gutter)?;
-        shown_input = Some(*source);
+        shown_input = Some(excerpt.input);
       }
-      self.excerpt(out, gutter, *drawn, *text, *primary)?;
+      self.excerpt(out, gutter, &cells, &row, placed)?;
       self.bar(out, gutter)?;
     }
 
@@ -388,18 +527,16 @@ impl<P: Palette> Terminal<P> {
     out.write_char('\n')
   }
 
-  /// One source line and the marker row under it.
+  /// One source line, written once, and a marker row for every mark on it.
   fn excerpt(
     &self,
     out: &mut impl fmt::Write,
     gutter: u64,
-    drawn: RegionLine<'_>,
-    text: Option<&str>,
-    primary: bool,
+    cells: &LineCells<'_>,
+    row: &Row,
+    placed: &[Mark<Phrase<'_>>],
   ) -> fmt::Result {
-    let cells = LineCells::new(drawn.line(), self.tab_width);
-
-    let number = drawn.line().number();
+    let number = cells.line().number();
     pad(out, gutter - digits(number))?;
     self.styled(out, Role::LineNumber, &number.to_string())?;
     out.write_char(' ')?;
@@ -414,38 +551,50 @@ impl<P: Palette> Terminal<P> {
     // `…` is inside the styled run deliberately — it stands where source would have stood, occupies
     // the one cell `underline` reserved for it, and is what stops the cut being silent.
     //
-    // One walk for the whole excerpt's geometry. `underline` would answer the same — it is
-    // `never_empty` over this same call — but asking twice would walk the window twice, and the
-    // marker row has to be placed against the stop this walk found.
-    let geometry = cells.marks_within(drawn.covered(), Self::budget());
+    // Written ONCE for the line rather than once per label, and placed against the stop the one
+    // walk found. `underline` would answer the same columns — it is `never_empty` over that same
+    // call — but asking again would walk the window again.
     self.styled_with(out, Role::SourceText, |shown| {
-      cells.write_expanded_upto(shown, geometry.drawn_end)?;
-      if geometry.elided {
+      cells.write_expanded_upto(shown, row.drawn_end)?;
+      if row.elided {
         fmt::Write::write_char(shown, '…')?;
       }
       Ok(())
     })?;
     out.write_char('\n')?;
 
-    let marks = never_empty(geometry.columns);
+    for mark in placed {
+      self.marker_row(out, gutter, never_empty(mark.columns()), *mark.payload())?;
+    }
+    Ok(())
+  }
+
+  /// One row of markers, and whatever the label attached to it says.
+  fn marker_row(
+    &self,
+    out: &mut impl fmt::Write,
+    gutter: u64,
+    marks: core::ops::Range<u64>,
+    phrase: Phrase<'_>,
+  ) -> fmt::Result {
     pad(out, gutter + 1)?;
     self.styled(out, Role::Gutter, "|")?;
     out.write_char(' ')?;
     pad(out, marks.start - 1)?;
 
-    let role = if primary {
+    let role = if phrase.primary {
       Role::PrimaryLabel
     } else {
       Role::SecondaryLabel
     };
-    let marker = if primary { '^' } else { '-' };
+    let marker = if phrase.primary { '^' } else { '-' };
     self.styled_with(out, role, |shown| {
       for _ in 0..marks.end - marks.start {
         fmt::Write::write_char(shown, marker)?;
       }
       Ok(())
     })?;
-    if let Some(text) = text {
+    if let Some(text) = phrase.text {
       out.write_char(' ')?;
       self.styled(out, role, text)?;
     }

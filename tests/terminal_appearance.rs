@@ -96,6 +96,44 @@ error[mylang::schema::duplicate-field]: `width` is defined twice
 }
 
 #[test]
+fn two_labels_on_one_line_share_the_line_and_keep_their_own_marker_rows() {
+  // The arrangement, pinned as a whole frame because what was wrong was the arrangement. Each label
+  // used to be its own excerpt, so a line carrying two of them was printed twice — the same source
+  // row, the same bounded window, once per label, with the second copy telling a reader nothing the
+  // first had not.
+  //
+  // One row, two marker rows, and the primary first: its span starts AFTER the secondary's, so a
+  // renderer ordering the rows by column would swap them.
+  let text = "type Widget { width: Int, width: Float }\n";
+  let message = "`width` is defined twice";
+  let labels = [Label::new(
+    Location::new(0, Span::new(14, 19)),
+    "first defined here",
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::schema::duplicate-field",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(26, 31)),
+  )
+  .with_primary_label("redefined here")
+  .with_labels(&labels);
+
+  assert_eq!(
+    render(&diagnostic, text, Some("widget.graphql")),
+    "\
+error[mylang::schema::duplicate-field]: `width` is defined twice
+ --> widget.graphql:1:27
+  |
+1 | type Widget { width: Int, width: Float }
+  |                           ^^^^^ redefined here
+  |               ----- first defined here
+  |
+"
+  );
+}
+
+#[test]
 fn a_position_with_nothing_to_point_at_prints_only_its_header() {
   let message = "this document was generated, so it has no positions";
   let diagnostic = Diagnostic::new(
@@ -190,14 +228,112 @@ fn a_tab_is_expanded_and_the_marker_lands_under_what_it_points_at() {
     !out.contains('\t'),
     "a tab survived into the output\n{out:?}"
   );
+  // The header says 6 where the caret sits in cell 9, and the two are both right — see
+  // `the_arrow_line_and_the_marker_row_are_in_different_units`.
   assert_eq!(
     out,
     "\
 error[mylang::test::tabbed]: an indented statement
- --> 1:9
+ --> 1:6
   |
 1 |     let x = 1;
   |         ^ this one
+  |
+"
+  );
+}
+
+#[test]
+fn the_arrow_line_and_the_marker_row_are_in_different_units() {
+  // Two units in one frame, on purpose, and this is where they part company.
+  //
+  // The `-->` line is MACHINE-PARSED: `rustc` writes it and editors, IDEs and LSP clients read
+  // `line:column` off it to move a cursor, in CHARACTERS. The marker row is read by a human looking
+  // at the row above it, in the DISPLAY cells a terminal painted. On plain ASCII the two agree,
+  // which is why the disagreement has to be constructed — and a line with a tab and a wide
+  // character is the crate's own named worst case for exactly this.
+  //
+  // Asserted as a difference first. A renderer that reported display columns in the header would
+  // satisfy any single-number assertion here by putting the same number in both places, and would
+  // send every consumer to the wrong column on every tabbed or wide line, silently.
+  let text = "\t日本語 x = 1;\n";
+  let at = text.find('x').expect("the fixture has one");
+  let message = "a name after a tab and three ideographs";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::units",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(at, at + 1)),
+  )
+  .with_primary_label("this one");
+
+  let out = render(&diagnostic, text, Some("widget.graphql"));
+
+  // The header's number, as a consumer would parse it out.
+  let header = out
+    .lines()
+    .find(|row| row.contains("-->"))
+    .expect("a header row");
+  let reported: u64 = header
+    .rsplit(':')
+    .next()
+    .expect("a column")
+    .parse()
+    .expect("a number");
+
+  // Layer 2's answer for the same offset, which is the unit every consumer of this line means.
+  let source = Source::new(text);
+  let character = source.position(at).column();
+  assert_eq!(character, 6, "tab, three ideographs, a space, then `x`");
+  assert_eq!(
+    reported, character,
+    "the header disagrees with `Position::column`, which is the number an editor would have \
+     computed for itself\n{out}"
+  );
+
+  // And the marker, which is the other unit: the tab reaches the stop at 4, each ideograph is two
+  // cells, then a space, so `x` is PAINTED in cell 12. Measured off the rendered rows with
+  // `unicode-width`'s own answer rather than with painty's cluster arithmetic, so this is not the
+  // renderer agreeing with itself.
+  use unicode_width::UnicodeWidthStr;
+
+  let marker_row = out
+    .lines()
+    .find(|row| row.contains('^'))
+    .expect("a marker row");
+  let source_row = out
+    .lines()
+    .find(|row| row.contains('x'))
+    .expect("a source row");
+  // Both rows carry the same gutter — `1 | ` and `  | ` — so the cell within the LINE is what is
+  // after the bar and the space, in either.
+  let after_the_bar = |row: &str| {
+    let bar = row.find('|').expect("a gutter bar");
+    row[bar + 2..].to_owned()
+  };
+  let drawn = after_the_bar(source_row);
+  let display = drawn[..drawn.find('x').expect("the x")].width() as u64 + 1;
+  let carets = after_the_bar(marker_row);
+  let caret = carets.find('^').expect("the caret") as u64 + 1;
+
+  assert_eq!(display, 12, "{out}");
+  assert_eq!(
+    caret, display,
+    "the caret is not under the character it points at\n{out}"
+  );
+  assert_ne!(
+    display, character,
+    "the two units agree on this line, so it proves nothing about the distinction\n{out}"
+  );
+
+  assert_eq!(
+    out,
+    "\
+error[mylang::test::units]: a name after a tab and three ideographs
+ --> widget.graphql:1:6
+  |
+1 |     日本語 x = 1;
+  |            ^ this one
   |
 "
   );

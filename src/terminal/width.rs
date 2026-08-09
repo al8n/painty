@@ -226,7 +226,8 @@ impl<'a> LineCells<'a> {
     self.write_expanded_upto(out, self.line.text().len())
   }
 
-  /// Everything the renderer needs about one line, in a single walk that stops at `budget`.
+  /// Everything the renderer needs about one line and every mark on it, in a single walk that
+  /// stops at `budget`.
   ///
   /// # Why this is one function and not three
   ///
@@ -241,9 +242,22 @@ impl<'a> LineCells<'a> {
   /// `visible + 1`, and the marker row is placed against that same column. Two callers each
   /// deciding where the row ended would put the caret past the row.
   ///
+  /// # Why it is one walk and not one per mark
+  ///
+  /// A line is DRAWN once, so it is WALKED once. Placing k marks by calling this k times would
+  /// segment the window k times, and — the sharper half — would take the row's stop from whichever
+  /// call the caller happened to keep. That the k answers agree today is a property of this
+  /// implementation rather than of the type: the stop depends only on the budget, and a later edit
+  /// that made it depend on the span would put the carets against a row nobody drew. One call
+  /// produces one [`Row`] and every mark is placed against it, so there is nothing to agree about.
+  ///
+  /// The marks come in and their columns go out **on the same values**, for the same reason. A
+  /// slice of spans in and a slice of columns out would have to be lined up by index, and an index
+  /// that has to line up is a rule the type is not making.
+  ///
   /// # The stop is a BYTE OFFSET, and that is the point
   ///
-  /// [`drawn_end`](Marks::drawn_end) is what the writer replays to, rather than a cell count it
+  /// [`drawn_end`](Row::drawn_end) is what the writer replays to, rather than a cell count it
   /// re-derives a stop from. Handing it a cell count is what let zero-width clusters through: a run
   /// of U+200B advances no cells, so a cell check never trips, and the writer walked and emitted the
   /// whole line while the geometry thought it had stopped. Two walks with different stopping rules
@@ -251,12 +265,16 @@ impl<'a> LineCells<'a> {
   ///
   /// Inside the window the answer is [`columns_for`](Self::columns_for)'s, exactly; the tests hold
   /// the two together over the corpus so that bounding the walk cannot quietly change the geometry.
-  pub(crate) fn marks_within(&self, span: Span, budget: Budget) -> Marks {
-    let start = self.clamp(span.start());
-    let end = self.clamp(span.end());
-    let mut first = None;
-    let mut last = None;
-    let mut anchor = None;
+  pub(crate) fn place_marks<T>(&self, marks: &mut [Mark<T>], budget: Budget) -> Row {
+    // Clamped here rather than where a mark was built, so a mark carries no line of its own and
+    // cannot have been measured against a different one.
+    for mark in marks.iter_mut() {
+      mark.within = self.clamp(mark.covered.start())..self.clamp(mark.covered.end());
+      mark.first = None;
+      mark.last = None;
+      mark.anchor = None;
+    }
+
     let mut drawn = 0;
     let mut drawn_end = 0;
     let mut elided = false;
@@ -274,41 +292,43 @@ impl<'a> LineCells<'a> {
         elided = true;
         break;
       }
-      // `columns_for`'s predicate, so the two cannot answer differently inside the window.
-      let touches = unit.start < end || (unit.start <= start && start < unit.end);
-      if touches && unit.end > start {
-        first.get_or_insert(unit.column);
-        last = Some(unit.column + unit.cells);
-      }
-      // What `column_at` would answer for `start`, carried along rather than fetched by a second
-      // walk when the span turns out to touch nothing.
-      if anchor.is_none() && start < unit.end {
-        anchor = Some(unit.column);
+      for mark in marks.iter_mut() {
+        let (start, end) = (mark.within.start, mark.within.end);
+        // `columns_for`'s predicate, so the two cannot answer differently inside the window.
+        let touches = unit.start < end || (unit.start <= start && start < unit.end);
+        if touches && unit.end > start {
+          mark.first.get_or_insert(unit.column);
+          mark.last = Some(unit.column + unit.cells);
+        }
+        // What `column_at` would answer for `start`, carried along rather than fetched by a second
+        // walk when the span turns out to touch nothing.
+        if mark.anchor.is_none() && start < unit.end {
+          mark.anchor = Some(unit.column);
+        }
       }
       drawn += unit.cells;
       drawn_end = unit.end;
     }
 
     let stop = drawn + 1;
-    // A span running past the drawn text reaches the elision mark, so it is drawn over it: that is
-    // what tells a reader the span continues out there. Without this the underline would stop at
-    // the last drawn cell and claim the span ended with the row.
-    if elided && end > drawn_end {
-      first.get_or_insert(stop);
-      last = Some(stop + 1);
-    }
-    let columns = match (first, last) {
-      (Some(from), Some(to)) => from..to,
-      _ => {
-        let at = anchor.unwrap_or(stop);
-        at..at
+    for mark in marks.iter_mut() {
+      // A span running past the drawn text reaches the elision mark, so it is drawn over it: that
+      // is what tells a reader the span continues out there. Without this the underline would stop
+      // at the last drawn cell and claim the span ended with the row.
+      if elided && mark.within.end > drawn_end {
+        mark.first.get_or_insert(stop);
+        mark.last = Some(stop + 1);
       }
-    };
-    Marks {
-      columns,
-      drawn_end,
-      elided,
+      mark.columns = match (mark.first, mark.last) {
+        (Some(from), Some(to)) => from..to,
+        _ => {
+          let at = mark.anchor.unwrap_or(stop);
+          at..at
+        }
+      };
     }
+
+    Row { drawn_end, elided }
   }
 
   /// The same walk as [`write_expanded`](Self::write_expanded), replaying to a byte offset.
@@ -394,14 +414,63 @@ pub(crate) struct Budget {
   pub(crate) bytes: u64,
 }
 
-/// One line's drawable geometry under a [`Budget`]: where the marker goes, where the row stops, and
-/// whether anything was left over.
+/// One span to be marked on a line, whatever the caller needs to remember about it, and the display
+/// columns [`LineCells::place_marks`] gave it.
 ///
-/// Returned together because they are computed together and must agree — see
-/// [`LineCells::marks_within`].
-pub(crate) struct Marks {
-  /// The display columns the span occupies, already inside the drawable window.
-  pub(crate) columns: core::ops::Range<u64>,
+/// One value carries the question and the answer. Handing the walk a slice of spans and taking a
+/// slice of columns back would leave the two to be paired by index, and every marker row on the
+/// line would then be one silent off-by-one away from pointing at the wrong text.
+#[derive(Debug, Clone)]
+pub(crate) struct Mark<T> {
+  /// The bytes to mark, as the caller knows them: absolute, and not yet clamped to any line.
+  covered: Span,
+  /// Those bytes as the walk compares them — line-relative and clamped in. Set by
+  /// [`LineCells::place_marks`], which is the only thing that knows which line this is against.
+  within: core::ops::Range<usize>,
+  /// Where the mark's first and last drawn units sat, while the walk is running.
+  first: Option<u64>,
+  last: Option<u64>,
+  /// What [`LineCells::column_at`] would answer for the start, for a mark that touches no drawn
+  /// unit at all.
+  anchor: Option<u64>,
+  /// What the walk settled on. Empty at column zero — a column no line has — until it has run.
+  columns: core::ops::Range<u64>,
+  payload: T,
+}
+
+impl<T> Mark<T> {
+  /// A mark over `covered`, not yet placed.
+  #[inline]
+  pub(crate) const fn new(covered: Span, payload: T) -> Self {
+    Self {
+      covered,
+      within: 0..0,
+      first: None,
+      last: None,
+      anchor: None,
+      columns: 0..0,
+      payload,
+    }
+  }
+
+  /// Returns what the caller attached to it.
+  #[inline]
+  pub(crate) const fn payload(&self) -> &T {
+    &self.payload
+  }
+
+  /// Returns the display columns the mark occupies, already inside the drawable window.
+  #[inline]
+  pub(crate) fn columns(&self) -> core::ops::Range<u64> {
+    self.columns.clone()
+  }
+}
+
+/// Where one line's drawn row stopped, and whether anything was left over.
+///
+/// One [`Row`] per walk and one walk per line, so every mark on the line is placed against the same
+/// stop — see [`LineCells::place_marks`].
+pub(crate) struct Row {
   /// The byte offset the walk stopped at: the only thing the writer is told, and the only unit in
   /// which the stop is expressed anywhere. A cell count was here too and nothing production read
   /// it — carrying the stop in two units is how the walk and the row came to disagree.
