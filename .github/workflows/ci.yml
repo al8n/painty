@@ -165,7 +165,7 @@ jobs:
       - name: The declared feature set is the one the design fixed
         run: |
           set -euo pipefail
-          WANT='{"default": [], "html": [], "model": [], "std": [], "terminal": ["dep:anstyle", "dep:unicode-width", "std"], "tokora": ["dep:tokora"]}'
+          WANT='{"default": [], "html": [], "model": [], "std": [], "terminal": ["dep:anstyle", "dep:unicode-segmentation", "dep:unicode-width", "std"], "tokora": ["dep:tokora"]}'
           GOT="$(cargo metadata --no-deps --format-version 1 \
             | python3 -c 'import json,sys; p=[x for x in json.load(sys.stdin)["packages"] if x["name"]=="painty"][0]; print(json.dumps({k: sorted(v) for k, v in p["features"].items()}, sort_keys=True))')"
           echo "declared: $GOT"

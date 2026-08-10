@@ -65,12 +65,13 @@ impl Position {
   }
 }
 
-/// How far a walk over the text has got, and what line it is on.
+/// How far a walk over the text has got, what line it is on, and which column of it.
 #[derive(Debug, Clone, Copy)]
 struct Cursor {
   offset: usize,
   line: u64,
   line_start: usize,
+  column: u64,
 }
 
 impl Cursor {
@@ -78,18 +79,36 @@ impl Cursor {
     offset: 0,
     line: 1,
     line_start: 0,
+    column: 1,
   };
 }
 
-/// Walks `bytes` from `cursor` to `target`, counting the line breaks in between.
+/// Whether `byte` continues a character rather than starting one.
+///
+/// UTF-8 continuation bytes are `10xxxxxx` and nothing else is, so a character can be counted from
+/// its first byte without decoding it.
+#[inline]
+const fn continues_a_character(byte: u8) -> bool {
+  byte & 0b1100_0000 == 0b1000_0000
+}
+
+/// Walks `bytes` from `cursor` to `target`, counting the line breaks and the characters in between.
 ///
 /// `target` must be at or after `cursor.offset`; the walk is forward-only, which is the whole
 /// reason resolving in offset order costs one pass rather than one pass per offset.
 ///
+/// # The column is counted here, not scanned for afterwards
+///
+/// It used to be read off `text[line_start..offset]` once the walk had arrived, which is a SECOND
+/// pass over the same bytes and — the part that mattered — a pass that starts over for every
+/// offset. Carrying the walk between k positions on one line therefore bought nothing: the walk
+/// advanced twenty bytes and the column re-counted eight megabytes, k times. One counter here
+/// makes the carried cursor mean what it says.
+///
 /// The line counter is incremented rather than saturated, and that is the point: it is a `u64`
 /// bounded by the length of a `&str`, so it cannot reach its maximum, and if that reasoning were
 /// ever wrong a debug build would panic here instead of handing back a number that quietly stopped
-/// being true.
+/// being true. The column is bounded the same way, by the length of one line.
 fn advance(bytes: &[u8], mut cursor: Cursor, target: usize) -> Cursor {
   let mut index = cursor.offset;
   while index < target {
@@ -101,13 +120,23 @@ fn advance(bytes: &[u8], mut cursor: Cursor, target: usize) -> Cursor {
           // slices between the two. `Source::floor` and `Source::ceil` move an offset out of a
           // CRLF before it ever gets here, so this is what makes the walk total rather than a case
           // that arises.
+          //
+          // Stopping here is also what puts an offset inside a CRLF at the END of the line's
+          // content rather than a column past its width: a break occupies no column, and the
+          // counter has not reached it.
           break;
         }
         index = after;
         cursor.line += 1;
         cursor.line_start = index;
+        cursor.column = 1;
       }
-      None => index += 1,
+      None => {
+        if !matches!(bytes.get(index), Some(byte) if continues_a_character(*byte)) {
+          cursor.column += 1;
+        }
+        index += 1;
+      }
     }
   }
   cursor.offset = target;
@@ -294,9 +323,8 @@ impl<'a> Source<'a> {
     // moves back and `ceil` only moves forward, and where either clamps to the text's length it
     // clamps to the same length. A non-inverted span is unaffected either way, since its end
     // already dominates both its own start and that start's floor.
-    let requested_end = span.end().max(span.start());
-    let start = self.floor(span.start());
-    let end = self.ceil(requested_end);
+    let clamped = self.clamped(span);
+    let (start, end) = (clamped.start(), clamped.end());
 
     let (start_position, cursor) = self.position_from(Cursor::START, start);
     let first_line_start = cursor.line_start;
@@ -321,26 +349,30 @@ impl<'a> Source<'a> {
     )
   }
 
+  /// The byte range `span` resolves to: the inversion repaired first, then each end moved out to
+  /// its atom.
+  ///
+  /// Shared by [`resolve`](Self::resolve) and [`Walk`] rather than written twice. The order the
+  /// three steps run in is the subject of the comment in `resolve`, and a second copy of it is a
+  /// second place for that order to be got wrong.
+  fn clamped(&self, span: Span) -> Span {
+    let requested_end = span.end().max(span.start());
+    Span::new(self.floor(span.start()), self.ceil(requested_end))
+  }
+
   /// Resolves `offset` starting from a cursor already positioned at or before it.
+  ///
+  /// Everything a position says is read off the walk that got here — line, column and all —
+  /// because the walk is the only thing that has been over the bytes. Counted as an ordinal
+  /// throughout rather than converted from a `usize` count, so there is no cast on the path a
+  /// position is built by.
   fn position_from(&self, cursor: Cursor, offset: usize) -> (Position, Cursor) {
     let cursor = advance(self.text.as_bytes(), cursor, offset);
-
-    // An offset can land inside the break that ends a line: a span may name the newline itself,
-    // and a character boundary sits between the `\r` and the `\n` of a CRLF. A break occupies no
-    // column, so counting up to the first one puts such an offset at the end of the line's
-    // content rather than at a column past the line's own width.
-    let segment = &self.text[cursor.line_start..offset];
-    let visible = segment.find(['\r', '\n']).unwrap_or(segment.len());
-    // Counted as an ordinal from the start rather than converted from a `usize` count, so there is
-    // no cast on the path a position is built by.
-    let column = segment[..visible]
-      .chars()
-      .fold(1u64, |column, _| column + 1);
     (
       Position {
         offset,
         line: cursor.line,
-        column,
+        column: cursor.column,
       },
       cursor,
     )
@@ -380,5 +412,80 @@ impl<'a> Source<'a> {
   fn splits_a_crlf(&self, offset: usize) -> bool {
     let bytes = self.text.as_bytes();
     offset > 0 && bytes[offset - 1] == b'\r' && matches!(bytes.get(offset), Some(b'\n'))
+  }
+}
+
+/// Resolves a set of spans against one text in a single forward walk.
+///
+/// # What it is for
+///
+/// [`Source::resolve`] starts at the top of the text every time, so k spans cost k walks — the
+/// linearity [`Source`]'s own note about resolving "in offset order" describes but has no API for.
+/// A renderer drawing k labels paid it k times, and on a multi-megabyte line each one is the whole
+/// line again. This carries the walk's position between calls and keeps the [`Line`] it is standing
+/// on, so a set of spans on one line costs **one** pass over the input and **one** scan for the
+/// line's end however many of them there are.
+///
+/// # Total, not preconditioned
+///
+/// A span starting before where the walk has got to restarts it from the top. That is deliberately
+/// not a documented requirement on the caller: a requirement is checked by whoever remembers it,
+/// and the one thing that must never happen here is a *wrong* position. An unordered caller pays
+/// what [`Source::resolve`] would have charged it and gets the same answer.
+///
+/// The answers are [`Source::resolve`]'s, and `walking_a_set_of_spans_answers_what_resolving_each_
+/// one_does` holds the two together over the corpus at every offset — a carried cursor is exactly
+/// the kind of state that can be right on the case it was written for and wrong one line later.
+///
+/// Gated on the one output that has it: this is layer 2's capability rather than the terminal's,
+/// and the gate follows the consumer so that a `--no-default-features` build does not carry code
+/// nothing reaches. The HTML and model outputs will want it, and the gate widens when they arrive.
+#[cfg(feature = "terminal")]
+pub(crate) struct Walk<'a> {
+  source: Source<'a>,
+  cursor: Cursor,
+  /// The line `cursor` stands on, once something has needed it. Finding where a line ENDS is
+  /// linear in the line whatever the span, so it is found once per line rather than once per span.
+  line: Option<Line<'a>>,
+}
+
+#[cfg(feature = "terminal")]
+impl<'a> Walk<'a> {
+  /// A walk over `source`, positioned at the top of it.
+  #[inline]
+  pub(crate) const fn new(source: Source<'a>) -> Self {
+    Self {
+      source,
+      cursor: Cursor::START,
+      line: None,
+    }
+  }
+
+  /// Returns where `span` starts and the first line it is drawn on.
+  ///
+  /// Exactly `(source.resolve(span).start(), source.resolve(span).lines().next().unwrap())`, and
+  /// the `unwrap` is why this returns no `Option`: a region always covers at least the line it
+  /// starts on, so the first line is never absent and a caller has no case to handle.
+  pub(crate) fn first_line(&mut self, span: Span) -> (Position, RegionLine<'a>) {
+    let clamped = self.source.clamped(span);
+    if clamped.start() < self.cursor.offset {
+      self.cursor = Cursor::START;
+      self.line = None;
+    }
+
+    let (at, cursor) = self.source.position_from(self.cursor, clamped.start());
+    self.cursor = cursor;
+    // Keyed on where the line STARTS rather than on its number, because that is what the cursor
+    // carries and what `line::scan` would be handed. A number would have to agree with the walk by
+    // a second argument.
+    let line = match self.line {
+      Some(line) if line.span().start() == cursor.line_start => line,
+      _ => {
+        let scanned = line::scan(self.source.text, cursor.line_start, cursor.line);
+        self.line = Some(scanned);
+        scanned
+      }
+    };
+    (at, region::clip(line, clamped))
   }
 }

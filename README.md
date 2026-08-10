@@ -19,12 +19,25 @@ Renders a diagnostic and its source text to a terminal, to HTML, or to an export
 
 ## Status
 
-**Layer 2 only — there is no renderer yet.** Resolution has landed: a diagnostic and the source
+**Layer 2, and a single-line terminal renderer.** Resolution has landed: a diagnostic and the source
 text it points into go in, and lines, character columns, excerpts and the lines a multi-line span
 is drawn on come out. The terminal, HTML and model outputs are declared as features and are not
 written.
 
 Nothing here is published to crates.io.
+
+### Caller text never steers the terminal
+
+Diagnostic text is caller-supplied and so is the source it points into, so every control character
+in either — the message, the code, the origin, a label, the excerpt — is replaced by a visible
+stand-in before it is written. An ESC reads as `␛`, DEL as `␡`, and C1, which has no pictures, as
+the replacement character.
+
+Not cosmetic. `\x1b[38;5;196m` sitting in a source file would otherwise colour the rest of the
+frame, and it would do it under `ColorCapability::None`, which is the one guarantee the capability
+gate exists to make; U+009B is a single-byte CSI on terminals that honour C1, and a bare newline
+needs no escape at all to break the frame. Substituted rather than dropped, because a reader has to
+be able to see that something was there, and every stand-in is one cell wide so no marker moves.
 
 ## Overview
 
@@ -118,25 +131,30 @@ renderer can say what shape it needs.
 
 A published model's integer widths cannot be changed later without breaking every consumer, and
 this one is meant to cross a C ABI as well as a Rust API. So the width of a numeric member is not
-a local choice — it follows from what the number *is*, by four rules read in order. The first that
+a local choice — it follows from what the number *is*, by five rules read in order. The first that
 matches wins, and the last matches everything, so there is no member the rule fails to place.
 
 | # | what the number is | width | why |
 | - | ------------------ | ----- | --- |
-| 1 | a line or column in the resolved model — including a count of lines, which is the last line's own number | `u64` | it crosses a C ABI, so not `usize`; and it must not imply a ceiling the domain does not have, so not `u32` |
+| 1 | a line or column in painty's own geometry, resolved **or rendered** — including a count of lines, which is the last line's own number | `u64` | it crosses a C ABI, so not `usize`; and it must not imply a ceiling the domain does not have, so not `u32` |
 | 2 | an ordinal in data the **producer** built, that painty neither computes nor bounds | `u64` | same ceiling argument, and there is no protocol cap to point at instead |
 | 3 | a key into a structure painty does not own and never computes | that contract's width | it has to round-trip; matching the width is what makes it lossless in both directions |
-| 4 | anything else — an index or a count of things in memory | `usize` | exactly as `slice::len` is |
+| 4 | a value painty itself **emits into a wire format** that fixes its width | that format's width | the format is not negotiable and the value has to be legal in it |
+| 5 | anything else — an index or a count of things in memory | `usize` | exactly as `slice::len` is |
 
 Worked through the whole public surface, that gives:
 
 - **rule 1** — `Position::line`, `Position::column`, `Line::number`, `Line::char_count`,
   `Line::column_at`, `Source::line_count`, `Source::line`, `Region::line_count`,
-  `RegionLine::columns`;
+  `RegionLine::columns`, and every member of `LineCells` — `column_at`, `width`, `columns_for`,
+  `cells_between`, `default_tab_width`, `max_tab_width` — display columns being painty's own
+  geometry just as character columns are;
 - **rule 2** — `PathSegment::Index`, a position in a *result* the producer assembled;
 - **rule 3** — `Location::source`, a `u32` index into the caller's own list of inputs, which is
   what every producer of one already spells it;
-- **rule 4** — `Position::offset`, `Span::{new, empty, start, end, len, contains}`,
+- **rule 4** — `Color::Ansi256`, `Color::Rgb`, `Ansi16::{index, from_index, to_rgb}`: a colour
+  channel painty writes into an SGR escape sequence, which fixes it at one byte;
+- **rule 5** — `Position::offset`, `Span::{new, empty, start, end, len, contains}`,
   `LineBreak::byte_len`, and `Source::{len, line_at, position}`.
 
 The adapter's overflow reports used to be here, as exact `usize` counts. They are booleans now and
@@ -144,6 +162,23 @@ have left the numeric surface entirely: an exact count of what did not fit can o
 looking at everything that did not fit, and those are answers from a caller-implemented trait, so
 the count was buying an unbounded walk through somebody else's code to fill a four-element array.
 `painty::tokora::Adapted` documents the trade.
+
+Rule 4 was added when the terminal renderer arrived, and it is the residual this document had been
+carrying — *the rule set itself being wrong* — actually firing. A colour channel is not an ordinal,
+and rule 3 excludes it on its own terms because painty **does** compute it: narrowing `Rgb → 256 →
+16` is painty's arithmetic. The catch-all then claimed it and gave a pointer-sized colour channel,
+which is absurd. The alternative considered was widening rule 3 from *authorship of the value* to
+*ownership of the contract*, which covers both with one rule instead of two; it was rejected because
+dropping rule 3's "never computes" clause lets it also claim every byte offset — Rust's slicing
+contract fixes those at `usize` — which would leave rule 3 swallowing rule 5 and the procedure with
+nothing to discriminate on. Five rules that each decide something beat four where one decides
+everything.
+
+Rule 1's wording widened at the same time, from *the resolved model* to *painty's own geometry,
+resolved or rendered*, so that a renderer's display column is placed. Checked against all
+twenty-four members that existed before: none is re-placed, and the near misses — `Source::line_at`,
+`LineBreak::byte_len`, `PathSegment::Index`, `Location::source`, `Position::offset` — are byte
+offsets and foreign indices rather than lines or columns.
 
 Two consequences worth stating, because they are why the rules are ordered rather than merely
 listed. A line count is *both* a count of things in memory and a line ordinal; rule 1 comes first,
@@ -172,6 +207,11 @@ What is left is a member placed under a rule that gives the *same* width — rul
 itself being wrong. No check reads intent. That is what the ordering above is for, and what review
 is for.
 
+Two of those are associated functions where a constant would read more naturally —
+`LineCells::default_tab_width` and `LineCells::max_tab_width`. A `pub const` cannot be pinned by
+ascribing a function pointer, and the choice was between a second pinning mechanism for two members
+and an API shape the one mechanism already covers. The API moved.
+
 ## Features
 
 Every output is independently selectable, and the default configuration selects none of them — the
@@ -181,7 +221,7 @@ crate is `no_std` and dependency-free until a caller asks for something.
 | ----------- | ------- | -------------------------- | --------------------------------------------------- |
 | *(default)* | —       | —                          | layer 2: resolution, `no_std`, no dependencies      |
 | `std`       | —       | —                          | anything needing the standard library               |
-| `terminal`  | `std`   | `unicode-width`, `anstyle` | ANSI output, box drawing, display-width alignment   |
+| `terminal`  | `std`   | `unicode-width`, `unicode-segmentation`, `anstyle` | the terminal renderer: cell arithmetic, colour detection, ANSI |
 | `html`      | —       | —                          | HTML output: escaping and CSS classes               |
 | `model`     | —       | —                          | a stable C-ABI export of the resolved model         |
 | `tokora`    | —       | `tokora`                   | an adapter from `tokora::diagnostic::Diagnose`      |
@@ -193,9 +233,37 @@ painty = { version = "0", features = ["terminal"] }
 
 `unicode-width` is taken rather than hand-narrowed because correct terminal alignment is impossible
 without display width, and owning a Unicode table means owning a class of alignment bug for no
-gain. `anstyle` is what `clap` and `cargo` already use, so a consumer's `--color` flag and this
-crate's theme interoperate without a conversion layer. Both sit behind `terminal`; the HTML and
-model outputs pull in neither.
+gain. `unicode-segmentation` is taken for a sharper version of the same reason: where a *placement
+unit* ends is UAX#29 grapheme segmentation, and two rounds of review found two different home-grown
+answers that each inferred it from incremental prefix width — the second placing every marker after
+a variation-selector emoji one cell early. A rule that has to be tuned a third time is a wrong
+model, so the question goes to the crate that implements the standard, exactly as `syn` and not a
+line scanner decides what a public item is. `anstyle` is what `clap` and `cargo` already use, so a
+consumer's `--color` flag and this crate's theme interoperate without a conversion layer. All three
+sit behind `terminal`; the HTML and model outputs pull in none of them.
+
+### The placement model
+
+A line is its sequence of UAX#29 extended grapheme clusters, after sanitization. Each cluster
+occupies exactly `unicode-width`'s width of that cluster **measured in isolation**. A byte offset's
+column is one plus the cells of the whole clusters before it, and a span widens outward to cluster
+boundaries.
+
+`unicode-width` also applies rules *across* cluster boundaries — Arabic lam followed by alef scores
+1 for the pair where the clusters score 1 + 1 — and painty **rejects those by specification**. Not
+an omission: no cursor-addressable terminal can implement them. A grid device must have a definite
+cursor position between any two characters it receives, `CSI 6n` can be issued between the lam and
+the alef, and the lam's cluster has closed before the alef arrives. For the pair to occupy one cell
+the alef would have to advance zero cells into a cell the terminal may already have reported past.
+Every real terminal advances two. The cluster boundary is the maximum lookahead a cursor-addressable
+device can hold without contradicting its own cursor reports, which is why it is the unit.
+
+So painty promises exact cell alignment on a grapheme-aware terminal, and declines four things:
+agreement with whole-string width (six families differ on Unicode 17 data, each pinned in the tests
+at *both* values); visual alignment under bidi reordering, since columns are logical; font shaping,
+so underlining half a ligature marks half the span — deliberately, because those are two addressable
+source positions; and legacy per-codepoint cell counts, where a wcwidth-era terminal gives a ZWJ
+emoji sequence more cells than its cluster width.
 
 `tokora` is taken with `default-features = false`, so it stays `no_std` and brings only the
 diagnostic contract the adapter reads — `--features tokora` is one of the bare-metal legs the

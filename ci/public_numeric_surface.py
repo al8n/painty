@@ -49,6 +49,23 @@ EXPECTED_FORMAT_VERSION = 61
 # checked in, so that adding a public numeric fails until somebody writes it down here as well as
 # pinning it in `tests/numeric_widths.rs`.
 EXPECTED = {
+    "Ansi16::from_index": ["u8"],
+    "Ansi16::index": ["u8"],
+    "Ansi16::to_rgb": ["u8"],
+    "Color::Ansi256": ["u8"],
+    "Color::Rgb": ["u8"],
+    "LineCells::columns_for": ["u64"],
+    "LineCells::default_tab_width": ["u64"],
+    "LineCells::max_tab_width": ["u64"],
+    "LineCells::cells_between": ["u64", "usize"],
+    "LineCells::column_at": ["u64", "usize"],
+    "LineCells::new": ["u64"],
+    "LineCells::tab_width": ["u64"],
+    "LineCells::width": ["u64"],
+    "Terminal::max_rendered_width": ["u64"],
+    "Terminal::max_source_bytes": ["u64"],
+    "Terminal::underline": ["u64"],
+    "Terminal::with_tab_width": ["u64"],
     "Line::char_count": ["u64"],
     "Line::column_at": ["u64", "usize"],
     "Line::number": ["u64"],

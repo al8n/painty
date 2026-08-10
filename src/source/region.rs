@@ -116,6 +116,26 @@ impl<'a> Region<'a> {
   }
 }
 
+/// The part of `span` that falls on `line`.
+///
+/// Clipped at BOTH ends of the line's content, not just the near one. A region can begin inside the
+/// break that ended a line — a span naming the newline itself does — and a start clamped only from
+/// below would then sit past the text it indexes into.
+///
+/// One function rather than one expression per caller: [`RegionLines`] walks every line of a region
+/// and `Walk` answers only the first, and two clipping rules for one question is how a walk that
+/// skipped the far end came to exist in the first place. Unlinked deliberately — `Walk` is behind
+/// the `terminal` feature, so a link to it is broken in every build that does not enable one.
+pub(super) fn clip<'a>(line: Line<'a>, span: Span) -> RegionLine<'a> {
+  let content = line.span();
+  let start = span.start().max(content.start()).min(content.end());
+  let end = span.end().min(content.end()).max(start);
+  RegionLine {
+    line,
+    covered: Span::new(start, end),
+  }
+}
+
 /// One line of a [`Region`], with the part of the region that falls on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct RegionLine<'a> {
@@ -174,18 +194,7 @@ impl<'a> Iterator for RegionLines<'a> {
     }
     let line = self.lines.next()?;
     self.remaining -= 1;
-
-    // Clipped at BOTH ends of the line's content, not just the near one. A region can begin inside
-    // the break that ended a line — a span naming the newline itself does — and a start clamped
-    // only from below would then sit past the text it indexes into.
-    let content = line.span();
-    let start = self.span.start().max(content.start()).min(content.end());
-    let end = self.span.end().min(content.end()).max(start);
-
-    Some(RegionLine {
-      line,
-      covered: Span::new(start, end),
-    })
+    Some(clip(line, self.span))
   }
 
   /// Exact, and safely so: the count is [`Region::line_count`], which painty computed from the

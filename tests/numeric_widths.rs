@@ -95,8 +95,39 @@
 //! 2^63 and a `u64` cannot overflow. The increments are therefore plain `+`, and a debug build
 //! panics if that reasoning is ever wrong — which is the direction to fail in. A saturating
 //! increment would instead hand back a number indistinguishable from a real one.
+//!
+//! # NOT INTERPRETED UNDER MIRI
+//!
+//! Miri answers one question — whether an execution path has undefined behaviour — and the answer
+//! is a property of the path rather than of how often it is walked. Everything here reads painty's
+//! source TEXT: `syn` parses the sixteen files in [`CRATE`] and the censuses walk the trees. None
+//! of painty's own paths is exercised by that, so the interpreter has nothing to have an opinion
+//! about. The two tests that do call painty — [`the_pinned_widths_are_the_values_the_crate_produces`]
+//! and [`the_last_line_number_and_the_line_count_are_the_same_number`] — run a fourteen-byte source
+//! through accessors that `tests/resolution_invariants.rs` and the lib's own unit tests put through
+//! the interpreter thousands of times over, so nothing leaves Miri's view with this file.
+//!
+//! Leaving it in does not cost a slow cell, it costs a red one, in two different ways. Interpreting
+//! `syn` took between 2h22m and 4h58m per cell in run 31316096247 — by a wide margin the largest
+//! single item in a job GitHub caps at six hours, and up to 83% of one cell's whole budget. On
+//! `i686-unknown-linux-gnu` it does not finish at all: Miri hands each allocation a fresh address
+//! out of the target's four-gigabyte space, a census this long exhausts it, and validation ICEs with
+//! `there are no more free addresses in the address space` — 1h44m in under tree borrows, 58m under
+//! stacked borrows. That is a limit of the interpreter's address allocator on a 32-bit target, not a
+//! finding about painty, and no `MIRIFLAGS` entry raises it.
+//!
+//! `#![cfg(not(miri))]` rather than `#[cfg_attr(miri, ignore)]` per test, because the reason is a
+//! property of what this file DOES and not of any test in it: it belongs where a reader looking for
+//! it will be, and a test added below inherits it instead of having to remember an attribute. The
+//! ICE also arrives during *evaluation* rather than compilation, so an ignored-but-present test
+//! would be enough — but the whole-file form is the one that cannot go stale. `cfg(miri)` is set by
+//! the interpreter and by nothing else, so `cargo test`, the coverage lane and the sanitizer lane
+//! still compile and run every test here; the emptiness cannot spread beyond the two Miri lanes.
+#![cfg(not(miri))]
 
-use painty::{Line, LineBreak, Location, PathSegment, Position, Region, RegionLine, Source, Span};
+use painty::{
+  Ansi16, Color, Line, LineBreak, Location, PathSegment, Position, Region, RegionLine, Source, Span,
+};
 use syn::{
   Item, Type, Visibility,
   spanned::Spanned,
@@ -109,7 +140,7 @@ use syn::{
 /// [`the_file_list_is_the_whole_crate`] walks `src/` and checks it. `src/tokora.rs` is here whether
 /// or not its feature is on: `include_str!` reads the disk, not the build, which is what keeps the
 /// adapter under the same censuses as everything else.
-const CRATE: [(&str, &str); 10] = [
+const CRATE: [(&str, &str); 16] = [
   ("src/lib.rs", include_str!("../src/lib.rs")),
   (
     "src/diagnostic/mod.rs",
@@ -136,6 +167,24 @@ const CRATE: [(&str, &str); 10] = [
   (
     "src/source/region.rs",
     include_str!("../src/source/region.rs"),
+  ),
+  ("src/style/color.rs", include_str!("../src/style/color.rs")),
+  ("src/style/mod.rs", include_str!("../src/style/mod.rs")),
+  (
+    "src/terminal/detect.rs",
+    include_str!("../src/terminal/detect.rs"),
+  ),
+  (
+    "src/terminal/render.rs",
+    include_str!("../src/terminal/render.rs"),
+  ),
+  (
+    "src/terminal/mod.rs",
+    include_str!("../src/terminal/mod.rs"),
+  ),
+  (
+    "src/terminal/width.rs",
+    include_str!("../src/terminal/width.rs"),
   ),
   ("src/tokora.rs", include_str!("../src/tokora.rs")),
 ];
@@ -661,7 +710,14 @@ mod rule {
   pub type DomainOrdinal = u64;
   /// Rule 3 — a key into a structure painty does not own, at that contract's width.
   pub type ForeignKey = u32;
-  /// Rule 4 — an index or a count of things in memory.
+  /// Rule 4 — a value painty emits into a wire format that fixes its width.
+  ///
+  /// An SGR escape sequence carries a colour channel in one byte, and a value outside that is not
+  /// expressible in the format at all. Distinct from rule 1's refusal to adopt LSP's 32-bit cap:
+  /// painty does not emit LSP — a consumer does — so that cap is somebody else's to honour, while
+  /// this one is painty's own output.
+  pub type Emitted = u8;
+  /// Rule 5 — an index or a count of things in memory.
   pub type Count = usize;
 }
 
@@ -684,7 +740,7 @@ mod rule {
 /// regression against all three. `tests/source_borrows.rs` asserts the same property from the side
 /// a caller feels, and does not depend on anybody getting a function-pointer type right.
 fn pin<'a>(_witness: &'a ()) {
-  use rule::{Count, DomainOrdinal, ForeignKey, Ordinal};
+  use rule::{Count, DomainOrdinal, Emitted, ForeignKey, Ordinal};
 
   let _: fn(&Position) -> Ordinal = Position::line;
   let _: fn(&Position) -> Ordinal = Position::column;
@@ -697,6 +753,13 @@ fn pin<'a>(_witness: &'a ()) {
   let _: fn(&RegionLine<'a>) -> core::ops::Range<Ordinal> = RegionLine::columns;
 
   let _: fn(DomainOrdinal) -> PathSegment<'a> = PathSegment::Index;
+
+  // Rule 4 — emitted into an SGR escape, which fixes the width at one byte.
+  let _: fn(&Ansi16) -> Emitted = Ansi16::index;
+  let _: fn(Emitted) -> Option<Ansi16> = Ansi16::from_index;
+  let _: fn(&Ansi16) -> (Emitted, Emitted, Emitted) = Ansi16::to_rgb;
+  let _: fn(Emitted) -> Color = Color::Ansi256;
+  let _: fn(Emitted, Emitted, Emitted) -> Color = Color::Rgb;
 
   let _: fn(ForeignKey, Span) -> Location = Location::new;
   let _: fn(ForeignKey) -> Location = Location::entire;
@@ -713,6 +776,37 @@ fn pin<'a>(_witness: &'a ()) {
   let _: fn(&Source<'a>) -> Count = Source::len;
   let _: fn(&Source<'a>, Count) -> Line<'a> = Source::line_at;
   let _: fn(&Source<'a>, Count) -> Position = Source::position;
+
+  // The terminal renderer's geometry, behind its feature. A cell measure is rule 1: the rule
+  // covers painty's own geometry, and a distance across that geometry is in the same unit as a
+  // position in it — mixing a `usize` tab width into `u64` column arithmetic is exactly the seam
+  // an off-by-one hides in.
+  #[cfg(feature = "terminal")]
+  {
+    use painty::terminal::LineCells;
+    let _: fn(Line<'a>, Ordinal) -> LineCells<'a> = LineCells::new;
+    let _: fn(&LineCells<'a>) -> Ordinal = LineCells::tab_width;
+    let _: fn(&LineCells<'a>, Count) -> Ordinal = LineCells::column_at;
+    let _: fn(&LineCells<'a>) -> Ordinal = LineCells::width;
+    let _: fn(&LineCells<'a>, Count, Count) -> Ordinal = LineCells::cells_between;
+    let _: fn() -> Ordinal = LineCells::default_tab_width;
+    let _: fn() -> Ordinal = LineCells::max_tab_width;
+    let _: fn(&LineCells<'a>, Span) -> core::ops::Range<Ordinal> = LineCells::columns_for;
+
+    // The renderer's own geometry. A tab width is a distance across the rendered geometry and a
+    // marker range is a pair of positions in it, so both are rule 1 for the same reason.
+    use painty::{Theme, terminal::Terminal};
+    let _: fn(Terminal<Theme>, Ordinal) -> Terminal<Theme> = Terminal::<Theme>::with_tab_width;
+    let _: fn(&Terminal<Theme>, RegionLine<'a>) -> core::ops::Range<Ordinal> =
+      Terminal::<Theme>::underline;
+    // The ceiling on a drawn row is a distance across that same geometry, so it is rule 1 for the
+    // same reason the tab width is — and it is the one number the output-size contract rests on.
+    let _: fn() -> Ordinal = Terminal::<Theme>::max_rendered_width;
+    // A count of source bytes the renderer will examine. Rule 1 as well: it is a measure over
+    // painty's own rendered geometry rather than an index into anything, and it is the number the
+    // resource bound rests on.
+    let _: fn() -> Ordinal = Terminal::<Theme>::max_source_bytes;
+  }
 
   // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and
   // buying that exactness meant walking a caller's `Diagnose` impl to exhaustion, so they are
