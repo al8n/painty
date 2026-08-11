@@ -37,6 +37,16 @@ fn render(diagnostic: &Diagnostic<'_>, text: &str, origin: Option<&str>) -> Stri
 
 const SCHEMA: &str = "type Widget {\n  width: Int\n  width: Int\n}\n";
 
+/// The same renderer in both presentations.
+///
+/// Most of this file pins one style's appearance and is right to. The two guarantees below are not
+/// appearance: what escapes may be emitted, and that no caller string can steer the terminal, are
+/// the RENDERER's promises, and a style is the newest thing able to break one — it writes rows of
+/// its own choosing through the same painter. So those two are asked of both.
+fn both(terminal: Terminal<Theme>) -> [Terminal<Theme>; 2] {
+  [terminal.like_rustc(), terminal.like_miette()]
+}
+
 #[test]
 fn a_single_label_reads_the_way_a_reader_expects() {
   let message = "`width` is defined twice";
@@ -1206,42 +1216,43 @@ fn no_capability_lets_caller_text_steer_the_terminal() {
     ColorCapability::Ansi256,
     ColorCapability::TrueColor,
   ] {
-    let mut out = String::new();
-    Terminal::with_palette(Theme::new())
-      .with_capability(capability)
-      .render(
-        &diagnostic,
-        &[Input::new(Source::new(&text)).with_origin(&origin)],
-        &mut out,
-      )
-      .expect("a String is writable");
+    for terminal in both(Terminal::with_palette(Theme::new()).with_capability(capability)) {
+      let mut out = String::new();
+      terminal
+        .render(
+          &diagnostic,
+          &[Input::new(Source::new(&text)).with_origin(&origin)],
+          &mut out,
+        )
+        .expect("a String is writable");
 
-    if capability == ColorCapability::None {
+      if capability == ColorCapability::None {
+        assert!(
+          !out.contains('\u{1b}'),
+          "an ESC reached a no-colour terminal: {out:?}"
+        );
+      }
+      // At every level the 256-colour family the INPUT asked for must be absent, because no level was
+      // asked for it by the palette. Under `Ansi16` that is also the level's own promise, and under
+      // truecolour it is what proves the escape came from painty rather than from the text.
+      let families = escape_families(&out);
       assert!(
-        !out.contains('\u{1b}'),
-        "an ESC reached a no-colour terminal: {out:?}"
+        !families.iter().any(|f| f == "38"),
+        "{capability:?} passed the input's own escape through: {families:?}"
+      );
+      // The ESC, not the text after it. Written the other way round this contradicted its own
+      // neighbour below — "shown rather than swallowed" means the visible `␛[38;5;196m` is exactly
+      // what should be there — and what makes a sequence a sequence is the byte that introduces it.
+      assert!(
+        !out.contains("\u{1b}[38;5;196m"),
+        "{capability:?} wrote the injected sequence: {out:?}"
+      );
+      // Shown rather than swallowed: a reader has to be able to see what was in the file.
+      assert!(
+        out.contains('\u{241b}'),
+        "{capability:?} dropped the escape instead of showing it: {out:?}"
       );
     }
-    // At every level the 256-colour family the INPUT asked for must be absent, because no level was
-    // asked for it by the palette. Under `Ansi16` that is also the level's own promise, and under
-    // truecolour it is what proves the escape came from painty rather than from the text.
-    let families = escape_families(&out);
-    assert!(
-      !families.iter().any(|f| f == "38"),
-      "{capability:?} passed the input's own escape through: {families:?}"
-    );
-    // The ESC, not the text after it. Written the other way round this contradicted its own
-    // neighbour below — "shown rather than swallowed" means the visible `␛[38;5;196m` is exactly
-    // what should be there — and what makes a sequence a sequence is the byte that introduces it.
-    assert!(
-      !out.contains("\u{1b}[38;5;196m"),
-      "{capability:?} wrote the injected sequence: {out:?}"
-    );
-    // Shown rather than swallowed: a reader has to be able to see what was in the file.
-    assert!(
-      out.contains('\u{241b}'),
-      "{capability:?} dropped the escape instead of showing it: {out:?}"
-    );
   }
 }
 
@@ -1504,31 +1515,33 @@ fn no_control_character_at_all_survives_a_caller_string() {
     .with_labels(&labels)
     .with_help(&help);
 
-    let mut out = String::new();
-    Terminal::plain()
-      .render(
-        &diagnostic,
-        &[Input::new(Source::new(source)).with_origin(&origin)],
-        &mut out,
-      )
-      .expect("a String is writable");
+    for terminal in both(Terminal::plain()) {
+      let mut out = String::new();
+      terminal
+        .render(
+          &diagnostic,
+          &[Input::new(Source::new(source)).with_origin(&origin)],
+          &mut out,
+        )
+        .expect("a String is writable");
 
-    // LF is the one exception, and it is a limit of the observation rather than of the guarantee:
-    // painty ends every row with one, so a caller's own cannot be told apart from the frame's. The
-    // count below still pins it, because `␊` can only have come from the input.
-    if raw != '\n' {
-      assert!(
-        !out.contains(raw),
-        "U+{:04X} reached the terminal through a caller string: {out:?}",
-        raw as u32
+      // LF is the one exception, and it is a limit of the observation rather than of the guarantee:
+      // painty ends every row with one, so a caller's own cannot be told apart from the frame's. The
+      // count below still pins it, because `␊` can only have come from the input.
+      if raw != '\n' {
+        assert!(
+          !out.contains(raw),
+          "U+{:04X} reached the terminal through a caller string: {out:?}",
+          raw as u32
+        );
+      }
+      assert_eq!(
+        out.matches(picture).count(),
+        occurrences,
+        "U+{:04X} was shown on {} of the {occurrences} caller strings: {out:?}",
+        raw as u32,
+        out.matches(picture).count()
       );
     }
-    assert_eq!(
-      out.matches(picture).count(),
-      occurrences,
-      "U+{:04X} was shown on {} of the {occurrences} caller strings: {out:?}",
-      raw as u32,
-      out.matches(picture).count()
-    );
   }
 }
