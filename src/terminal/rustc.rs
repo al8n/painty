@@ -132,9 +132,9 @@ impl Presentation for Rustc {
     }
   }
 
-  /// A span opens with a `/` in its column when the row it opens on DRAWS the cell it opens at,
-  /// nothing else is drawn under that line, and nothing but blanks precedes it there — so it needs
-  /// no corner row and its start cell carries no marker.
+  /// A span opens with a `/` in its column when the row it opens on DRAWS the cell it opens at and
+  /// nothing but blanks precedes it there — so it needs no corner row and its start cell carries
+  /// no marker.
   ///
   /// [`Onset::drawn`] is the one a reader would not think to ask for, and it is the one whose
   /// absence made this wrong. Suppressing the marker is only a saving if the cell the marker would
@@ -142,8 +142,31 @@ impl Presentation for Rustc {
   /// [`max_rendered_width`](super::Terminal::max_rendered_width) CELLS, so an opening five
   /// thousand spaces into a line is out past the `…` and the compact form leaves the span with a
   /// `/` in the margin and nothing at all pointing into the row.
+  ///
+  /// # A third condition used to be here, and it was the residual
+  ///
+  /// It asked whether the span's opening was the ONLY thing marked on that line, on the reasoning
+  /// that a `/` in the margin is unambiguous when nothing else on the line is being pointed at.
+  /// Its cost was that adding an unrelated label to a line changed whether a DIFFERENT span's
+  /// opening cell was marked — so what a span pointed at was a function of the whole span set, and
+  /// the property this phase's gate needs could not be stated without an exception carved around
+  /// exactly this.
+  ///
+  /// Three things decided it. Planting its removal reddened **nothing**: not a golden, not the
+  /// placement property over every permutation of the whole bracketed corpus, not the compact-row
+  /// oracle. So it was a rule with no case behind it. The ambiguity it guarded against turns out
+  /// not to arise — the other mark gets a marker row of its own, and the `/` sits in the margin
+  /// where no marker ever goes, so the two do not compete for a reading. And a style abstraction
+  /// is exactly the moment this decision's INPUTS get looked at: the other style reads none of
+  /// them, and a fact that only one style consults, that no test covers, and that costs a property
+  /// is a fact to stop computing.
+  ///
+  /// What it costs: on a line carrying another label, the opening is now `/` in the margin instead
+  /// of an underscore run to the exact cell. One row shorter, and the column is still
+  /// recoverable — a `/` means the span begins at the line's first non-blank, which is what
+  /// [`Onset::blank`] is checking.
   fn opens_in_margin(&self, onset: Onset) -> bool {
-    onset.alone() && onset.drawn() && onset.blank()
+    onset.drawn() && onset.blank()
   }
 
   fn whole(

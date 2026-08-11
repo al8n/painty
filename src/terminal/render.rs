@@ -969,9 +969,9 @@ impl<'a> Plan<'a> {
     }
     anchors.sort_unstable_by_key(Line::number);
 
-    // Whether a multi-line span opens in the MARGIN or with a row of its own. The three facts are
-    // worked out here because they need the anchors and a measurement of a row that does not exist
-    // yet; which of them matters is the style's, and the two styles disagree about all three.
+    // Whether a multi-line span opens in the MARGIN or with a row of its own. Both facts are
+    // worked out here because one of them needs a measurement of a row that does not exist yet;
+    // which of them matters is the style's, and the two styles disagree about both.
     //
     // `drawn` is the one a reader would not think to ask for, and it is the one whose absence made
     // this wrong. Suppressing a marker is only a saving if the cell the marker would have gone on
@@ -981,7 +981,7 @@ impl<'a> Plan<'a> {
     // asked of `Measure::draws_the_start_of`, which is the same bounded walk that will place the
     // mark, and not of a second reckoning of what is visible.
     //
-    // `blank` used to be the third term of a short-circuited `&&` whose second term was `drawn`,
+    // `blank` used to be the last term of a short-circuited `&&` whose previous term was `drawn`,
     // and that ordering was the only thing bounding it — "is this indentation" is a scan over as
     // many bytes as a caller cares to indent with. Handing a style three FACTS means computing
     // three facts, so the scan carries the geometry walk's own byte budget now. It changes nothing
@@ -991,20 +991,13 @@ impl<'a> Plan<'a> {
       if placement.closing.is_none() {
         continue;
       }
-      let first = placement.opening.line().line().number();
-      let alone = anchors.partition_point(|line| line.number() <= first)
-        - anchors.partition_point(|line| line.number() < first)
-        == 1;
       let line = placement.opening.line().line();
       let covered = placement.opening.line().covered();
       let before = covered.start() - line.span().start();
       let blank = u64::try_from(before).is_ok_and(|bytes| bytes <= measure.budget.bytes)
         && line.text()[..before].chars().all(char::is_whitespace);
-      placement.compact = style.opens_in_margin(Onset::new(
-        alone,
-        measure.draws_the_start_of(line, covered),
-        blank,
-      ));
+      placement.compact =
+        style.opens_in_margin(Onset::new(measure.draws_the_start_of(line, covered), blank));
     }
     anchors.dedup_by_key(|line| line.number());
 

@@ -51,25 +51,24 @@ pub(super) enum Part {
 ///
 /// Facts, not a recommendation, and each independently true — which costs something the
 /// short-circuited conjunction this replaced did not pay. See [`Onset::blank`].
+///
+/// # Both facts are about the span and its own line, and that is the point
+///
+/// There was a third — whether the span's opening was the only thing marked on that line — and
+/// removing it is what makes `which_cells_are_marked_is_a_function_of_the_span_alone` statable in
+/// full. While it was here, adding an unrelated label to a line could change whether a DIFFERENT
+/// span's opening cell was marked: a property saying otherwise would have failed, and one written
+/// around it would have been the gate weakened to pass. See
+/// [`Rustc::opens_in_margin`](super::rustc::Rustc::opens_in_margin) for what dropping it cost.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Onset {
-  alone: bool,
   drawn: bool,
   blank: bool,
 }
 
 impl Onset {
-  pub(super) const fn new(alone: bool, drawn: bool, blank: bool) -> Self {
-    Self {
-      alone,
-      drawn,
-      blank,
-    }
-  }
-
-  /// Whether the span's own opening is the only thing marked on that line.
-  pub(super) const fn alone(&self) -> bool {
-    self.alone
+  pub(super) const fn new(drawn: bool, blank: bool) -> Self {
+    Self { drawn, blank }
   }
 
   /// Whether the row, as it will be drawn, shows the cell the span opens at.
@@ -84,10 +83,10 @@ impl Onset {
 
   /// Whether nothing but blanks precedes the span on that line.
   ///
-  /// **Bounded here rather than by the caller's `&&`.** This used to be the third term of a
-  /// short-circuited conjunction whose second term was [`drawn`](Self::drawn), and that ordering
+  /// **Bounded here rather than by the caller's `&&`.** This used to be the last term of a
+  /// short-circuited conjunction whose previous term was [`drawn`](Self::drawn), and that ordering
   /// was the only thing bounding it: "is this indentation" is a scan over as many bytes as a
-  /// caller cares to indent with. Handing a style three facts means computing three facts, so the
+  /// caller cares to indent with. Handing a style a set of FACTS means computing them all, so the
   /// scan is now bounded by the same byte budget the geometry walk spends. Nothing observable
   /// changes — an opening the row drew is inside that budget by construction — and the fact is
   /// true on its own instead of true given another one.

@@ -80,6 +80,7 @@ fn cases() -> Vec<Case> {
   const FRAGMENT: &str = "fragment F on Query {\n  a\n  b\n  c\n  d\n  e\n  f\n  g\n}\n";
   const NESTED: &str = "outer (\n  inner (\n    x\n  )\n)\n";
   const WIDE: &str = "\tlet x = \u{65e5}\u{672c};\n";
+  const SHARED: &str = "  identifier(\n    body\n  )\n";
 
   vec![
     Case {
@@ -382,6 +383,46 @@ warning[mylang::input::synthesized]: this document was generated, so it has no p
 mylang::input::synthesized
 
   ⚠ this document was generated, so it has no positions
+",
+    },
+    // What closing the compact form's residual looks like. The `/` in the margin used to be a
+    // corner row reaching to the opening cell, and which of the two a reader got depended on
+    // whether the line happened to carry another label — so this render is the one place the
+    // change is visible, and pinning it is what stops it drifting back.
+    Case {
+      why: "a multi-line span sharing its opening line with a label",
+      text: SHARED,
+      origin: None,
+      code: "mylang::type::arity",
+      severity: Severity::Error,
+      message: "this call takes one argument",
+      primary: Some(between(SHARED, "identifier", ")")),
+      primary_label: Some("this call"),
+      labels: vec![(first(SHARED, "identifier"), "declared with none")],
+      help: None,
+      rustc: "\
+error[mylang::type::arity]: this call takes one argument
+ --> 1:3
+  |
+1 | /   identifier(
+  | |   ---------- declared with none
+2 | |     body
+3 | |   )
+  | |___^ this call
+  |
+",
+      miette: "\
+mylang::type::arity
+
+  × this call takes one argument
+   ╭─[1:3]
+ 1 │ ┏   identifier(
+   · ┃   ─────┬────
+   · ┃        ╰── declared with none
+ 2 │ ┃     body
+ 3 │ ┣   )
+   · ┗━━━━ this call
+   ╰────
 ",
     },
   ]
