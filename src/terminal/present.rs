@@ -1,69 +1,119 @@
-//! The seam between the two styles, and nothing more than the seam.
+//! The seam between the styles, and nothing more than the seam.
 //!
 //! # This was derived, not designed
 //!
-//! Every method below exists because [`Rustc`](super::rustc::Rustc) and
-//! [`Miette`](super::miette::Miette) were both written out in full first and then differed there.
-//! Each carries the divergence that forced it. A method whose two implementations agreed is not a
-//! method: the margin's slots, the source text, the cell arithmetic, the elision mark and the
-//! whole of [`Plan`](super::render::Plan) came out identical and stayed in the renderer.
+//! Every method below exists because two implementations were written out in full first and then
+//! differed there. Each carries the divergence that forced it. A method whose implementations
+//! agreed is not a method: the margin's slots, the source text, the cell arithmetic and the whole
+//! of [`Plan`](super::render::Plan) came out identical and stayed in the renderer.
 //!
 //! That is the design's rule for this phase, and it is worth restating why. A trait written from
-//! three prose descriptions of three renderers would have fifteen methods, most of them
-//! unconsumed, and would be wrong in the places prose is vague — which is exactly where a
-//! renderer is not.
+//! prose descriptions of four renderers would have twenty methods, most of them unconsumed, and
+//! would be wrong in the places prose is vague — which is exactly where a renderer is not.
+//!
+//! ## What the third and fourth implementations did to it
+//!
+//! Eleven methods were derived from [`Rustc`](super::rustc::Rustc) and
+//! [`Miette`](super::miette::Miette). Two is not evidence that an abstraction is right — two can
+//! only fail to show it is wrong — so [`Ariadne`](super::ariadne::Ariadne) and
+//! [`Codespan`](super::codespan::Codespan) were added, one at a time, each written complete before
+//! anything here was touched.
+//!
+//! `Ariadne` moved it in four places, and every one is a sentence the first two had no way to say:
+//!
+//! - [`margin`](Presentation::margin), a method that did not exist. Where a multi-line span opens
+//!   is said ON the source row, by a run that leaves the bracket's column, crosses every column to
+//!   its right and ends in an arrow at the line. Both earlier styles leave the region between the
+//!   margin and the text a constant blank, so the renderer owned it. It cannot: its width and its
+//!   contents are a style's.
+//! - [`Part::Gap`], a variant. The row standing for elided lines used to be drawn by asking for
+//!   [`Part::Runs`], because the first two answered the two identically.
+//! - `first` on [`open_block`](Presentation::open_block). Two styles frame each BLOCK; that one
+//!   frames the whole RENDER, so a second input is introduced inside the frame rather than opening
+//!   one of its own.
+//! - [`close_render`](Presentation::close_render), a method, and [`Drawn`] at it and at
+//!   [`help`](Presentation::help). A style that frames each block closes it before the help; one
+//!   that frames the render has to close it after, because the help is a row inside.
+//!
+//! `Codespan` moved it **nowhere**. It is designed independently of the first two, it says
+//! something different from `Rustc` in eight of the thirteen methods, and the one capability it
+//! reaches for — [`Frame::columns`], so a corner's run can pass behind the bars it crosses — had
+//! arrived with `Ariadne`. That is the first evidence in this phase that the trait grew to the
+//! right size rather than to the size of the style that grew it.
+//!
+//! `annotate-snippets` was on the same list and is **not here**: its default character set is
+//! `Rustc`'s glyph for glyph, being the crate rustc's own emitter was extracted into. The evidence
+//! is tabulated in [`rustc`](super::rustc), and the rule is this phase's own — what has no
+//! divergence behind it does not get a file.
 //!
 //! # It is crate-private, and that is a decision
 //!
-//! Phase 3 is HTML, and it is the FOURTH example — the one the design says is most likely to
-//! collapse a trait fitted to terminals. So every method below was checked against it before this
-//! was frozen, and the answer is that **most of them do not survive**:
+//! Phase 3 is HTML, and it is the example the design says is most likely to collapse a trait
+//! fitted to terminals. Every method was checked against it before the first two styles were
+//! frozen, and the answer was that most did not survive. **Re-run against all thirteen, the
+//! verdict did not move — it hardened:**
 //!
 //! | method | can HTML answer it? |
 //! |---|---|
 //! | [`header`](Presentation::header) | yes |
-//! | [`open_block`](Presentation::open_block) | yes, ignoring `gutter` |
+//! | [`open_block`](Presentation::open_block) | yes, ignoring `gutter`; `first` is meaningful |
 //! | [`close_block`](Presentation::close_block) | yes, ignoring `gutter` |
 //! | [`help`](Presentation::help) | yes, ignoring `gutter` |
+//! | [`close_render`](Presentation::close_render) | yes |
 //! | [`opens_in_margin`](Presentation::opens_in_margin) | yes, but vacuously — see below |
 //! | [`line_field`](Presentation::line_field) | **no** |
+//! | [`margin`](Presentation::margin) | **no** |
 //! | [`elision_row`](Presentation::elision_row) | **no** |
 //! | [`bracket`](Presentation::bracket) | **no** |
 //! | [`whole`](Presentation::whole) | **no** |
 //! | [`opens`](Presentation::opens) | **no** |
 //! | [`closes`](Presentation::closes) | **no** |
 //!
-//! The six failures have ONE shape, which is what makes this a finding rather than a list.
-//! Everything that positions or draws a mark is denominated in **display cells** and in **`char`**:
-//! `whole` takes a `Range<u64>` of cells, `opens` and `closes` take a cell, `bracket` returns a
-//! character to stand in a cell, and `line_field` and `elision_row` pad to a cell width. HTML has
-//! no cell. Its mark is an element wrapped around the span's BYTES, its bracket is a border or a
-//! pseudo-element rather than a glyph, and its alignment is the browser's rather than something
-//! painted one column at a time. An HTML style could return `Some('│')` and pad with `&nbsp;`, but
-//! that is emulating a terminal in a medium that has real boxes.
+//! Seven of thirteen now, where it was six of eleven, and the failures still have ONE shape — which
+//! is what makes this a finding rather than a list. Everything that positions or draws a mark is
+//! denominated in **display cells** and in **`char`**: `whole` takes a `Range<u64>` of cells,
+//! `opens` and `closes` take a cell, `bracket` returns a character to stand in a cell, `margin`
+//! takes a connector COLUMN and writes a run of characters across the columns right of it, and
+//! `line_field` and `elision_row` pad to a cell width. HTML has no cell. Its mark is an element
+//! wrapped around the span's BYTES, its bracket is a border or a pseudo-element rather than a
+//! glyph, and its alignment is the browser's rather than something painted one column at a time.
+//! An HTML style could return `Some('│')` and pad with `&nbsp;`, but that is emulating a terminal
+//! in a medium that has real boxes.
 //!
-//! §4 of the design already draws that line — resolution reports *character* columns and the
+//! **The two new methods fell on opposite sides, and that is the useful part.** `margin` is the
+//! most cell-denominated method in the trait — it exists precisely to let a style draw ACROSS the
+//! columns — while `close_render` is pure document structure and an HTML style would answer it by
+//! closing an element. So the split the earlier verdict guessed at is now visible as a line through
+//! the middle of the trait: **six structure hooks** (`header`, `open_block`, `close_block`, `help`,
+//! `close_render`, `opens_in_margin`) that name what a region IS, and **seven geometry hooks** that
+//! name where a glyph GOES. Three implementations added since that verdict landed on both sides of
+//! it and did not blur it.
+//!
+//! §4 of the design already draws the same line — resolution reports *character* columns and the
 //! terminal converts to *display* columns — and this trait sits **below** the conversion, because
 //! [`Terminal::render`](super::Terminal::render) has already turned every span into cells before a
 //! style is called. So `Presentation` is a terminal trait by construction, and the honest reading
-//! of the two that pass on a technicality is worth stating too: three of the four ignore `gutter`,
+//! of the ones that pass on a technicality is worth stating too: four of the six ignore `gutter`,
 //! and `opens_in_margin` survives only because HTML's answer is a constant — its inputs are
 //! whether a CELL budget cut the row and whether the source is indented, and a browser never cuts
 //! a row.
 //!
-//! **So Phase 3 is a peer of [`Terminal`](super::Terminal), not an implementor of this.** What the
-//! two outputs share is [`Plan`](super::render::Plan) — which lines are drawn, where each span's
-//! ends fall, which bracket runs where, what is elided — and a plan is stated in lines and byte
-//! spans, which both media have. If a medium-independent version of this trait is ever wanted, the
-//! change it needs is already visible: hand a style a `RegionLine`, which carries the line and the
-//! byte span it covers, instead of a `Range<u64>` of cells, and a semantic bracket value instead of
-//! a `char`. That is a bigger claim than two terminal styles can support, which is why it is not
-//! being made here.
+//! **So Phase 3 is a peer of [`Terminal`](super::Terminal), not an implementor of this** — the
+//! same conclusion as before, now with four implementations behind it instead of two. What the
+//! outputs share is [`Plan`](super::render::Plan) — which lines are drawn, where each span's ends
+//! fall, which bracket runs where, what is elided — and a plan is stated in lines and byte spans,
+//! which every medium has. If a medium-independent version of this trait is ever wanted, the change
+//! it needs is still what it was, and the third style added one more to the list: hand a style a
+//! `RegionLine`, which carries the line and the byte span it covers, instead of a `Range<u64>` of
+//! cells; a semantic bracket value instead of a `char`; and, for `margin`, the SET of brackets a
+//! row shows instead of a run to be painted over cells.
 //!
 //! What a caller gets instead of a trait is the choice —
-//! [`Terminal::like_rustc`](super::Terminal::like_rustc) and
-//! [`Terminal::like_miette`](super::Terminal::like_miette) — which is the whole of what the design
-//! asked for, and which can grow into a public trait later without breaking anything.
+//! [`Terminal::like_rustc`](super::Terminal::like_rustc),
+//! [`like_miette`](super::Terminal::like_miette),
+//! [`like_ariadne`](super::Terminal::like_ariadne) and
+//! [`like_codespan`](super::Terminal::like_codespan) — which is the whole of what the design asked
+//! for, and which can grow into a public trait later without breaking anything.
 
 use core::{fmt, panic::RefUnwindSafe};
 

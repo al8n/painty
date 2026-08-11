@@ -3,6 +3,40 @@
 //! Named for the renderer whose shape it follows. It is not byte-compatible with `rustc`'s output
 //! and does not try to be; what it is is the arrangement a Rust reader already knows, which is why
 //! it is the default.
+//!
+//! # This is also the style `annotate-snippets` uses, and that is why there is no fourth file
+//!
+//! `annotate-snippets` was on the list of styles to add beside `ariadne` and `codespan-reporting`,
+//! and it is not here. It is the crate rustc's own emitter was extracted into, and its **default**
+//! character set (`DecorStyle::Ascii`, which is what `Renderer::plain()` and `Renderer::styled()`
+//! both start from) is this one glyph for glyph:
+//!
+//! | it calls it | it draws | this style draws |
+//! |---|---|---|
+//! | `file_start` | `--> ` | `--> ` |
+//! | `col_separator` | `\|` | `\|` |
+//! | `margin` (elided lines) | `...` | `...` |
+//! | `note_separator` | `= ` | `= ` |
+//! | `underline` / `label_start` | `^` primary, `-` secondary | the same pair |
+//! | `multiline_vertical` | `\|` | `\|` |
+//! | `multiline_horizontal` | `_` | `_` |
+//! | `multiline_whole_line` | `/` | `/` |
+//! | `multiline_end_same_line` | `^` primary, `-` secondary | the same pair |
+//!
+//! Its `DecorStyle::Unicode` is opt-in and is the **same arrangement re-glyphed** — `╭▸` for the
+//! location, `│` for the wall, `━━━` under the cells, `┏ ┃ ┗━━┛` around a multi-line span, `╰╴` to
+//! close. That is not a new layout, and three of those characters are
+//! [`Miette`](super::miette::Miette)'s heavy brackets already. So the choice was between a file
+//! that renders identically to this one and a file that renders as a blend of two that exist, and
+//! the rule this phase works to is that what has no divergence behind it does not get a file.
+//!
+//! **One thing it does that this style does not**, recorded because it is a gap here rather than a
+//! divergence there: a snippet from a *further* input is introduced with `::: ` instead of `--> `,
+//! which is rustc's own behaviour and reads as "and over here". This style writes `--> ` for every
+//! block. Closing that gap needs no trait change — [`open_block`](Presentation::open_block) is
+//! already told whether the block is the render's first, because
+//! [`Ariadne`](super::ariadne::Ariadne) needed it — so it is a change to this file and to its
+//! goldens, and it belongs to whoever wants it rather than to the style that was not added.
 
 use core::fmt;
 
