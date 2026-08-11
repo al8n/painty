@@ -100,7 +100,7 @@
 //!
 //! Miri answers one question — whether an execution path has undefined behaviour — and the answer
 //! is a property of the path rather than of how often it is walked. Everything here reads painty's
-//! source TEXT: `syn` parses the sixteen files in [`CRATE`] and the censuses walk the trees. None
+//! source TEXT: `syn` parses every file in [`CRATE`] and the censuses walk the trees. None
 //! of painty's own paths is exercised by that, so the interpreter has nothing to have an opinion
 //! about. The two tests that do call painty — [`the_pinned_widths_are_the_values_the_crate_produces`]
 //! and [`the_last_line_number_and_the_line_count_are_the_same_number`] — run a fourteen-byte source
@@ -140,7 +140,7 @@ use syn::{
 /// [`the_file_list_is_the_whole_crate`] walks `src/` and checks it. `src/tokora.rs` is here whether
 /// or not its feature is on: `include_str!` reads the disk, not the build, which is what keeps the
 /// adapter under the same censuses as everything else.
-const CRATE: [(&str, &str); 17] = [
+const CRATE: [(&str, &str); 20] = [
   ("src/lib.rs", include_str!("../src/lib.rs")),
   (
     "src/diagnostic/mod.rs",
@@ -179,8 +179,20 @@ const CRATE: [(&str, &str); 17] = [
     include_str!("../src/terminal/miette.rs"),
   ),
   (
+    "src/terminal/paint.rs",
+    include_str!("../src/terminal/paint.rs"),
+  ),
+  (
+    "src/terminal/present.rs",
+    include_str!("../src/terminal/present.rs"),
+  ),
+  (
     "src/terminal/render.rs",
     include_str!("../src/terminal/render.rs"),
+  ),
+  (
+    "src/terminal/rustc.rs",
+    include_str!("../src/terminal/rustc.rs"),
   ),
   (
     "src/terminal/mod.rs",
