@@ -444,6 +444,24 @@ impl<P: Palette> Terminal<P> {
     self
   }
 
+  /// The renderer drawn by a presentation the crate's own tests supply.
+  ///
+  /// **`#[cfg(test)]`, and that is the whole of its exposure**: it does not exist in a build a
+  /// caller can make, so it adds nothing to the public surface and cannot be reached by one.
+  ///
+  /// It is here because the thing worth asserting about this seam is not what a style DRAWS but
+  /// what the renderer HANDS it. Every property before this one read a style's output back and
+  /// inferred the state behind it, which is an oracle that can only see what a style happens to
+  /// put on the page — and a connector the renderer got wrong is invisible to a parser looking for
+  /// marks. A presentation that draws nothing and records its arguments asserts the contract
+  /// itself; see `what_a_style_is_handed_below_a_source_row_is_the_running_state`.
+  #[cfg(test)]
+  #[must_use]
+  pub(super) fn with_presentation(mut self, presentation: &'static dyn Presentation) -> Self {
+    self.presentation = presentation;
+    self
+  }
+
   /// Sets how much colour the output can carry — see [`ColorChoice::resolve`](super::ColorChoice).
   #[must_use]
   pub fn with_capability(mut self, capability: ColorCapability) -> Self {
@@ -748,31 +766,50 @@ impl<P: Palette> Terminal<P> {
         })?;
         paint.newline()?;
 
-        // Under the source row, a span that OPENS here is open from the row that says so onwards —
-        // which is whatever the style just drew in the margin, or the row it is about to write.
+        // ── The margin every row UNDER the source row is drawn against ──────────────────────────
+        //
+        // The source row is the last thing that shows a bracket's ends. Below it, an opening has
+        // opened and a closing has finished, so the only thing a connector column can truthfully
+        // say is that its bracket is still running — and every row under this one is drawn against
+        // that same state, whatever it says and in whatever order the marks arrive.
+        //
+        // **Rebuilt in one pass, before any mark hook can read it.** It used to be reached one mark
+        // at a time, as each hook returned: `Ends::Opens` set its own column to the running bar
+        // afterwards and `Ends::Closes` cleared its own column afterwards, which is the same
+        // destination by a route that passes through states no row should ever be drawn against.
+        // A hook drawn early was handed the columns of the marks that had not run yet — still
+        // holding the SOURCE row's opening and closing glyphs — so what a style drew in another
+        // span's column was a function of the CALLER's order.
+        //
+        // It shipped for as long as there were two styles because no test read a connector: the
+        // cross-style property parses marks and steps over the margin, and goldens pin one order.
+        // Both original styles were affected — `whole` writes the whole margin, so a label sharing
+        // a line with a multi-line opening drew that opening's glyph on its own row whenever the
+        // caller sent the label first. `a_row_below_a_source_row_shows_no_bracket_opening` and
+        // `the_caller_order_permutes_the_rows_under_a_line` are that case from the two directions,
+        // and `what_a_style_is_handed_below_a_source_row_is_the_running_state` asserts the state
+        // itself rather than a consequence of it.
+        //
+        // Which is why it is built HERE rather than tolerated in the styles. A style that coped
+        // with an unnormalised slice would be compensating for the renderer, and the next style
+        // would not know it had to.
+        fill(&mut margin, running, |connector| {
+          matches!(connector.part_on(number), Some(Part::Opens | Part::Runs))
+            .then(|| style.bracket(Part::Runs, connector.role, connector.compact))
+            .flatten()
+        });
+
+        let frame = Frame::new(gutter, block.depth, &margin);
         for mark in placed.iter() {
           let phrase = *mark.payload();
           let columns = never_empty(mark.columns());
-          let frame = Frame::new(gutter, block.depth, &margin);
           match phrase.ends {
             Ends::Whole => style.whole(&mut paint, frame, columns, phrase)?,
-            Ends::Opens => {
-              // Called for every opening, not only for the ones that need a row: whether one is
-              // needed is the style's own rule, and testing `compact` here would be this file
-              // holding half of it.
-              style.opens(&mut paint, frame, columns.start, phrase)?;
-              if let Some(column) = column_of(&mut margin, phrase.depth) {
-                *column = style
-                  .bracket(Part::Runs, phrase.role(), phrase.compact)
-                  .map(|glyph| (glyph, phrase.role()));
-              }
-            }
-            Ends::Closes => {
-              style.closes(&mut paint, frame, columns.end - 1, phrase)?;
-              if let Some(column) = column_of(&mut margin, phrase.depth) {
-                *column = None;
-              }
-            }
+            // Called for every opening, not only for the ones that need a row: whether one is
+            // needed is the style's own rule, and testing `compact` here would be this file
+            // holding half of it.
+            Ends::Opens => style.opens(&mut paint, frame, columns.start, phrase)?,
+            Ends::Closes => style.closes(&mut paint, frame, columns.end - 1, phrase)?,
           }
         }
       }
