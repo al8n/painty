@@ -1757,3 +1757,621 @@ fn slicing_a_line_at_the_budget_does_not_change_the_units_before_the_cut() {
     }
   }
 }
+
+// ── Multi-line spans ────────────────────────────────────────────────────────────────────────────
+//
+// What Phase 2's gate names — CJK, combining marks, tabs, CRLF, a span over the final byte with no
+// trailing newline — already had single-line coverage. What had none is any of them CROSSED with a
+// span that opens on one line and closes on another, which is where the two ends are measured
+// against DIFFERENT lines and a connector has to agree with both.
+
+/// One multi-line case, and the hazard it crosses the multi-line axis with.
+///
+/// The first span is the primary; the rest arrive as labels. They are permuted, so which one is
+/// primary is not a property of the case.
+struct Bracketed {
+  text: &'static str,
+  spans: Vec<Span>,
+  why: &'static str,
+}
+
+fn bracketed() -> Vec<Bracketed> {
+  let case = |text: &'static str, spans: &[Span], why: &'static str| Bracketed {
+    text,
+    spans: spans.to_vec(),
+    why,
+  };
+  vec![
+    case(
+      "query Hero {\n  hero {\n    name\n    friends\n  }\n}\n",
+      &[Span::new(15, 44)],
+      "a block whose opening line holds nothing before it, which is the compact form",
+    ),
+    case(
+      "let x = if a {\n  1\n} else {\n  2\n};\n",
+      &[Span::new(8, 33)],
+      "an opening with text before it, which needs a corner row of its own",
+    ),
+    case(
+      "let \u{65e5}\u{672c}\u{8a9e} =\n\tvalue;\n",
+      &[Span::new(6, 25)],
+      "opens INSIDE a CJK run and closes after a tab: two cells one end, a tab stop the other",
+    ),
+    case(
+      "alpha\r\nbeta\r\ngamma\r\n",
+      &[Span::new(2, 15)],
+      "crosses CRLF boundaries, where a line break is two bytes and no column",
+    ),
+    case(
+      "a\u{301}bc\ndef\n",
+      &[Span::new(1, 8)],
+      "opens inside a combining sequence, so the opening widens back to its base",
+    ),
+    case(
+      "alpha\nbeta",
+      &[Span::new(3, 10)],
+      "closes on the final byte of a source with no trailing newline",
+    ),
+    case(
+      "aaa\nbbb\nccc\n",
+      &[Span::new(0, 8)],
+      "swallows its own trailing newline, so it ENDS on a line it is not drawn on",
+    ),
+    case(
+      "aaa\n\nccc\n",
+      &[Span::new(0, 5)],
+      "closes on an empty line, where the covered range is empty and the caret is still a caret",
+    ),
+    case(
+      "outer (\n  inner (\n    x\n  )\n)\n",
+      &[Span::new(6, 29), Span::new(10, 26)],
+      "two multi-line spans open at once, which is what needs a second column",
+    ),
+    case(
+      "a (\n b\n)\nc (\n d\n)\n",
+      &[Span::new(2, 8), Span::new(11, 17)],
+      "two multi-line spans that do NOT overlap, which need only one column between them",
+    ),
+    case(
+      "start {\n a\n b\n c\n d\n e\n f\n g\n h\n i\n j\n}\nend\n",
+      &[Span::new(6, 39)],
+      "long enough that the middle is elided, which is what bounds the rows",
+    ),
+    case(
+      "q {\n  a\n  b\n  c\n}\n",
+      &[Span::new(2, 17), Span::new(10, 11)],
+      "a single-line label INSIDE a multi-line span, whose row carries the connector too",
+    ),
+    case(
+      "one\ntwo\nthree\nfour\nfive\n",
+      &[Span::new(4, 18), Span::new(0, 3)],
+      "a single-line label ABOVE one, so the caller's order and the source order disagree",
+    ),
+    case(
+      "a {\n\tb\n\tc\n}\n",
+      &[Span::new(2, 11)],
+      "tabs inside the bracketed lines, where a cell is not a character",
+    ),
+  ]
+}
+
+/// The tab width every multi-line case is measured at.
+const BRACKETED_TAB: u64 = 4;
+
+fn render_spans(text: &str, spans: &[Span]) -> String {
+  let labels: Vec<Label<'_>> = spans[1..]
+    .iter()
+    .map(|span| Label::new(Location::new(0, *span), "there"))
+    .collect();
+  let message = "a message";
+  let diagnostic = diagnose(Location::new(0, spans[0]), &labels, &message);
+  let mut out = String::new();
+  Terminal::plain()
+    .with_tab_width(BRACKETED_TAB)
+    .render(&diagnostic, &[Input::new(Source::new(text))], &mut out)
+    .expect("a String never fails to be written to");
+  out
+}
+
+/// Every ordering of `count` positions, so that "the caller's order" is not one arrangement the
+/// renderer happens to be right about.
+fn orderings(count: usize) -> Vec<Vec<usize>> {
+  let mut all = vec![Vec::new()];
+  for _ in 0..count {
+    let mut next = Vec::new();
+    for order in &all {
+      for candidate in 0..count {
+        if !order.contains(&candidate) {
+          let mut grown = order.clone();
+          grown.push(candidate);
+          next.push(grown);
+        }
+      }
+    }
+    all = next;
+  }
+  all
+}
+
+/// The line a rendered row is about, and where the source text starts in it.
+///
+/// Read out of the row rather than computed from a gutter width and a connector count, because
+/// those are precisely what a layout defect moves. The line is expanded by `LineCells` and matched
+/// as the row's suffix, so the offset is whatever the renderer actually put in front of it.
+fn source_row(row: &str, source: Source<'_>) -> Option<(u64, usize, usize)> {
+  let characters: Vec<char> = row.chars().collect();
+  let indent = characters.iter().take_while(|c| **c == ' ').count();
+  let digits: String = characters[indent..]
+    .iter()
+    .take_while(|c| c.is_ascii_digit())
+    .copied()
+    .collect();
+  if digits.is_empty() {
+    return None;
+  }
+  let after: String = characters[indent + digits.len()..]
+    .iter()
+    .take(3)
+    .copied()
+    .collect();
+  if after != " | " {
+    return None;
+  }
+  let number: u64 = digits.parse().expect("a rendered line number is a number");
+  let line = source
+    .line(number)
+    .expect("a rendered line number names a line of the input");
+  let mut expanded = String::new();
+  LineCells::new(line, BRACKETED_TAB)
+    .write_expanded(&mut expanded)
+    .expect("a String never fails to be written to");
+  assert!(
+    row.ends_with(&expanded),
+    "the row for line {number} does not end with the line it claims to show:\n{row:?}\n{expanded:?}"
+  );
+  Some((
+    number,
+    indent + digits.len() + 1,
+    characters.len() - expanded.chars().count(),
+  ))
+}
+
+/// Every cell the rendered output marks, as `(line, display column)`.
+///
+/// Underscores and bars are connectors and are deliberately not counted: what a bracket asserts is
+/// that its two ENDS are where they are, and the run between them is how a reader gets from one to
+/// the other.
+fn marked(rendered: &str, source: Source<'_>) -> Vec<(u64, u64)> {
+  let mut cells = Vec::new();
+  let mut about = None;
+  for row in rendered.lines() {
+    if let Some(found) = source_row(row, source) {
+      about = Some(found);
+      continue;
+    }
+    let Some((number, bar, code)) = about else {
+      continue;
+    };
+    let characters: Vec<char> = row.chars().collect();
+    // An under-row carries the gutter's bar in the gutter's column and nothing before it. The
+    // header, the `= help` line and the `...` of an elision all fail that and are skipped.
+    if characters.get(bar) != Some(&'|') || characters[..bar].iter().any(|c| *c != ' ') {
+      continue;
+    }
+    let Some(start) = characters
+      .iter()
+      .skip(code)
+      .position(|c| *c == '^' || *c == '-')
+    else {
+      continue;
+    };
+    let from = code + start;
+    let run = characters[from..]
+      .iter()
+      .take_while(|c| **c == '^' || **c == '-')
+      .count();
+    for step in 0..run {
+      cells.push((
+        number,
+        u64::try_from(from + step - code + 1).expect("a column"),
+      ));
+    }
+  }
+  cells.sort_unstable();
+  cells
+}
+
+/// Whether a span's opening is announced by a `/` in the margin instead of by a marker of its own.
+///
+/// The renderer's rule restated from the spec rather than read back off the renderer: a multi-line
+/// span whose opening line carries no other mark and holds nothing but blanks before it opens with
+/// a `/` and no corner row, so its start cell is not marked. What that costs a reader is which
+/// column INSIDE THE INDENTATION the span begins at, and what it buys is a row.
+///
+/// The renderer has a THIRD condition that this deliberately does not restate: the row must draw
+/// the cell the span opens at, or the `/` would stand in for a marker that was never on the page.
+/// It is left out because the corpus cannot reach it — every case here is asserted to render
+/// without a `…`, so every opening in it is drawn, and a condition that is constantly true would
+/// only be an untested branch of the oracle. The cases that DO reach it are
+/// `an_opening_the_row_does_not_draw_is_marked_rather_than_compacted` and its pair, which read the
+/// rows by index for exactly that reason.
+fn opens_compactly(source: Source<'_>, spans: &[Span], span: Span) -> bool {
+  let region = source.resolve(span);
+  if !region.is_multiline() {
+    return false;
+  }
+  let first = region.start().line();
+  let marks = spans
+    .iter()
+    .map(|other| {
+      let other = source.resolve(*other);
+      let opens = usize::from(other.start().line() == first);
+      let closes =
+        usize::from(other.is_multiline() && other.start().line() + other.line_count() - 1 == first);
+      opens + closes
+    })
+    .sum::<usize>();
+  if marks != 1 {
+    return false;
+  }
+  let drawn = region.lines().next().expect("a region covers a line");
+  let line = drawn.line();
+  let before = drawn.covered().start() - line.span().start();
+  line.text()[..before].chars().all(char::is_whitespace)
+}
+
+/// Which cells a set of spans ASKS to have marked.
+///
+/// Layer 2 decides the lines and the ends; [`Terminal::underline`] decides the cells, and it is the
+/// public entry the hand-written `PLACEMENTS` table already holds to the cell grid. The two
+/// dimensions are separated on purpose: what this oracle must not share with the renderer is how
+/// rows and ends are ASSIGNED, and that comes from `Region::lines` rather than from the walk the
+/// renderer uses — which `walking_a_set_of_spans_answers_what_resolving_each_one_does` holds it to.
+fn asked_for(source: Source<'_>, spans: &[Span]) -> Vec<(u64, u64)> {
+  let terminal = Terminal::plain().with_tab_width(BRACKETED_TAB);
+  let mut cells = Vec::new();
+  for span in spans {
+    let region = source.resolve(*span);
+    let drawn: Vec<_> = region.lines().collect();
+    let first = *drawn.first().expect("a region covers at least one line");
+    let last = *drawn.last().expect("a region covers at least one line");
+    if drawn.len() == 1 {
+      for column in terminal.underline(first) {
+        cells.push((first.line().number(), column));
+      }
+    } else {
+      // Two ends, and only two: a bracket says where a span starts and where it stops, and the
+      // lines between are shown rather than marked.
+      if !opens_compactly(source, spans, *span) {
+        cells.push((first.line().number(), terminal.underline(first).start));
+      }
+      cells.push((last.line().number(), terminal.underline(last).end - 1));
+    }
+  }
+  cells.sort_unstable();
+  cells
+}
+
+#[test]
+fn which_cells_are_marked_does_not_depend_on_how_the_rows_were_assigned() {
+  // The property goldens cannot state. A golden pins one arrangement of rows; this pins that the
+  // arrangement is not what decides WHAT is pointed at — the same spans mark the same cells of the
+  // same lines however the rows came out, and those cells are the ones layer 2 asked for.
+  //
+  // Two failure directions, and it is worth naming them because a weaker version of this test would
+  // catch only the second. Against the oracle, it catches a bracket that closes on the wrong line
+  // or marks the wrong end of it — including the shape this feature replaced, where a multi-line
+  // span was drawn on its first line and nowhere else. Against the permutations, it catches an
+  // arrangement that is right only for the order the case was written in.
+  for case in bracketed() {
+    let source = Source::new(case.text);
+    let oracle = asked_for(source, &case.spans);
+    for order in orderings(case.spans.len()) {
+      let spans: Vec<Span> = order.iter().map(|index| case.spans[*index]).collect();
+      let rendered = render_spans(case.text, &spans);
+      assert!(
+        !rendered.contains('\u{2026}'),
+        "{:?}: a case elided its source, so the parse below is not exact\n{rendered}",
+        case.text
+      );
+      assert_eq!(
+        marked(&rendered, source),
+        oracle,
+        "{:?} in caller order {order:?}: {}\n{rendered}",
+        case.text,
+        case.why
+      );
+      // And the one opening that has no marker still says which line it is on, because the `/`
+      // that stands in for it is on that line's own row. Both directions: every compact opening
+      // has one, and no other row does.
+      assert_eq!(
+        compact_rows(&rendered, source),
+        spans
+          .iter()
+          .filter(|span| opens_compactly(source, &spans, **span))
+          .map(|span| source.resolve(*span).start().line())
+          .collect::<Vec<_>>(),
+        "{:?} in caller order {order:?}: {}\n{rendered}",
+        case.text,
+        case.why
+      );
+    }
+  }
+}
+
+/// The lines whose source row opens a span with a `/`.
+fn compact_rows(rendered: &str, source: Source<'_>) -> Vec<u64> {
+  let mut found = Vec::new();
+  for row in rendered.lines() {
+    let Some((number, bar, code)) = source_row(row, source) else {
+      continue;
+    };
+    let characters: Vec<char> = row.chars().collect();
+    for _ in characters[bar + 2..code].iter().filter(|c| **c == '/') {
+      found.push(number);
+    }
+  }
+  found.sort_unstable();
+  found
+}
+
+// ── An opening the row does not draw ────────────────────────────────────────────────────────────
+//
+// The corpus above is read back with `source_row`, which finds a row's geometry by matching the
+// whole expanded line as the row's suffix — so it can only describe a row that shows all of its
+// line, and `which_cells_are_marked_does_not_depend_on_how_the_rows_were_assigned` asserts outright
+// that no case elided. That is the right premise for what it pins and it is why the corpus cannot
+// reach these cases: the whole subject here is a row the CELL budget cut.
+//
+// Read by index into the row instead. Every row of a block shares one prefix, so a character index
+// is the alignment a reader checks — a caret is under the thing it points at exactly when the two
+// indices agree.
+
+/// What every row of the fixtures below carries before its source text: line 1, the gutter's bar,
+/// one blank connector column, and the blank that separates it from the source. Its length is
+/// therefore the character index of display column 1.
+///
+/// A literal rather than a measurement, because measuring it is what these fixtures deny: the row
+/// does not show its line, so nothing here can be located by matching what the row was meant to
+/// show. Each case asserts the row begins with it, which is what stops a change in the geometry
+/// quietly re-basing every index below.
+const FIELD: &str = "1 |   ";
+
+/// A prefix long enough that the row drawn for it stops before it ends, and what it is made of.
+///
+/// Both overrun [`Terminal::max_rendered_width`] in CELLS while staying well inside
+/// [`Terminal::max_source_bytes`], which is the gap the defect lived in: the compact decision asked
+/// the byte budget whether the opening could be read and drew its conclusion about a row that the
+/// cell budget had already cut.
+fn overrunning_prefixes() -> Vec<(String, &'static str)> {
+  vec![
+    (
+      " ".repeat(5_000),
+      "five thousand spaces, which is five thousand cells and five thousand bytes",
+    ),
+    (
+      "\t".repeat(2_000),
+      "two thousand tabs, which is eight thousand cells for two thousand bytes — the amplification \
+       a byte budget cannot see",
+    ),
+  ]
+}
+
+/// The row that shows line 1, and the character index of every marker drawn under it.
+fn opening_row(rendered: &str) -> (String, Vec<usize>) {
+  let mut rows = rendered.lines();
+  let source = rows
+    .by_ref()
+    .find(|row| row.starts_with("1 | "))
+    .expect("line 1 was drawn")
+    .to_owned();
+  let mut markers = Vec::new();
+  for row in rows {
+    // An under-row carries the gutter's bar and a blank after it. The next source row, the closing
+    // bar and the `= help` line all fail that, and each of them ends what is under line 1.
+    if !row.starts_with("  | ") {
+      break;
+    }
+    if let Some(at) = row.chars().position(|c| c == '^' || c == '-') {
+      markers.push(at);
+    }
+  }
+  markers.sort_unstable();
+  (source, markers)
+}
+
+#[test]
+fn an_opening_the_row_does_not_draw_is_marked_rather_than_compacted() {
+  // The compact opening trades a span's start MARKER for a `/` in the margin, and that trade is
+  // only a saving when the cell the marker would have gone on is on the page. Behind a prefix wider
+  // than the row, it is not: the reader is left with a `/` and nothing at all pointing into the
+  // row, for a span whose opening the renderer never drew.
+  //
+  // Both halves of the defect are pinned, and the second is why each prefix is rendered twice. The
+  // suppression was decided by `alone` — one anchor on the line — so an unrelated label on that
+  // same line turned it off and the span suddenly acquired a start marker at the elision cell. The
+  // marked set moved for a reason that is not about either span's endpoints. Here the pair must
+  // agree: the unrelated label adds its own cell and moves nothing.
+  for (prefix, why) in overrunning_prefixes() {
+    let text = format!("{prefix}open\nclose\n");
+    let opens = Span::new(
+      prefix.len(),
+      text.find("close").expect("closes") + "close".len(),
+    );
+    // Inside the indentation, so it is a mark on line 1 and nothing else: what it exists to do is
+    // make `alone` false.
+    let unrelated = Span::new(0, 1);
+
+    let mut rows = Vec::new();
+    for spans in [vec![opens], vec![opens, unrelated]] {
+      let shared = spans.len() > 1;
+      let rendered = render_spans(&text, &spans);
+      let (source, markers) = opening_row(&rendered);
+      let ellipsis = source
+        .chars()
+        .position(|c| c == '\u{2026}')
+        .unwrap_or_else(|| panic!("the premise: the row for {why} was not cut"));
+      assert!(
+        source.starts_with(FIELD),
+        "the opening was compacted onto a row that stops at {ellipsis}, or the geometry moved: \
+         {why}"
+      );
+      // The marker is under the `…`, which is where the rest of the line went and so is where a
+      // reader is told to look for the opening.
+      assert_eq!(
+        markers,
+        if shared {
+          vec![FIELD.len(), ellipsis]
+        } else {
+          vec![ellipsis]
+        },
+        "{why}, {}an unrelated label",
+        if shared { "with " } else { "without " }
+      );
+      rows.push((source.len(), ellipsis));
+    }
+    // Not the assertion above restated: that one holds each render to the cell the span resolves
+    // to, this one holds the ROW steady, so the pair cannot agree by both having moved.
+    assert_eq!(rows[0], rows[1], "the row itself moved: {why}");
+  }
+}
+
+#[test]
+fn an_opening_the_row_does_draw_still_opens_compactly_on_a_cut_row() {
+  // The other direction, and what makes the gate above a discrimination rather than a switch that
+  // turns the compact form off whenever a row is cut. This row IS cut — the line runs far past the
+  // ceiling — but the span opens two cells in, where the row draws it, so nothing about the opening
+  // is out past the `…` and the `/` still says everything a corner row would.
+  let text = format!("  {}\nclose\n", "x".repeat(10_000));
+  let opens = Span::new(2, text.find("close").expect("closes") + "close".len());
+
+  let rendered = render_spans(&text, &[opens]);
+  let (source, markers) = opening_row(&rendered);
+  assert!(
+    source.contains('\u{2026}'),
+    "the premise: the row was not cut"
+  );
+  assert!(
+    source.starts_with("1 | / "),
+    "the opening is drawn on this row, so it still needs no row of its own"
+  );
+  assert_eq!(
+    markers,
+    Vec::<usize>::new(),
+    "a compact opening carries no marker, and the closing is on another line"
+  );
+}
+
+#[test]
+fn every_span_open_on_a_row_has_a_connector_column_to_itself() {
+  // The other half of row assignment, and the half the cells above are blind to. Two spans open at
+  // once in ONE column draw one bar where a reader has to see two, and every cell they mark is
+  // still in the right place — so this is asserted on the MARGIN rather than on the markers.
+  //
+  // Counted against layer 2: a span contributes a bar to the source row of every line it covers
+  // after the one it opens on. An opening contributes none, because what opens it is the corner
+  // below it or the `/` that stands in for one, and neither is a bar.
+  for case in bracketed() {
+    let source = Source::new(case.text);
+    let running: Vec<(u64, u64)> = case
+      .spans
+      .iter()
+      .filter_map(|span| {
+        let region = source.resolve(*span);
+        region.is_multiline().then(|| {
+          (
+            region.start().line(),
+            region.start().line() + region.line_count() - 1,
+          )
+        })
+      })
+      .collect();
+
+    let rendered = render_spans(case.text, &case.spans);
+    for row in rendered.lines() {
+      let Some((number, bar, code)) = source_row(row, source) else {
+        continue;
+      };
+      let characters: Vec<char> = row.chars().collect();
+      let bars = characters[bar + 2..code]
+        .iter()
+        .filter(|c| **c == '|')
+        .count();
+      let open = running
+        .iter()
+        .filter(|(first, last)| *first < number && number <= *last)
+        .count();
+      assert_eq!(
+        bars, open,
+        "{:?} line {number}: {}\n{rendered}",
+        case.text, case.why
+      );
+    }
+  }
+}
+
+#[test]
+fn the_lines_of_one_input_are_drawn_in_source_order() {
+  // Not a taste, and not the order the caller gave: a connector runs down a contiguous run of rows,
+  // so a row between a span's two ends has to BE a line that span covers. Caller order gives no
+  // such guarantee — it would draw line 9 above line 2 and run a bracket upwards through it — so it
+  // keeps the jobs it can still do: which input leads, what the `-->` points at, and the order of
+  // the marker rows under one line.
+  for case in bracketed() {
+    let source = Source::new(case.text);
+    for order in orderings(case.spans.len()) {
+      let spans: Vec<Span> = order.iter().map(|index| case.spans[*index]).collect();
+      let rendered = render_spans(case.text, &spans);
+      let mut previous = 0;
+      for row in rendered.lines() {
+        if let Some((number, _, _)) = source_row(row, source) {
+          assert!(
+            number > previous,
+            "{:?} in caller order {order:?}: line {number} came after {previous}\n{rendered}",
+            case.text
+          );
+          previous = number;
+        }
+      }
+    }
+  }
+}
+
+#[test]
+fn a_bracket_costs_the_same_rows_however_many_lines_it_covers() {
+  // The product this feature introduces, and the answer to it.
+  //
+  // A row costs a bounded walk — `max_source_bytes` — so a renderer drawing every line a span
+  // touches would be pricing a bounded per-row cost against an UNBOUNDED row count, and a budget on
+  // one factor of a product bounds nothing. The rows are bounded instead: an opening, a closing, at
+  // most three lines after the opening, and one `...` for the rest. Nothing here is a new budget,
+  // because the count is now a function of the LABEL count, which the marker rows already were.
+  //
+  // Asserted as an equality across three orders of magnitude rather than as a ceiling, because a
+  // ceiling generous enough to hold is a ceiling a linear growth fits under.
+  let mut rows = None;
+  let mut bytes = None;
+  for lines in [8u64, 64, 512] {
+    let text = format!("open\n{}close\n", "x\n".repeat(lines as usize));
+    let span = Span::new(0, text.len());
+    let rendered = render_spans(&text, &[span]);
+    let counted = rendered.lines().count();
+    assert_eq!(
+      *rows.get_or_insert(counted),
+      counted,
+      "a span over {lines} lines drew a different number of rows\n{rendered}"
+    );
+    // And the same in bytes, up to the gutter widening — which is the only thing here that may
+    // grow, and grows as the logarithm.
+    let length = rendered.len();
+    let previous = *bytes.get_or_insert(length);
+    assert!(
+      length < previous + 64,
+      "a span over {lines} lines rendered {length} bytes where {previous} was enough\n{rendered}"
+    );
+  }
+  assert!(
+    rows.expect("three sizes were measured") < 16,
+    "a bracketed span costs {rows:?} rows, which is not a bound anybody would call one"
+  );
+}

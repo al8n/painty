@@ -322,6 +322,10 @@ impl<'a> LineCells<'a> {
 
     let stop = drawn + 1;
     for mark in marks.iter_mut() {
+      // Recorded BEFORE the elision mark is handed out below, because that is the last moment the
+      // two are distinguishable: past it a mark that reached no cell of the source carries the same
+      // column as one that starts on the last drawn cell and runs out past it.
+      mark.in_window = !elided || mark.first.is_some();
       // A span running past the drawn text reaches the elision mark, so it is drawn over it: that
       // is what tells a reader the span continues out there. Without this the underline would stop
       // at the last drawn cell and claim the span ended with the row.
@@ -466,6 +470,9 @@ pub(crate) struct Mark<T> {
   /// What [`LineCells::column_at`] would answer for the start, for a mark that touches no drawn
   /// unit at all.
   anchor: Option<u64>,
+  /// Whether the cell the mark STARTS at is one the row drew. Set by
+  /// [`LineCells::place_marks`] — see [`starts_in_window`](Self::starts_in_window).
+  in_window: bool,
   /// What the walk settled on. Empty at column zero — a column no line has — until it has run.
   columns: core::ops::Range<u64>,
   payload: T,
@@ -481,6 +488,7 @@ impl<T> Mark<T> {
       first: None,
       last: None,
       anchor: None,
+      in_window: false,
       columns: 0..0,
       payload,
     }
@@ -496,6 +504,26 @@ impl<T> Mark<T> {
   #[inline]
   pub(crate) fn columns(&self) -> core::ops::Range<u64> {
     self.columns.clone()
+  }
+
+  /// Returns whether the cell this mark starts at is one the row DREW, rather than the elision mark
+  /// standing where the rest of the line would have been.
+  ///
+  /// [`columns`](Self::columns) cannot answer this and is not a weaker version of it: a mark past
+  /// the cut and a mark that starts on the last drawn cell and runs out past it are given
+  /// overlapping columns on purpose, because both are drawn over the `…`. This says which of the
+  /// two happened, and only the walk that placed them knows.
+  ///
+  /// True of every mark on a row the budget did not cut — including the never-empty caret one past
+  /// the last cell, which is where an empty span at the end of a line belongs.
+  ///
+  /// Why the renderer needs it: a decision about whether a reader can SEE a mark is a decision
+  /// about the drawn row, and [`Budget`] has two numbers because the row is bounded in cells while
+  /// the walk is bounded in bytes. Anything asking that question off the byte budget is asking
+  /// about a row that may have been cut somewhere else entirely.
+  #[inline]
+  pub(crate) const fn starts_in_window(&self) -> bool {
+    self.in_window
   }
 }
 

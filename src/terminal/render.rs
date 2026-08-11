@@ -1,11 +1,14 @@
-use core::fmt;
+use core::{cmp::Reverse, fmt};
+
+use std::collections::BinaryHeap;
 
 use super::{
   ColorCapability, LineCells,
   width::{Budget, Mark, Row, control_picture},
 };
 use crate::{
-  Color, Diagnostic, Line, Palette, RegionLine, Role, Source, Span, Style, Theme, source::Walk,
+  Color, Diagnostic, Line, Palette, RegionLine, Role, Source, Span, Style, Theme,
+  source::{Opening, Walk},
 };
 
 /// One of the caller's inputs: its text, and whatever the caller calls it.
@@ -72,34 +75,149 @@ struct Drawable<'a> {
   primary: bool,
 }
 
+/// Which part of a span one mark draws.
+///
+/// A span drawn on one line is marked over the whole of what it covers there. A span drawn on more
+/// than one is marked at its two ENDS and joined between them, so each end is a mark of its own on
+/// a different line and the two are the same span — which is why this is a property of the mark
+/// rather than of the row it lands in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Ends {
+  /// The whole of a span that is drawn on one line.
+  Whole,
+  /// Where a span that reaches a later line begins.
+  Opens,
+  /// Where it finishes, and where its label is said.
+  Closes,
+}
+
 /// What one marker row says, and where the position under it starts.
 #[derive(Debug, Clone, Copy)]
 struct Phrase<'a> {
   text: Option<&'a str>,
   primary: bool,
-  /// The 1-based CHARACTER column the position begins at, which is what the `-->` line reports for
-  /// the first position of each input. Read off the resolve that found the line rather than
-  /// measured again: layer 2 computed it on the way past, and it is the same number
-  /// [`Position::column`](crate::Position::column) hands any other consumer.
-  column: u64,
   /// Where this was in the caller's order.
   at: usize,
+  /// The line the mark is drawn under. Carried rather than paired up outside, because the marks of
+  /// a whole render are one flat run and an excerpt takes its slice of them by walking it.
+  line: u64,
+  ends: Ends,
+  /// The connector column the span was given, counting from 1, or zero for a span that needs none.
+  depth: u64,
+  /// Opens with a `/` in the margin rather than with an underscore run of its own.
+  compact: bool,
+}
+
+impl Phrase<'_> {
+  /// The style everything this mark draws is written in — the marker, the label, and the connector
+  /// that joins them.
+  const fn role(&self) -> Role {
+    if self.primary {
+      Role::PrimaryLabel
+    } else {
+      Role::SecondaryLabel
+    }
+  }
+
+  /// The character a reader already knows: a caret for the position the diagnostic is about, a dash
+  /// for one it is only mentioning.
+  const fn marker(&self) -> char {
+    if self.primary { '^' } else { '-' }
+  }
 }
 
 /// One source line, and every mark that will be drawn under it.
 ///
 /// `marks` indexes one flat run rather than owning a `Vec` of its own: the marker rows of a whole
 /// render are a single allocation, and an excerpt names its slice of them.
+///
+/// It may name none. A line between a multi-line span's ends carries no mark and is drawn anyway,
+/// because a bracket down the margin of lines a reader cannot see says nothing.
 #[derive(Debug, Clone)]
 struct Excerpt<'a> {
-  input: usize,
-  origin: Option<&'a str>,
   line: Line<'a>,
-  /// The earliest caller position on this line, which is where the line sits within its input.
-  at: usize,
-  /// The earliest caller position anywhere in this input, which is where the input sits.
-  input_at: usize,
   marks: core::ops::Range<usize>,
+  /// The line before this one in the same input, when lines were left out between them and a `...`
+  /// row stands in for what is missing.
+  after: Option<u64>,
+}
+
+/// One multi-line span's connector: the rows it runs down, the column it runs in, and how it starts.
+#[derive(Debug, Clone, Copy)]
+struct Connector {
+  first: u64,
+  last: u64,
+  /// Counting from 1. Two spans open at the same row never share one — see [`Plan::block`].
+  depth: u64,
+  role: Role,
+  /// Drawn as `/` on the source row itself, rather than as an underscore run below it.
+  compact: bool,
+}
+
+impl Connector {
+  /// What stands in this connector's column on the source row of `line`.
+  const fn on_source_row(&self, line: u64) -> Option<char> {
+    if line < self.first || line > self.last {
+      None
+    } else if line == self.first {
+      // The span has not opened yet on its own source row: what opens it is either the `/` here or
+      // the underscore run on the row below, and those are the same decision.
+      if self.compact { Some('/') } else { None }
+    } else {
+      Some('|')
+    }
+  }
+
+  /// Whether the connector runs through the lines left out between `above` and `below`.
+  ///
+  /// A span's ends are both drawn, so neither can be inside a gap — which is what makes this a
+  /// comparison against the two lines that bound it rather than against the lines it hides.
+  const fn spans_the_gap(&self, above: u64, below: u64) -> bool {
+    self.first <= above && self.last >= below
+  }
+}
+
+/// One input's whole block: what the `-->` line says, and the geometry every row under it shares.
+#[derive(Debug, Clone)]
+struct Block<'a> {
+  origin: Option<&'a str>,
+  /// Where the input's earliest caller position is, in the units the `-->` line reports.
+  line: u64,
+  column: u64,
+  /// The earliest caller position anywhere in this input, which is where the input sits among the
+  /// others.
+  at: usize,
+  /// How many connector columns this input's multi-line spans need, and zero when it has none —
+  /// which is what keeps an input without them flush against the gutter.
+  depth: u64,
+  excerpts: core::ops::Range<usize>,
+  connectors: core::ops::Range<usize>,
+}
+
+/// Where a span is drawn, before the lines are gathered into excerpts.
+#[derive(Debug, Clone, Copy)]
+struct Placement<'a> {
+  at: usize,
+  text: Option<&'a str>,
+  primary: bool,
+  opening: Opening<'a>,
+  /// The last line the span is drawn on, for a span drawn on more than one.
+  closing: Option<RegionLine<'a>>,
+  depth: u64,
+  compact: bool,
+}
+
+impl Placement<'_> {
+  const fn first(&self) -> u64 {
+    self.opening.line().line().number()
+  }
+
+  fn last(&self) -> u64 {
+    match self.closing {
+      Some(closing) => closing.line().number(),
+      None => self.first(),
+    }
+  }
 }
 
 /// Renders a diagnostic and its source to a fixed-width terminal.
@@ -111,22 +229,53 @@ struct Excerpt<'a> {
 /// convention a reader already knows. Marker rows are in the order the caller gave the labels, so
 /// the primary leads whether or not it is the leftmost thing on the line.
 ///
-/// A span covering more than one line is drawn on the **first** line it touches. Brackets and the
-/// connectors that join a span's ends across lines are a row-assignment problem, and they are the
-/// expensive part of a terminal renderer rather than an afterthought; they arrive next — as is
-/// merging several markers onto ONE row, which is the same problem. What is here is total and
-/// correct about what it draws, and it is not yet everything a reader will eventually want drawn.
+/// A span covering more than one line is **bracketed**: its two ends are marked on the lines they
+/// fall on, a connector runs down the margin between them, and its label is said where it closes.
+/// So the lines of one input are drawn in SOURCE order, which is what lets a connector mean
+/// anything — a row between a span's ends is a line that span covers, and a reader can read the
+/// extent off the margin rather than off two line numbers. Their caller order survives where it
+/// still says something: it orders the inputs, it chooses what the `-->` line points at, and it
+/// orders the marker rows under one line.
 ///
-/// # What k labels cost
+/// Overlapping spans get **separate connector columns**, assigned so that a span opening later runs
+/// to the right of every span already open. One column would leave a reader unable to tell which
+/// opening a closing belongs to, which is a wrong answer rather than a plainer one.
+///
+/// What is not here: several markers **merged onto one row**. Two positions on a line still get a
+/// marker row each, which is a row-assignment problem of the same kind and is the next one.
+///
+/// # What k labels cost, and what a span covering a million lines costs
 ///
 /// Per input: **one forward pass** over its text, whatever the label count — layer 2 walks
-/// forwards, so the positions are resolved in ascending order off a carried cursor. Per drawn line:
-/// **one** scan for where the line ends, **one** bounded walk over its geometry, and **one** source
-/// row. Per label: one marker row, and the label's own text once.
+/// forwards, and a span's two ends are visited in one merged ascending order off a carried cursor.
+/// Per drawn line: **one** scan for where the line ends, **one** bounded walk over its geometry,
+/// and **one** source row. Per label: one marker row, and the label's own text once — and, for a
+/// label whose span reaches another line, **one** further bounded walk over the line it opens on.
 ///
-/// That last one is the honest floor rather than a gap. Two labels on a line are two things to
+/// That last walk is counted here rather than folded into the row's, because it happens before any
+/// row exists: whether an opening needs a marker row of its own depends on whether the row will
+/// DRAW the cell it opens at, and the plan settles that ahead of writing anything. It is bounded by
+/// the same [`max_source_bytes`](Self::max_source_bytes), and it is at most one per multi-line
+/// label — so it is the same k the marker rows already are, on lines the render was going to walk
+/// regardless.
+///
+/// The marker row is the honest floor rather than a gap. Two labels on a line are two things to
 /// point at and two things to say, and no arrangement of rows makes them one. Everything that is
 /// painty's — the resolve, the line scan, the geometry, the excerpt — is once per line.
+///
+/// **Rows do not scale with lines covered**, and that is a decision rather than a happy accident.
+/// A row costs a bounded walk — [`max_source_bytes`](Self::max_source_bytes) — so drawing every
+/// line a span touches would be a product of a bounded per-row cost and an *unbounded* row count,
+/// which is the shape that bounds nothing: a two-byte span reaching across a ten-megabyte file
+/// would ask for ten million rows. So the lines drawn for a multi-line span are its opening, its
+/// closing, and at most the three after the opening; everything else is one `...` row. The drawn
+/// count is therefore a function of the LABEL count, which is the k the marker rows already cost,
+/// and no new budget is needed to say so.
+///
+/// What that does not reach is unchanged and is stated where it was:
+/// [`max_source_bytes`](Self::max_source_bytes) bounds no walk that layer 2 does to find a line in
+/// the first place, and finding a span's far end is linear in that end's offset exactly as finding
+/// its start is.
 ///
 /// ```
 /// use painty::{Diagnostic, Location, Severity, Source, Span, terminal::{Input, Terminal}};
@@ -217,9 +366,11 @@ impl<P: Palette> Terminal<P> {
   /// A span reaching past the drawn text is marked over the `…`, which is where a reader should
   /// look for the rest of it.
   pub fn underline(&self, drawn: RegionLine<'_>) -> core::ops::Range<u64> {
-    let cells = LineCells::new(drawn.line(), self.tab_width);
+    let measure = self.measure();
     let mut marks = [Mark::new(drawn.covered(), ())];
-    cells.place_marks(&mut marks, Self::budget());
+    measure
+      .cells(drawn.line())
+      .place_marks(&mut marks, measure.budget);
     never_empty(marks[0].columns())
   }
 
@@ -266,6 +417,11 @@ impl<P: Palette> Terminal<P> {
   ///
   /// Both halves are pinned in `tests/writer_discipline.rs`: that no small input yields a large
   /// excerpt, and that a large label really does come out whole.
+  ///
+  /// Nor does it bound the **connector margin** a bracketed span adds to the left of every row,
+  /// which is one column per multi-line span and so is a function of the label count rather than of
+  /// the source. That is the same k a marker row per label already is, and it is bounded for the
+  /// same reason: the caller chose how many labels to send.
   #[inline]
   #[must_use]
   pub const fn max_rendered_width() -> u64 {
@@ -321,11 +477,14 @@ impl<P: Palette> Terminal<P> {
     65_536
   }
 
-  /// What one excerpt of this renderer may spend.
-  fn budget() -> Budget {
-    Budget {
-      cells: Self::max_rendered_width(),
-      bytes: Self::max_source_bytes(),
+  /// How this renderer measures a line, and what measuring one may spend.
+  fn measure(&self) -> Measure {
+    Measure {
+      tab_width: self.tab_width,
+      budget: Budget {
+        cells: Self::max_rendered_width(),
+        bytes: Self::max_source_bytes(),
+      },
     }
   }
 
@@ -364,15 +523,14 @@ impl<P: Palette> Terminal<P> {
     // Every position the diagnostic names, in the order the caller gave them, and then only those
     // that can be drawn at all: an input the caller did not supply and a position with no span both
     // draw nothing, on the same terms as `Location::entire`.
-    let mut positions = Vec::new();
+    let mut positions = Vec::with_capacity(1 + diagnostic.labels().len());
     positions.push((diagnostic.primary(), diagnostic.primary_label(), true));
     for label in diagnostic.labels() {
       positions.push((label.location(), Some(label.text()), false));
     }
-    let mut drawable: Vec<Drawable<'_>> = positions
-      .into_iter()
-      .enumerate()
-      .filter_map(|(at, (location, text, primary))| {
+    let mut drawable: Vec<Drawable<'_>> = Vec::with_capacity(positions.len());
+    drawable.extend(positions.into_iter().enumerate().filter_map(
+      |(at, (location, text, primary))| {
         let input = location.source() as usize;
         Some(Drawable {
           at,
@@ -382,8 +540,8 @@ impl<P: Palette> Terminal<P> {
           text,
           primary,
         })
-      })
-      .collect();
+      },
+    ));
 
     // RESOLUTION order, which is not the order any of this is drawn in. Layer 2 walks forwards, so
     // a set of spans resolved in ascending order over one input costs one pass; resolved in the
@@ -391,137 +549,139 @@ impl<P: Palette> Terminal<P> {
     // line again. The caller's order is carried in `at` and put back below.
     drawable.sort_unstable_by_key(|position| (position.input, position.span.start(), position.at));
 
-    // One excerpt per input LINE, not per label. Two labels on one line used to be two excerpts,
-    // each re-resolving the span, re-scanning for the line's end and rewriting the whole source row
-    // under its own copy of the label text — so a bounded source window and a borrowed string came
-    // out k times. They share the row now, and the k that remains is k marker rows, which is the
-    // one part of this that genuinely cannot be one.
+    // One block per input, worked out completely before anything is written: the gutter is as wide
+    // as the widest line number the whole render will show, and the first row does not know what is
+    // coming.
     //
-    // Coalescing CONSECUTIVE entries is enough because the sort put them there: line number rises
-    // with the start offset, so every position on one line of one input is a contiguous run.
-    let mut excerpts: Vec<Excerpt<'_>> = Vec::new();
-    let mut marks: Vec<Mark<Phrase<'_>>> = Vec::new();
-    let mut walk: Option<(usize, Walk<'_>)> = None;
-    for position in &drawable {
-      let walking = match &mut walk {
-        Some((input, walking)) if *input == position.input => walking,
-        _ => {
-          &mut walk
-            .insert((position.input, Walk::new(position.from.source)))
-            .1
-        }
-      };
-      let (starts, drawn) = walking.first_line(position.span);
-
-      match excerpts.last_mut() {
-        Some(last)
-          if last.input == position.input && last.line.number() == drawn.line().number() =>
-        {
-          last.at = last.at.min(position.at);
-          last.marks.end += 1;
-        }
-        _ => excerpts.push(Excerpt {
-          input: position.input,
-          origin: position.from.origin,
-          line: drawn.line(),
-          at: position.at,
-          input_at: position.at,
-          marks: marks.len()..marks.len() + 1,
-        }),
-      }
-      marks.push(Mark::new(
-        drawn.covered(),
-        Phrase {
-          text: position.text,
-          primary: position.primary,
-          column: starts.column(),
-          at: position.at,
-        },
-      ));
-    }
-
-    // DRAWING order, and the two sorts below are what puts the caller's order back.
-    //
-    // By the order each input FIRST appears, not by its index: the primary is pushed first, so
-    // sorting by index would move another file's label above the position the diagnostic is
-    // actually about. An input's first appearance is the earliest caller position anywhere in it,
-    // which the sort above has already made contiguous — so it is one linear pass, where asking
-    // "have I seen this input" per excerpt was a scan of the distinct inputs per excerpt, and k
-    // labels over d empty inputs kept everything else at O(k) while that went quadratic.
+    // Measured against the same stops and the same budget the rows below are, and by one value
+    // rather than two, because the plan decides one thing about a row it does not draw — see
+    // [`Measure`].
+    let measure = self.measure();
+    let mut plan = Plan::default();
     let mut run = 0;
-    while run < excerpts.len() {
-      let input = excerpts[run].input;
+    while run < drawable.len() {
+      let input = drawable[run].input;
       let mut end = run;
-      let mut earliest = usize::MAX;
-      while end < excerpts.len() && excerpts[end].input == input {
-        earliest = earliest.min(excerpts[end].at);
+      while end < drawable.len() && drawable[end].input == input {
         end += 1;
       }
-      for excerpt in &mut excerpts[run..end] {
-        excerpt.input_at = earliest;
-      }
+      plan.block(&drawable[run..end], measure);
       run = end;
     }
-    excerpts.sort_unstable_by_key(|excerpt| (excerpt.input_at, excerpt.at));
-    // And the marker rows under one line are in the caller's order too, so the primary — pushed
-    // first — leads whether or not it is the leftmost thing on the line.
-    for excerpt in &excerpts {
-      marks[excerpt.marks.clone()].sort_unstable_by_key(|mark| mark.payload().at);
-    }
 
-    // Sized before anything is written, because the gutter is as wide as the widest number it will
-    // show and the first row does not know what is coming.
-    let gutter = excerpts
+    // By the order each input FIRST appears, not by its index: the primary is pushed first, so
+    // sorting by index would move another file's label above the position the diagnostic is
+    // actually about. Only the blocks are sorted — the LINES inside one are in source order, which
+    // is what a connector running down the margin between two of them is able to mean.
+    plan.blocks.sort_unstable_by_key(|block| block.at);
+
+    let gutter = plan
+      .excerpts
       .iter()
       .map(|excerpt| digits(excerpt.line.number()))
       .max()
       .unwrap_or(1);
 
-    // A header per input, and the key is the input INDEX rather than the origin string. Resolving
-    // each span against its own input was half the multi-input fix; the other half is saying which
-    // input a row came from, because a secondary label in another file was otherwise drawn under
-    // the first file's header — the reader told, confidently and silently, that text came from a
-    // file it did not come from. Two inputs with no origin, or with the same one, are still two
-    // inputs, and only the index distinguishes them.
-    let mut shown_input = None;
-    for excerpt in &excerpts {
-      let cells = LineCells::new(excerpt.line, self.tab_width);
-      let placed = &mut marks[excerpt.marks.clone()];
-      let Some(leading) = placed.first().map(|mark| *mark.payload()) else {
-        continue;
-      };
-      let row = cells.place_marks(placed, Self::budget());
+    let Plan {
+      blocks,
+      excerpts,
+      marks,
+      connectors,
+    } = &mut plan;
+    // One slot per connector column, resized per block and refilled per row.
+    let mut margin: Vec<Option<(char, Role)>> = Vec::new();
 
-      if shown_input != Some(excerpt.input) {
-        // A CHARACTER column, and the marker row below is in DISPLAY columns. Two units in one
-        // frame is deliberate, because the two rows are read by different things.
-        //
-        // This line is MACHINE-PARSED. `rustc` writes it, and editors, IDEs and LSP clients read
-        // `file:line:column` off it to move a cursor — in characters, which is what every one of
-        // them means by a column and what `Position::column` already answers. A display column here
-        // is silently wrong on exactly the lines this crate is proudest of getting right: a tab or
-        // a wide character makes the two disagree, and the consumer navigates to the wrong place
-        // with no way to tell. Character's failure mode is visible and conventional; display's is
-        // silent, which is the one thing this crate exists not to do.
-        //
-        // The marker row stays in display columns because it is read by a HUMAN looking at the row
-        // above it, where a caret has to sit under the glyph a terminal painted.
-        //
-        // It costs nothing, which is the smaller half of the argument and worth writing down: the
-        // resolve that found this line computed the character column on its way past, so the header
-        // is a value layer 2 already produced. The display column was a grapheme walk over every
-        // cluster before the offset, unbounded, and the dominant term of a whole render at k=1.
-        pad(out, gutter)?;
-        out.write_str("--> ")?;
-        if let Some(origin) = excerpt.origin {
-          write_shown(out, origin)?;
-          out.write_char(':')?;
-        }
-        writeln!(out, "{}:{}", excerpt.line.number(), leading.column)?;
-        self.bar(out, gutter)?;
-        shown_input = Some(excerpt.input);
+    for block in blocks.iter() {
+      // A header per input, and the key is the input INDEX rather than the origin string. Resolving
+      // each span against its own input was half the multi-input fix; the other half is saying which
+      // input a row came from, because a secondary label in another file was otherwise drawn under
+      // the first file's header — the reader told, confidently and silently, that text came from a
+      // file it did not come from. Two inputs with no origin, or with the same one, are still two
+      // inputs, and only the index distinguishes them.
+      //
+      // A CHARACTER column, and the marker rows below are in DISPLAY columns. Two units in one
+      // frame is deliberate, because the two rows are read by different things.
+      //
+      // This line is MACHINE-PARSED. `rustc` writes it, and editors, IDEs and LSP clients read
+      // `file:line:column` off it to move a cursor — in characters, which is what every one of
+      // them means by a column and what `Position::column` already answers. A display column here
+      // is silently wrong on exactly the lines this crate is proudest of getting right: a tab or
+      // a wide character makes the two disagree, and the consumer navigates to the wrong place
+      // with no way to tell. Character's failure mode is visible and conventional; display's is
+      // silent, which is the one thing this crate exists not to do.
+      //
+      // The marker rows stay in display columns because they are read by a HUMAN looking at the row
+      // above them, where a caret has to sit under the glyph a terminal painted.
+      //
+      // It costs nothing, which is the smaller half of the argument and worth writing down: the
+      // resolve that found this line computed the character column on its way past, so the header
+      // is a value layer 2 already produced. The display column was a grapheme walk over every
+      // cluster before the offset, unbounded, and the dominant term of a whole render at k=1.
+      //
+      // WHICH position it names is the caller's earliest one in this input, not the topmost line
+      // drawn. A multi-line span opening twenty lines above the primary would otherwise send an
+      // editor to a line the diagnostic is not about.
+      pad(out, gutter)?;
+      out.write_str("--> ")?;
+      if let Some(origin) = block.origin {
+        write_shown(out, origin)?;
+        out.write_char(':')?;
       }
-      self.excerpt(out, gutter, &cells, &row, placed)?;
+      writeln!(out, "{}:{}", block.line, block.column)?;
+      self.bar(out, gutter)?;
+
+      let running = &connectors[block.connectors.clone()];
+      margin.clear();
+      margin.resize(slot(block.depth), None);
+
+      for index in block.excerpts.clone() {
+        let excerpt = &excerpts[index];
+        let number = excerpt.line.number();
+        let cells = measure.cells(excerpt.line);
+        let placed = &mut marks[excerpt.marks.clone()];
+        let row = cells.place_marks(placed, measure.budget);
+
+        // Lines were left out above this one, so a `...` stands where they would have been — with
+        // the connectors of every span that runs THROUGH them, since a bracket that vanished over a
+        // gap would read as two brackets.
+        if let Some(above) = excerpt.after {
+          fill(&mut margin, running, |connector| {
+            connector.spans_the_gap(above, number).then_some('|')
+          });
+          self.elision_row(out, gutter, &margin)?;
+        }
+
+        fill(&mut margin, running, |connector| {
+          connector.on_source_row(number)
+        });
+        self.source_row(out, gutter, &margin, &cells, &row)?;
+
+        // Under the source row, a span that OPENS here is open from the row that says so onwards —
+        // which is the `/` just drawn in the margin, or the underscore run below.
+        for mark in placed.iter() {
+          let phrase = *mark.payload();
+          let columns = never_empty(mark.columns());
+          match phrase.ends {
+            Ends::Whole => self.marker_row(out, gutter, &margin, columns, phrase)?,
+            Ends::Opens => {
+              if !phrase.compact {
+                let frame = Frame::new(gutter, block.depth, &margin);
+                self.connector_row(out, frame, columns.start, phrase, false)?;
+              }
+              if let Some(column) = column_of(&mut margin, phrase.depth) {
+                *column = Some(('|', phrase.role()));
+              }
+            }
+            Ends::Closes => {
+              let frame = Frame::new(gutter, block.depth, &margin);
+              self.connector_row(out, frame, columns.end - 1, phrase, true)?;
+              if let Some(column) = column_of(&mut margin, phrase.depth) {
+                *column = None;
+              }
+            }
+          }
+        }
+      }
       self.bar(out, gutter)?;
     }
 
@@ -537,20 +697,43 @@ impl<P: Palette> Terminal<P> {
   }
 
   /// One `  |` separator row.
+  ///
+  /// Carries no connectors, and deliberately: it is drawn once above an input's first line and once
+  /// below its last, where nothing is open.
   fn bar(&self, out: &mut impl fmt::Write, gutter: u64) -> fmt::Result {
     pad(out, gutter + 1)?;
     self.styled(out, Role::Gutter, "|")?;
     out.write_char('\n')
   }
 
-  /// One source line, written once, and a marker row for every mark on it.
-  fn excerpt(
+  /// The connector columns of one row, and the blank that separates them from the source.
+  ///
+  /// One slot per column the input needs, counting from 1, refilled per row rather than allocated
+  /// per row: the widest this gets is one column per multi-line span, which is the same k the
+  /// marker rows already cost. Spelled out rather than given a name, because
+  /// `tests/numeric_widths.rs` refuses a type alias outright — an alias is a place a primitive
+  /// integer can hide from the surface scan, and it offers no exception.
+  fn margin(&self, out: &mut impl fmt::Write, margin: &[Option<(char, Role)>]) -> fmt::Result {
+    if margin.is_empty() {
+      return Ok(());
+    }
+    for column in margin {
+      match column {
+        Some((glyph, role)) => self.styled(out, *role, glyph.encode_utf8(&mut [0; 4]))?,
+        None => out.write_char(' ')?,
+      }
+    }
+    out.write_char(' ')
+  }
+
+  /// One source line, written once.
+  fn source_row(
     &self,
     out: &mut impl fmt::Write,
     gutter: u64,
+    margin: &[Option<(char, Role)>],
     cells: &LineCells<'_>,
     row: &Row,
-    placed: &[Mark<Phrase<'_>>],
   ) -> fmt::Result {
     let number = cells.line().number();
     pad(out, gutter - digits(number))?;
@@ -558,6 +741,7 @@ impl<P: Palette> Terminal<P> {
     out.write_char(' ')?;
     self.styled(out, Role::Gutter, "|")?;
     out.write_char(' ')?;
+    self.margin(out, margin)?;
     // Straight to `out`, not through a `String` first: materialising the row commits the allocation
     // before `out` is ever consulted, so a caller with a bounded or refusing `fmt::Write` — the
     // whole reason this takes one — cannot decline what it never saw.
@@ -577,12 +761,32 @@ impl<P: Palette> Terminal<P> {
       }
       Ok(())
     })?;
-    out.write_char('\n')?;
+    out.write_char('\n')
+  }
 
-    for mark in placed {
-      self.marker_row(out, gutter, never_empty(mark.columns()), *mark.payload())?;
+  /// The `...` that stands for the lines a multi-line span reaches over.
+  ///
+  /// Written where the line NUMBER would be, which is what says that numbers are missing rather
+  /// than that a row is. Trailing blanks are dropped, so a row that says nothing after the last
+  /// connector ends there.
+  fn elision_row(
+    &self,
+    out: &mut impl fmt::Write,
+    gutter: u64,
+    margin: &[Option<(char, Role)>],
+  ) -> fmt::Result {
+    self.styled(out, Role::LineNumber, "...")?;
+    let Some(last) = margin.iter().rposition(Option::is_some) else {
+      return out.write_char('\n');
+    };
+    pad(out, gutter)?;
+    for column in &margin[..=last] {
+      match column {
+        Some((glyph, role)) => self.styled(out, *role, glyph.encode_utf8(&mut [0; 4]))?,
+        None => out.write_char(' ')?,
+      }
     }
-    Ok(())
+    out.write_char('\n')
   }
 
   /// One row of markers, and whatever the label attached to it says.
@@ -590,20 +794,18 @@ impl<P: Palette> Terminal<P> {
     &self,
     out: &mut impl fmt::Write,
     gutter: u64,
+    margin: &[Option<(char, Role)>],
     marks: core::ops::Range<u64>,
     phrase: Phrase<'_>,
   ) -> fmt::Result {
     pad(out, gutter + 1)?;
     self.styled(out, Role::Gutter, "|")?;
     out.write_char(' ')?;
+    self.margin(out, margin)?;
     pad(out, marks.start - 1)?;
 
-    let role = if phrase.primary {
-      Role::PrimaryLabel
-    } else {
-      Role::SecondaryLabel
-    };
-    let marker = if phrase.primary { '^' } else { '-' };
+    let role = phrase.role();
+    let marker = phrase.marker();
     self.styled_with(out, role, |shown| {
       for _ in 0..marks.end - marks.start {
         fmt::Write::write_char(shown, marker)?;
@@ -615,6 +817,63 @@ impl<P: Palette> Terminal<P> {
       self.styled(out, role, text)?;
     }
     out.write_char('\n')
+  }
+
+  /// One end of a multi-line span: the corner that joins its column to the cell it marks.
+  ///
+  /// The run of underscores reaches from this span's own connector column to the marker, so it
+  /// crosses every column to the right of it. That is not an accident of drawing order: a span
+  /// still open out there opened LATER than this one, so what the crossing says is that this
+  /// bracket closes over it, and a run broken into pieces to avoid the crossing would stop reading
+  /// as one connector at all.
+  fn connector_row(
+    &self,
+    out: &mut impl fmt::Write,
+    frame: Frame<'_>,
+    column: u64,
+    phrase: Phrase<'_>,
+    closing: bool,
+  ) -> fmt::Result {
+    let Frame {
+      gutter,
+      depth,
+      margin,
+    } = frame;
+    pad(out, gutter + 1)?;
+    self.styled(out, Role::Gutter, "|")?;
+    out.write_char(' ')?;
+    // Only what is to the LEFT is written from the margin. Everything from this span's own column
+    // rightwards is the corner below.
+    let own = slot(phrase.depth).saturating_sub(1).min(margin.len());
+    self.margin_upto(out, &margin[..own])?;
+
+    let role = phrase.role();
+    let marker = phrase.marker();
+    let reach = (depth + column).saturating_sub(phrase.depth);
+    self.styled_with(out, role, |shown| {
+      fmt::Write::write_char(shown, if closing { '|' } else { ' ' })?;
+      for _ in 0..reach {
+        fmt::Write::write_char(shown, '_')?;
+      }
+      fmt::Write::write_char(shown, marker)
+    })?;
+    // Said where the span CLOSES, because that is where a reader has seen all of it.
+    if closing && let Some(text) = phrase.text {
+      out.write_char(' ')?;
+      self.styled(out, role, text)?;
+    }
+    out.write_char('\n')
+  }
+
+  /// The connector columns left of a corner, without the blank that would follow them.
+  fn margin_upto(&self, out: &mut impl fmt::Write, margin: &[Option<(char, Role)>]) -> fmt::Result {
+    for column in margin {
+      match column {
+        Some((glyph, role)) => self.styled(out, *role, glyph.encode_utf8(&mut [0; 4]))?,
+        None => out.write_char(' ')?,
+      }
+    }
+    Ok(())
   }
 
   /// Writes `text` in the style the palette gives `role`, and nothing at all when it asks for
@@ -682,6 +941,436 @@ impl<P: Palette> Terminal<P> {
       ColorCapability::Ansi16 => style.to_ansi16(),
       ColorCapability::Ansi256 => style.to_ansi256(),
       ColorCapability::TrueColor => style,
+    }
+  }
+}
+
+/// How a line is measured, and what measuring it may spend.
+///
+/// One value rather than two parameters, and it exists because the PLAN takes a decision about a
+/// row it does not draw. Whether a span's opening needs a marker row of its own is settled before
+/// anything is written, and it is settled by asking what the drawn row will look like — so the two
+/// have to measure the line identically, and a caller pairing a tab width with somebody else's
+/// budget is a caret placed against a row nobody drew.
+#[derive(Debug, Clone, Copy)]
+struct Measure {
+  tab_width: u64,
+  budget: Budget,
+}
+
+impl Measure {
+  /// One line, as this render measures it.
+  const fn cells<'a>(&self, line: Line<'a>) -> LineCells<'a> {
+    LineCells::new(line, self.tab_width)
+  }
+
+  /// Whether the row `line` is drawn as will show the cell `covered` STARTS on.
+  ///
+  /// Asked of the bounded walk that places every mark, rather than of a second notion of what is
+  /// visible. The two budgets are denominated differently on purpose —
+  /// [`max_source_bytes`](Terminal::max_source_bytes) bounds the input and
+  /// [`max_rendered_width`](Terminal::max_rendered_width) bounds the cells — so a question about
+  /// what a reader can SEE has to be put to the one that cuts the row. A guard denominated in bytes
+  /// passes happily on a line of five thousand spaces whose row stops at four thousand and
+  /// ninety-six cells.
+  ///
+  /// It bounds the prefix scan at the one call site as a side effect, which is the whole of what
+  /// the byte test that used to sit there was doing: an opening the row DREW is fewer than
+  /// [`Row::drawn_end`] bytes into the line, and that is at most [`Budget::bytes`]; an opening on a
+  /// row that was not cut is at most the length of a line that fitted the byte budget entire.
+  fn draws_the_start_of(&self, line: Line<'_>, covered: Span) -> bool {
+    let mut marks = [Mark::new(covered, ())];
+    self.cells(line).place_marks(&mut marks, self.budget);
+    marks[0].starts_in_window()
+  }
+}
+
+/// How many lines after a multi-line span's opening are shown before the rest are elided.
+///
+/// Three, and the number is a layout rule rather than a budget — see [`Terminal`]'s note on what a
+/// span covering a million lines costs. It is what makes a span of six lines or fewer render whole
+/// once the one-line gap below is filled, and what keeps every longer one to the same six rows.
+const CONTEXT: u64 = 3;
+
+/// Everything a render works out before it writes anything.
+///
+/// Four flat runs and no tree: an excerpt names its slice of the marks, and a block names its slice
+/// of the excerpts and of the connectors. So a whole render is four allocations however many labels
+/// and lines it turns out to have, and the gutter — which is as wide as the widest line number
+/// anywhere in it — can be sized before the first row is written.
+#[derive(Debug, Default)]
+struct Plan<'a> {
+  blocks: Vec<Block<'a>>,
+  excerpts: Vec<Excerpt<'a>>,
+  marks: Vec<Mark<Phrase<'a>>>,
+  connectors: Vec<Connector>,
+}
+
+impl<'a> Plan<'a> {
+  /// Works out one input's block: where each of its spans is drawn, which lines that puts on the
+  /// page, and which column each multi-line connector runs down.
+  fn block(&mut self, drawable: &[Drawable<'a>], measure: Measure) {
+    let Some(leading) = drawable.first() else {
+      return;
+    };
+    let source = leading.from.source;
+
+    // ── Both ends of every span, in ONE forward walk ────────────────────────────────────────
+    //
+    // The walk is forward-only, so resolving the near ends in one loop and the far ends in another
+    // would be two passes over the input. They are merged instead: the spans arrive in ascending
+    // START order, a span's far end is queued the moment its near end reports there is one, and the
+    // queue is drained ahead of the next start. Every stop is therefore visited in ascending offset
+    // order off one cursor, and a multi-line span costs no pass that a single-line one does not.
+    //
+    // A close goes FIRST where two stops land on the same offset, and that ordering is load-bearing
+    // rather than tidy. A walk asked for an offset it is already standing on cannot see that a line
+    // break ended there — which is the one question a close exists to answer.
+    let mut walk = Walk::new(source);
+    let mut pending: BinaryHeap<Reverse<(usize, usize)>> = BinaryHeap::new();
+    let mut placements: Vec<Placement<'a>> = Vec::with_capacity(drawable.len());
+    // The order the one-pass claim rests on, checked where it is produced. A stop behind the cursor
+    // would still render CORRECTLY — `Walk` restarts rather than answering from where it is — so no
+    // test that reads output can see this go wrong, and a timer at this resolution cannot either.
+    let mut reached = 0;
+    for position in drawable {
+      let start = walk.clamped(position.span).start();
+      while let Some(Reverse((at, index))) = pending.peek().copied() {
+        if at > start {
+          break;
+        }
+        pending.pop();
+        debug_assert!(
+          at >= reached,
+          "a closing at {at} behind a stop at {reached}"
+        );
+        reached = at;
+        close(&mut walk, &mut placements[index]);
+      }
+      debug_assert!(
+        start >= reached,
+        "an opening at {start} behind a stop at {reached}"
+      );
+      reached = start;
+      let opening = walk.open(position.span);
+      if opening.reaches_another_line() {
+        pending.push(Reverse((opening.span().end(), placements.len())));
+      }
+      placements.push(Placement {
+        at: position.at,
+        text: position.text,
+        primary: position.primary,
+        opening,
+        closing: None,
+        depth: 0,
+        compact: false,
+      });
+    }
+    while let Some(Reverse((at, index))) = pending.pop() {
+      debug_assert!(
+        at >= reached,
+        "a closing at {at} behind a stop at {reached}"
+      );
+      reached = at;
+      close(&mut walk, &mut placements[index]);
+    }
+
+    // ── A connector column each, and never two open at once in one column ───────────────────
+    //
+    // Outermost first, so a span that encloses another is assigned before it. A new span takes the
+    // column after the rightmost one still open rather than the leftmost one free: the corner that
+    // closes a span runs RIGHTWARDS from its own column, so a span placed left of one already open
+    // would draw its corner straight through that one's bar and claim to close it.
+    let mut order: Vec<usize> = (0..placements.len())
+      .filter(|&index| placements[index].closing.is_some())
+      .collect();
+    order.sort_unstable_by_key(|&index| {
+      let placement = &placements[index];
+      (placement.first(), Reverse(placement.last()), placement.at)
+    });
+    // Still open, in the order they opened — which is also increasing in depth, so the deepest open
+    // column is the last entry and the closed ones behind it can be dropped as they are passed.
+    let mut open: Vec<(u64, u64)> = Vec::new();
+    let mut deepest = 0;
+    for index in order {
+      let (first, last) = (placements[index].first(), placements[index].last());
+      while let Some(&(closes, _)) = open.last() {
+        if closes >= first {
+          break;
+        }
+        open.pop();
+      }
+      let depth = open.last().map_or(0, |&(_, depth)| depth) + 1;
+      placements[index].depth = depth;
+      open.push((last, depth));
+      deepest = deepest.max(depth);
+    }
+
+    // ── Which lines are drawn, and which openings need no row of their own ──────────────────
+    //
+    // Every line an end of a span falls on. Not every line a span covers: that count is the
+    // caller's and a row is not.
+    //
+    // With duplicates until the compact decision has been taken off it, because one anchor is one
+    // mark — so how many times a line appears here is how many marks it will carry, which is half
+    // of what decides whether a span can open without a row of its own.
+    let mut anchors: Vec<Line<'a>> = Vec::with_capacity(placements.len() * 2);
+    for placement in &placements {
+      anchors.push(placement.opening.line().line());
+      if let Some(closing) = placement.closing {
+        anchors.push(closing.line());
+      }
+    }
+    anchors.sort_unstable_by_key(Line::number);
+
+    // A span opens with a `/` in its column when the row it opens on DRAWS the cell it opens at,
+    // nothing else is drawn under that line, and nothing but blanks precedes it there — so it needs
+    // no corner row and its start cell carries no marker.
+    //
+    // That first condition is the one a reader would not think to ask for, and it is the one whose
+    // absence made this wrong. Suppressing the marker is only a saving if the cell the marker would
+    // have gone on is on the page: a row is cut at `max_rendered_width` CELLS, so an opening five
+    // thousand spaces into a line is out past the `…` and the compact form leaves the span with a
+    // `/` in the margin and nothing at all pointing into the row. It is asked of
+    // `Measure::draws_the_start_of`, which is the same bounded walk that will place the mark, and
+    // not of a second reckoning of what is visible.
+    //
+    // It also bounds the prefix scan, which is why no byte test appears here: "is this
+    // indentation" is a question over as many bytes as a caller cares to indent with, and an
+    // unbounded scan taken to choose between two glyphs is the class this crate keeps finding one
+    // door along. An opening the row drew is inside the walk's own byte budget by construction.
+    for placement in &mut placements {
+      if placement.closing.is_none() {
+        continue;
+      }
+      let first = placement.opening.line().line().number();
+      let alone = anchors.partition_point(|line| line.number() <= first)
+        - anchors.partition_point(|line| line.number() < first)
+        == 1;
+      let line = placement.opening.line().line();
+      let covered = placement.opening.line().covered();
+      let before = covered.start() - line.span().start();
+      placement.compact = alone
+        && measure.draws_the_start_of(line, covered)
+        && line.text()[..before].chars().all(char::is_whitespace);
+    }
+    anchors.dedup_by_key(|line| line.number());
+
+    // ── What is marked, and on which line ───────────────────────────────────────────────────
+    let marks_from = self.marks.len();
+    for placement in &placements {
+      let ends = if placement.closing.is_some() {
+        Ends::Opens
+      } else {
+        Ends::Whole
+      };
+      self.marks.push(Mark::new(
+        placement.opening.line().covered(),
+        Phrase {
+          // A label is said once, where the span closes. An opening that repeated it would say one
+          // thing twice about one span and leave a reader looking for the difference.
+          text: if ends == Ends::Whole {
+            placement.text
+          } else {
+            None
+          },
+          primary: placement.primary,
+          at: placement.at,
+          line: placement.first(),
+          ends,
+          depth: placement.depth,
+          compact: placement.compact,
+        },
+      ));
+      if let Some(closing) = placement.closing {
+        self.marks.push(Mark::new(
+          closing.covered(),
+          Phrase {
+            text: placement.text,
+            primary: placement.primary,
+            at: placement.at,
+            line: closing.line().number(),
+            ends: Ends::Closes,
+            depth: placement.depth,
+            compact: placement.compact,
+          },
+        ));
+      }
+    }
+    // Line order for the excerpts to take their slices in, and the CALLER's order under each line —
+    // so the primary leads whether or not it is the leftmost thing there.
+    self.marks[marks_from..].sort_by_key(|mark| (mark.payload().line, mark.payload().at));
+
+    let mut reaches: Vec<(u64, u64)> = placements
+      .iter()
+      .filter_map(|placement| {
+        placement.closing?;
+        let first = placement.first();
+        Some((first, (first + CONTEXT).min(placement.last() - 1)))
+      })
+      .collect();
+    reaches.sort_unstable();
+    let reach_of = |line: u64| {
+      let from = reaches.partition_point(|&(first, _)| first < line);
+      let to = reaches.partition_point(|&(first, _)| first <= line);
+      reaches[from..to]
+        .iter()
+        .map(|&(_, reach)| reach)
+        .max()
+        .unwrap_or(line)
+    };
+
+    let excerpts_from = self.excerpts.len();
+    let mut cursor = marks_from;
+    let mut above: Option<Line<'a>> = None;
+    for &anchor in &anchors {
+      let mut after = None;
+      if let Some(previous) = above {
+        let number = anchor.number();
+        let mut shown = reach_of(previous.number()).clamp(previous.number(), number - 1);
+        // One line left over reads worse as `...` than as the line itself, and it is the shape a
+        // span of exactly six lines leaves behind.
+        if number - shown == 2 {
+          shown = number - 1;
+        }
+        let mut line = previous;
+        while line.number() < shown {
+          let Some(next) = source.line_after(line) else {
+            break;
+          };
+          line = next;
+          self.take_line(line, &mut cursor, None);
+        }
+        if line.number() < number - 1 {
+          after = Some(line.number());
+        }
+      }
+      self.take_line(anchor, &mut cursor, after);
+      above = Some(anchor);
+    }
+
+    // ── The connectors ──────────────────────────────────────────────────────────────────────
+    let connectors_from = self.connectors.len();
+    for placement in &placements {
+      let Some(closing) = placement.closing else {
+        continue;
+      };
+      self.connectors.push(Connector {
+        first: placement.first(),
+        last: closing.line().number(),
+        depth: placement.depth,
+        role: if placement.primary {
+          Role::PrimaryLabel
+        } else {
+          Role::SecondaryLabel
+        },
+        compact: placement.compact,
+      });
+    }
+
+    // Where the input sits among the others, and what its `-->` line points at: the caller's
+    // EARLIEST position in it, which is not the topmost line drawn. A multi-line span opening
+    // twenty lines above the primary would otherwise send an editor to a line nobody asked about.
+    let earliest = placements
+      .iter()
+      .min_by_key(|placement| placement.at)
+      .expect("a block is built from at least one drawable position");
+    self.blocks.push(Block {
+      origin: leading.from.origin,
+      line: earliest.first(),
+      column: earliest.opening.at().column(),
+      at: earliest.at,
+      depth: deepest,
+      excerpts: excerpts_from..self.excerpts.len(),
+      connectors: connectors_from..self.connectors.len(),
+    });
+  }
+
+  /// Adds one drawn line, taking whatever marks belong to it.
+  ///
+  /// The marks are already in line order and the lines are added in line order, so one cursor walks
+  /// both — where asking "which marks are on this line" per line would be a scan of the marks per
+  /// line. A line between a span's ends takes none, which is why the range can be empty.
+  fn take_line(&mut self, line: Line<'a>, cursor: &mut usize, after: Option<u64>) {
+    let from = *cursor;
+    while self
+      .marks
+      .get(*cursor)
+      .is_some_and(|mark| mark.payload().line == line.number())
+    {
+      *cursor += 1;
+    }
+    self.excerpts.push(Excerpt {
+      line,
+      marks: from..*cursor,
+      after,
+    });
+  }
+}
+
+/// Resolves where a multi-line span finishes.
+///
+/// Kept as multi-line only if it really does finish on another line. Everything downstream — the
+/// column assignment, the lines shown after the opening, the corner arithmetic — reads
+/// `last > first` off this one place rather than re-deciding it.
+fn close<'a>(walk: &mut Walk<'a>, placement: &mut Placement<'a>) {
+  let closing = walk.close(&placement.opening);
+  if closing.line().number() > placement.opening.line().line().number() {
+    placement.closing = Some(closing);
+  }
+}
+
+/// The fixed geometry a connector row is drawn against: how wide the gutter is, how many connector
+/// columns the input needs, and what is standing in them.
+///
+/// One value rather than three parameters, because the three are read together on every row and a
+/// caller pairing them by position is a caller that can pair them wrongly.
+#[derive(Debug, Clone, Copy)]
+struct Frame<'m> {
+  gutter: u64,
+  depth: u64,
+  margin: &'m [Option<(char, Role)>],
+}
+
+impl<'m> Frame<'m> {
+  const fn new(gutter: u64, depth: u64, margin: &'m [Option<(char, Role)>]) -> Self {
+    Self {
+      gutter,
+      depth,
+      margin,
+    }
+  }
+}
+
+/// A connector column as an index into a row's margin.
+///
+/// There is one column per multi-line span and the spans came out of a `Vec`, so this cannot lose
+/// anything. `try_from` rather than `as` all the same: if that reasoning were ever wrong the answer
+/// is a column past the end of the margin, which draws nothing, rather than a column near the
+/// gutter, which draws a bar under the wrong span.
+fn slot(column: u64) -> usize {
+  usize::try_from(column).unwrap_or(usize::MAX)
+}
+
+/// The margin slot a connector's column occupies.
+fn column_of(margin: &mut [Option<(char, Role)>], depth: u64) -> Option<&mut Option<(char, Role)>> {
+  margin.get_mut(slot(depth).checked_sub(1)?)
+}
+
+/// Refills every connector column of one row.
+fn fill(
+  margin: &mut [Option<(char, Role)>],
+  connectors: &[Connector],
+  mut glyph: impl FnMut(&Connector) -> Option<char>,
+) {
+  for column in margin.iter_mut() {
+    *column = None;
+  }
+  for connector in connectors {
+    if let Some(character) = glyph(connector)
+      && let Some(column) = column_of(margin, connector.depth)
+    {
+      *column = Some((character, connector.role));
     }
   }
 }

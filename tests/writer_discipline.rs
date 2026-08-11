@@ -251,16 +251,18 @@ fn ends_styled(text: &str) -> bool {
 
 /// One adversarial input: compact source, extreme rendered geometry.
 ///
-/// `cells` is what the line ASKS for, computed from the input rather than written down, so a case
-/// cannot quietly stop being extreme.
+/// `cells` is what the WIDEST DRAWN LINE asks for, computed from the input rather than written
+/// down, so a case cannot quietly stop being extreme. The widest rather than the only one, because
+/// a span reaching past its first line has several and the budgets apply to each.
 struct Case {
   what: &'static str,
   text: String,
   tab_width: u64,
   span: Span,
   cells: u64,
-  /// Bytes of the LINE, which is what the resource bound is denominated in. A case can be extreme
-  /// in this and cost nothing in cells — that is the whole reason the two are separate.
+  /// Bytes of the widest drawn LINE, which is what the resource bound is denominated in. A case
+  /// can be extreme in this and cost nothing in cells — that is the whole reason the two are
+  /// separate.
   bytes: u64,
 }
 
@@ -339,6 +341,24 @@ fn cases() -> Vec<Case> {
       cells: 1,
       bytes: 80_001,
     },
+    // Appended rather than inserted: `past_the_ceiling_the_output_stops_depending_on_the_input`
+    // names two of the cases above by INDEX.
+    Case {
+      what: "a span bracketed across four lines, whose corners and connectors are new styled runs",
+      text: "open {\n  a\n  b\n}\n".to_owned(),
+      tab_width: 4,
+      span: Span::new(0, 16),
+      cells: 6,
+      bytes: 6,
+    },
+    Case {
+      what: "a bracket whose CLOSING line is past the ceiling, so its corner lands on the elision",
+      text: format!("open\n{}\n", "a".repeat(20_000)),
+      tab_width: 4,
+      span: Span::new(0, 20_005),
+      cells: 20_000,
+      bytes: 20_000,
+    },
   ]
 }
 
@@ -373,16 +393,22 @@ fn what_the_renderer_emits_is_bounded_by_policy_and_not_by_the_input() {
   // multiplier and bounding nothing bounds the line length, and a budget on one factor of a product
   // bounds nothing at all.
   let ceiling = Terminal::<Theme>::max_rendered_width();
-  // Two rows, each at most the ceiling plus its elision cell, plus the frame's fixed furniture and
-  // the caller's own short strings. Deliberately slack: the claim is that the size is a function of
-  // the POLICY rather than of the input, and an exact formula would be a second implementation of
-  // the layout.
+  // A bracketed span draws at most seven rows of source width — an opening, the three lines after
+  // it, a closing, and the two corners — each at most the ceiling plus its elision cell, plus the
+  // frame's fixed furniture and the caller's own short strings. Deliberately slack: the claim is
+  // that the size is a function of the POLICY rather than of the input, and an exact formula would
+  // be a second implementation of the layout.
+  //
+  // The multiplier is what the rows-per-span rule allows, and it is where that rule shows up as a
+  // number. It was 8 when a span was drawn on one line and a bracket now draws several — which is
+  // the honest reading, since a bound that did not move when the rows did would be describing the
+  // renderer it replaced.
   //
   // Saturating, and `try_from` rather than `as`: a harness that panics on its own arithmetic
   // reports nothing about the code, and a test about narrowing has no business narrowing.
   let allowed = usize::try_from(ceiling)
     .unwrap_or(usize::MAX)
-    .saturating_mul(8);
+    .saturating_mul(16);
 
   for case in cases() {
     let mut out = Accepting::default();
@@ -494,10 +520,16 @@ fn the_renderer_allocates_nothing_proportional_to_a_row() {
   // with a bounded or refusing writer could not decline what it never saw.
   //
   // Measured rather than read: a streamed row and a materialised one produce identical bytes, so
-  // there is no output to assert on. Well above the handful of small vectors and one line number
-  // the renderer legitimately allocates, and well below a row.
-  let allowed = usize::try_from(Terminal::<Theme>::max_rendered_width()).unwrap_or(usize::MAX) / 2;
+  // there is no output to assert on.
+  //
+  // Two assertions, and the second is the one with teeth. A threshold cannot discriminate anything
+  // on a twelve-cell case, where a materialised row would be twelve bytes; what it discriminates is
+  // a row at the CEILING being built, so it sits below that with room. The equality below needs no
+  // threshold at all.
+  let ceiling = usize::try_from(Terminal::<Theme>::max_rendered_width()).unwrap_or(usize::MAX);
+  let allowed = ceiling / 2;
 
+  let mut spent_on = Vec::new();
   for case in cases() {
     for budget in [0, 40, 400, usize::MAX] {
       let mut out = Bounded { budget, taken: 0 };
@@ -511,8 +543,27 @@ fn the_renderer_allocates_nothing_proportional_to_a_row() {
         case.what,
         case.cells
       );
+      if budget == usize::MAX {
+        spent_on.push(spent);
+      }
     }
   }
+
+  // And the sharp form, on the pair `past_the_ceiling_the_output_stops_depending_on_the_input`
+  // already holds an order of magnitude apart: the same bookkeeping to the BYTE, so nothing here
+  // tracks the width of the row at all. A threshold can be met by an allocation that grows slowly;
+  // an equality cannot.
+  let all = cases();
+  assert_eq!(
+    all[2].cells,
+    all[1].cells * 10,
+    "the two cases are no longer an order of magnitude apart, so this proves nothing"
+  );
+  assert_eq!(
+    spent_on[1], spent_on[2],
+    "{} cells and {} cells cost {} and {} bytes, so the renderer still allocates with the row",
+    all[1].cells, all[2].cells, spent_on[1], spent_on[2]
+  );
 }
 
 #[test]
@@ -665,7 +716,7 @@ mod the_size_contract {
     let ceiling = Terminal::<Theme>::max_rendered_width();
     let allowed = usize::try_from(ceiling)
       .unwrap_or(usize::MAX)
-      .saturating_mul(8);
+      .saturating_mul(16);
 
     let mut examined = 0;
     for case in cases() {

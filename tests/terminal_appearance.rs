@@ -65,6 +65,19 @@ error[mylang::schema::duplicate-field]: `width` is defined twice
 
 #[test]
 fn a_secondary_label_is_drawn_with_a_different_marker() {
+  // And the lines of one input are in SOURCE order, which is not the caller's: the primary here is
+  // the LOWER of the two and is still announced by the `-->` line, while the row for line 2 is
+  // drawn above the row for line 3.
+  //
+  // That is not a preference. A multi-line span is bracketed by a connector running down a
+  // contiguous run of rows, so a row between its two ends has to be a line it covers; caller order
+  // gives no such guarantee, and a bracket drawn over rows in caller order would claim to cover
+  // lines it does not. Caller order keeps the jobs it can still do — which input leads, what the
+  // `-->` points at, and the order of the marker rows under one line.
+  //
+  // The `|` that used to separate consecutive excerpts goes with it, for the same reason: a
+  // separator between two lines of one bracket breaks the connector that is the whole point of it.
+  // It stays where a block ends.
   let message = "`width` is defined twice";
   let labels = [Label::new(
     Location::new(0, Span::new(16, 21)),
@@ -85,11 +98,10 @@ fn a_secondary_label_is_drawn_with_a_different_marker() {
 error[mylang::schema::duplicate-field]: `width` is defined twice
  --> 3:3
   |
-3 |   width: Int
-  |   ^^^^^ redefined here
-  |
 2 |   width: Int
   |   ----- first defined here
+3 |   width: Int
+  |   ^^^^^ redefined here
   |
 "
   );
@@ -359,6 +371,359 @@ advice[mylang::test::final-byte]: the last thing in the file
   |
 2 | beta
   |    ^ here
+  |
+"
+  );
+}
+
+// ── Multi-line spans ────────────────────────────────────────────────────────────────────────────
+//
+// The arrangement, in the two forms an opening takes and against each hazard the corpus already
+// carried on the single-line axis. What is pinned here is appearance; that the right CELLS are
+// marked whatever the rows turn out to be is `which_cells_are_marked_does_not_depend_on_how_the_
+// rows_were_assigned` in `src/terminal/tests.rs`, and it is what makes re-blessing any of these
+// safe.
+
+#[test]
+fn a_multi_line_span_is_bracketed_between_the_lines_it_covers() {
+  // The compact opening: nothing else is drawn under line 2 and nothing but blanks precedes the
+  // span on it, so the `/` in the margin opens the bracket and no corner row is needed.
+  let text = "query Hero {\n  hero {\n    name\n    friends\n  }\n}\n";
+  let message = "this selection set is nested too deeply";
+  let start = text.find("hero {").expect("the fixture selects");
+  let end = text.rfind("  }").expect("the fixture closes") + "  }".len();
+  let diagnostic = Diagnostic::new(
+    "mylang::query::too-deep",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(start, end)),
+  )
+  .with_primary_label("this selection set");
+
+  let out = render(&diagnostic, text, Some("hero.graphql"));
+  // Asserted against the shape this replaced, so the old behaviour cannot satisfy it: a span drawn
+  // on the first line it touches shows line 2 and none of the rest.
+  assert!(
+    out.contains("5 | |   }"),
+    "the closing line was not drawn\n{out}"
+  );
+  assert_eq!(
+    out,
+    "\
+error[mylang::query::too-deep]: this selection set is nested too deeply
+ --> hero.graphql:2:3
+  |
+2 | /   hero {
+3 | |     name
+4 | |     friends
+5 | |   }
+  | |___^ this selection set
+  |
+"
+  );
+}
+
+#[test]
+fn a_multi_line_span_that_has_text_before_it_opens_with_a_corner() {
+  // The other opening. `let x = ` precedes the span, so a `/` in the margin would leave a reader
+  // unable to tell where on the line the span begins — the underscore run says it exactly.
+  let text = "let x = if a {\n  1\n} else {\n  2\n};\n";
+  let message = "the branches disagree";
+  let start = text.find("if a").expect("the fixture branches");
+  let end = text.rfind('}').expect("the fixture closes") + 1;
+  let diagnostic = Diagnostic::new(
+    "mylang::type::branches",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(start, end)),
+  )
+  .with_primary_label("this expression");
+
+  assert_eq!(
+    render(&diagnostic, text, None),
+    "\
+error[mylang::type::branches]: the branches disagree
+ --> 1:9
+  |
+1 |   let x = if a {
+  |  _________^
+2 | |   1
+3 | | } else {
+4 | |   2
+5 | | };
+  | |_^ this expression
+  |
+"
+  );
+}
+
+#[test]
+fn a_long_multi_line_span_shows_its_opening_and_says_what_it_left_out() {
+  // Nine lines covered, six rows drawn. The `...` is not decoration: a row costs a bounded walk,
+  // so a renderer drawing every line a span touches would cost the line count — which is the
+  // caller's and unbounded — times that walk. What bounds it is drawn here.
+  let text = "fragment F on Query {\n  a\n  b\n  c\n  d\n  e\n  f\n  g\n}\n";
+  let message = "this fragment is never used";
+  let diagnostic = Diagnostic::new(
+    "mylang::query::unused-fragment",
+    Severity::Warning,
+    &message,
+    Location::new(0, Span::new(0, text.len() - 1)),
+  )
+  .with_primary_label("declared here");
+
+  let out = render(&diagnostic, text, None);
+  let drawn = out
+    .lines()
+    .filter(|row| row.trim_start().starts_with(|c: char| c.is_ascii_digit()))
+    .count();
+  assert_ne!(
+    drawn,
+    text.lines().count(),
+    "every line the span covers was drawn\n{out}"
+  );
+  assert_eq!(drawn, 5, "{out}");
+  assert_eq!(
+    out,
+    "\
+warning[mylang::query::unused-fragment]: this fragment is never used
+ --> 1:1
+  |
+1 | / fragment F on Query {
+2 | |   a
+3 | |   b
+4 | |   c
+... |
+9 | | }
+  | |_^ declared here
+  |
+"
+  );
+}
+
+#[test]
+fn two_multi_line_spans_that_overlap_run_in_columns_of_their_own() {
+  // One column would draw one bar where two spans are open, and a reader could not tell which
+  // opening a closing belongs to — a wrong answer rather than a plainer one. The inner span opens
+  // later, so it runs to the RIGHT of the outer, and the outer's closing corner crosses it: what
+  // that says is that this bracket closes over the other one.
+  let text = "outer (\n  inner (\n    x\n  )\n)\n";
+  let message = "two of these disagree";
+  let inner = text.find("inner").expect("the fixture nests");
+  let inner_end = text.rfind("  )").expect("the fixture closes") + "  )".len();
+  let labels = [Label::new(
+    Location::new(0, Span::new(inner, inner_end)),
+    "and this one",
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::type::nested",
+    Severity::Error,
+    &message,
+    Location::new(
+      0,
+      Span::new(text.find('(').expect("the fixture opens"), text.len() - 1),
+    ),
+  )
+  .with_primary_label("this one")
+  .with_labels(&labels);
+
+  assert_eq!(
+    render(&diagnostic, text, None),
+    "\
+error[mylang::type::nested]: two of these disagree
+ --> 1:7
+  |
+1 |    outer (
+  |  ________^
+2 | |/   inner (
+3 | ||     x
+4 | ||   )
+  | ||___- and this one
+5 | |  )
+  | |__^ this one
+  |
+"
+  );
+}
+
+#[test]
+fn a_multi_line_span_opening_in_a_cjk_run_and_closing_after_a_tab() {
+  // The two ends measured against DIFFERENT lines, and each against a different hazard: the
+  // opening sits in a run of two-cell ideographs, the closing past a tab that is one character and
+  // four cells. A renderer counting characters for either would put its end in the wrong cell, and
+  // both numbers are pinned against the one it would produce.
+  let text = "let \u{65e5}\u{672c}\u{8a9e} =\n\tvalue;\n";
+  let message = "a binding written across two lines";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::units",
+    Severity::Error,
+    &message,
+    Location::new(
+      0,
+      Span::new(
+        text.find('\u{65e5}').expect("the fixture has one"),
+        text.len() - 1,
+      ),
+    ),
+  )
+  .with_primary_label("this binding");
+
+  let out = render(&diagnostic, text, None);
+  let closing = out
+    .lines()
+    .find(|row| row.contains("this binding"))
+    .expect("a closing corner");
+  // `let ` is four characters and four cells, so the OPENING agrees either way and is not evidence.
+  // The closing is: `\tvalue;` is seven characters and ten cells, so a character-counting renderer
+  // puts the caret three cells left of the semicolon it is about.
+  let run = closing.find('_').expect("a closing run of underscores");
+  assert_ne!(
+    closing.find('^'),
+    Some(run + "\tvalue;".chars().count()),
+    "the closing end was placed by character, not by cell\n{out}"
+  );
+  assert_eq!(closing.find('^'), Some(run + 10), "{out}");
+  assert_eq!(
+    out,
+    "\
+error[mylang::test::units]: a binding written across two lines
+ --> 1:5
+  |
+1 |   let 日本語 =
+  |  _____^
+2 | |     value;
+  | |__________^ this binding
+  |
+"
+  );
+}
+
+#[test]
+fn a_multi_line_span_crossing_a_crlf_boundary() {
+  // Two bytes per break and no column for either, so a bracket that counted the break as a
+  // character would close one cell to the right of where it does.
+  let text = "alpha\r\nbeta\r\ngamma\r\n";
+  let message = "written on a machine that ends lines with two bytes";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::crlf",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(2, 15)),
+  )
+  .with_primary_label("crossing two breaks");
+
+  let out = render(&diagnostic, text, None);
+  assert!(!out.contains('\r'), "a carriage return survived\n{out:?}");
+  assert_eq!(
+    out,
+    "\
+error[mylang::test::crlf]: written on a machine that ends lines with two bytes
+ --> 1:3
+  |
+1 |   alpha
+  |  ___^
+2 | | beta
+3 | | gamma
+  | |__^ crossing two breaks
+  |
+"
+  );
+}
+
+#[test]
+fn a_multi_line_span_over_the_final_byte_of_a_file_with_no_trailing_newline() {
+  // The single-line case is above; this is the same edge reached from a line the span did not
+  // start on, where the closing end is the last byte of the text and there is no break after it.
+  let text = "alpha\nbeta";
+  let message = "the last thing in the file";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::final-byte",
+    Severity::Advice,
+    &message,
+    Location::new(0, Span::new(3, 10)),
+  )
+  .with_primary_label("to the very end");
+
+  assert_eq!(
+    render(&diagnostic, text, None),
+    "\
+advice[mylang::test::final-byte]: the last thing in the file
+ --> 1:4
+  |
+1 |   alpha
+  |  ____^
+2 | | beta
+  | |____^ to the very end
+  |
+"
+  );
+}
+
+#[test]
+fn a_span_that_swallows_its_own_trailing_newline_closes_on_the_line_it_covers() {
+  // `Region::lines` stops before the line an exclusive end at column 1 falls on, because there is
+  // nothing of the span to draw there. The bracket has to agree: a closing on line 3 would put a
+  // marker under text the span does not cover, and would say the span is three lines long.
+  let text = "aaa\nbbb\nccc\n";
+  let message = "a span that swallowed its own newline";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::swallowed",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, 8)),
+  )
+  .with_primary_label("two lines, not three");
+
+  let out = render(&diagnostic, text, None);
+  assert!(
+    !out.contains("ccc"),
+    "a line the span does not cover was drawn\n{out}"
+  );
+  assert_eq!(
+    out,
+    "\
+error[mylang::test::swallowed]: a span that swallowed its own newline
+ --> 1:1
+  |
+1 | / aaa
+2 | | bbb
+  | |___^ two lines, not three
+  |
+"
+  );
+}
+
+#[test]
+fn a_label_inside_a_multi_line_span_keeps_the_connector_beside_it() {
+  // A marker row is a row like any other, so the bracket runs down its margin too — otherwise the
+  // connector would appear to stop wherever a reader was told something.
+  let text = "type Widget {\n  width: Int\n  width: Int\n}\n";
+  let message = "`width` is defined twice";
+  let labels = [Label::new(
+    Location::new(0, Span::new(29, 34)),
+    "redefined here",
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::schema::duplicate-field",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, text.len() - 1)),
+  )
+  .with_primary_label("in this type")
+  .with_labels(&labels);
+
+  assert_eq!(
+    render(&diagnostic, text, None),
+    "\
+error[mylang::schema::duplicate-field]: `width` is defined twice
+ --> 1:1
+  |
+1 | / type Widget {
+2 | |   width: Int
+3 | |   width: Int
+  | |   ----- redefined here
+4 | | }
+  | |_^ in this type
   |
 "
   );

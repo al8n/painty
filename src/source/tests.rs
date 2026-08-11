@@ -333,15 +333,34 @@ fn walking_a_set_of_spans_answers_what_resolving_each_one_does() {
     for start in 0..=text.len() {
       for end in start..=text.len() {
         let span = Span::new(start, end);
-        let (at, drawn) = walk.first_line(span);
+        let opening = walk.open(span);
 
         let region = source.resolve(span);
-        assert_eq!(at, region.start(), "{text:?} {start}..{end}: {why}");
         assert_eq!(
-          Some(drawn),
+          opening.at(),
+          region.start(),
+          "{text:?} {start}..{end}: {why}"
+        );
+        assert_eq!(
+          Some(opening.line()),
           region.lines().next(),
           "{text:?} {start}..{end}: {why}"
         );
+        assert_eq!(
+          opening.reaches_another_line(),
+          region.is_multiline(),
+          "{text:?} {start}..{end}: {why}"
+        );
+        // The far end, and the reason it is checked against `lines().last()` rather than against
+        // `end()`: a span that swallowed its own trailing newline ENDS on a line it is not drawn
+        // on, and the closing bracket of a multi-line span goes on the line it is drawn on.
+        if opening.reaches_another_line() {
+          assert_eq!(
+            walk.close(&opening),
+            region.lines().last().expect("a region covers a line"),
+            "{text:?} {start}..{end}: {why}"
+          );
+        }
       }
     }
   }
@@ -364,14 +383,73 @@ fn a_walk_handed_a_span_behind_it_restarts_rather_than_answering_from_where_it_i
     let offsets: Vec<usize> = (0..=text.len()).rev().collect();
     for offset in offsets {
       let span = Span::empty(offset);
-      let (at, drawn) = walk.first_line(span);
+      let opening = walk.open(span);
       let region = source.resolve(span);
-      assert_eq!(at, region.start(), "{text:?} @ {offset} descending: {why}");
       assert_eq!(
-        Some(drawn),
+        opening.at(),
+        region.start(),
+        "{text:?} @ {offset} descending: {why}"
+      );
+      assert_eq!(
+        Some(opening.line()),
         region.lines().next(),
         "{text:?} @ {offset} descending: {why}"
       );
     }
+  }
+}
+
+#[test]
+#[cfg(feature = "terminal")]
+fn a_walk_asked_to_close_behind_itself_restarts_too() {
+  // The companion to the test above, for the other end. `close` stops ON a break that ends exactly
+  // at its target, so it leaves the cursor at an offset BEFORE the one it was sent to — which is
+  // the state a naive forward-only guard would then read as "already past it" and answer from.
+  //
+  // Descending, so every call is behind the one before it, and against `resolve` rather than
+  // against a plausible-looking answer.
+  for (text, why) in WALKED {
+    let source = Source::new(text);
+    let mut walk = super::Walk::new(source);
+
+    let starts: Vec<usize> = (0..=text.len()).rev().collect();
+    for start in starts {
+      let span = Span::new(start, text.len());
+      let opening = walk.open(span);
+      if !opening.reaches_another_line() {
+        continue;
+      }
+      assert_eq!(
+        walk.close(&opening),
+        source
+          .resolve(span)
+          .lines()
+          .last()
+          .expect("a region covers a line"),
+        "{text:?} from {start} descending: {why}"
+      );
+    }
+  }
+}
+
+#[test]
+#[cfg(feature = "terminal")]
+fn the_line_after_one_is_the_line_the_walk_would_have_reached() {
+  // A renderer showing the lines between a multi-line span's ends steps from one to the next rather
+  // than scanning from the top for each, so the step has to answer what the walk would have. Held
+  // against `lines`, which is what every other consumer sees — including on the two edges that make
+  // this crate part company with `str::lines`: a trailing break leaves an empty last line, and a
+  // source with no trailing break ends where its text does.
+  for (text, why) in WALKED {
+    let source = Source::new(text);
+    let walked: Vec<crate::Line<'_>> = source.lines().collect();
+    for pair in walked.windows(2) {
+      assert_eq!(source.line_after(pair[0]), Some(pair[1]), "{text:?}: {why}");
+    }
+    assert_eq!(
+      source.line_after(*walked.last().expect("a source has a line")),
+      None,
+      "{text:?}: a line after the last one: {why}"
+    );
   }
 }
