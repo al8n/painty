@@ -133,17 +133,27 @@ impl Presentation for Rustc {
   }
 
   /// A span opens with a `/` in its column when the row it opens on DRAWS the cell it opens at and
-  /// nothing but blanks precedes it there — so it needs no corner row and its start cell carries
-  /// no marker.
+  /// the span begins at that line's first non-blank — so it needs no corner row and its start cell
+  /// carries no marker.
   ///
-  /// [`Onset::drawn`] is the one a reader would not think to ask for, and it is the one whose
-  /// absence made this wrong. Suppressing the marker is only a saving if the cell the marker would
-  /// have gone on is on the page: a row is cut at
+  /// # What the two conditions are between them: the start stays recoverable
+  ///
+  /// The `/` is not a marker and does not sit over a cell, so a compacted opening is only honest
+  /// while the ROW still determines where the span began. That is one requirement in two halves,
+  /// and each half is one of [`Onset`]'s facts.
+  ///
+  /// [`Onset::drawn`] is the one a reader would not think to ask for. Suppressing the marker is
+  /// only a saving if the cell the marker would have gone on is on the page: a row is cut at
   /// [`max_rendered_width`](super::Terminal::max_rendered_width) CELLS, so an opening five
   /// thousand spaces into a line is out past the `…` and the compact form leaves the span with a
   /// `/` in the margin and nothing at all pointing into the row.
   ///
-  /// # A third condition used to be here, and it was the residual
+  /// [`Onset::at_first_nonblank`] is what makes the cell NAMEABLE once it is on the page. A row
+  /// with no marker on it picks out exactly one position — the first cell holding something — so
+  /// the `/` can only mean that one, and it is a true statement about the span exactly when the
+  /// span starts there.
+  ///
+  /// # A third condition used to be here, and what removing it actually cost
   ///
   /// It asked whether the span's opening was the ONLY thing marked on that line, on the reasoning
   /// that a `/` in the margin is unambiguous when nothing else on the line is being pointed at.
@@ -152,21 +162,26 @@ impl Presentation for Rustc {
   /// the property this phase's gate needs could not be stated without an exception carved around
   /// exactly this.
   ///
-  /// Three things decided it. Planting its removal reddened **nothing**: not a golden, not the
-  /// placement property over every permutation of the whole bracketed corpus, not the compact-row
-  /// oracle. So it was a rule with no case behind it. The ambiguity it guarded against turns out
-  /// not to arise — the other mark gets a marker row of its own, and the `/` sits in the margin
-  /// where no marker ever goes, so the two do not compete for a reading. And a style abstraction
-  /// is exactly the moment this decision's INPUTS get looked at: the other style reads none of
-  /// them, and a fact that only one style consults, that no test covers, and that costs a property
-  /// is a fact to stop computing.
+  /// It went, and it should have; what went with it was a guard the SECOND condition was too weak
+  /// to replace. That condition said only that nothing but blanks preceded the span, which every
+  /// column of the indentation satisfies, so an opening inside the indentation compacted and
+  /// claimed a cell it did not start at. Two of them on one line — one at column 1 and one at the
+  /// first non-blank — both compacted, and two different diagnostics rendered to identical bytes.
   ///
-  /// What it costs: on a line carrying another label, the opening is now `/` in the margin instead
-  /// of an underscore run to the exact cell. One row shorter, and the column is still
-  /// recoverable — a `/` means the span begins at the line's first non-blank, which is what
-  /// [`Onset::blank`] is checking.
+  /// Planting the third condition's removal had reddened **nothing**: not a golden, not the
+  /// placement property over every permutation of the bracketed corpus, not the compact-row
+  /// oracle. That was evidence about the CORPUS rather than about the rule — nothing in it opened
+  /// two multi-line spans at two columns of one indented line, and permuting a corpus that never
+  /// contains the case cannot produce it. The corpus carries it now, and
+  /// `an_opening_the_row_cannot_name_is_marked_rather_than_compacted` is the case stated on its
+  /// own.
+  ///
+  /// What the compact form costs, in the form that is true: on a line carrying another label the
+  /// opening is `/` in the margin instead of an underscore run to the exact cell. One row shorter,
+  /// and the column is still recoverable — a `/` means the span begins at the line's first
+  /// non-blank, which is now what [`Onset::at_first_nonblank`] is checking.
   fn opens_in_margin(&self, onset: Onset) -> bool {
-    onset.drawn() && onset.blank()
+    onset.drawn() && onset.at_first_nonblank()
   }
 
   fn whole(

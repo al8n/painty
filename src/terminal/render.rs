@@ -1,4 +1,8 @@
-use core::{cmp::Reverse, fmt};
+use core::{
+  cmp::Reverse,
+  fmt,
+  panic::{RefUnwindSafe, UnwindSafe},
+};
 
 use std::collections::BinaryHeap;
 
@@ -318,6 +322,31 @@ pub struct Terminal<P> {
   /// through it.
   presentation: &'static dyn Presentation,
 }
+
+/// Every auto trait a [`Terminal`] carries, pinned rather than left to be inherited.
+///
+/// A `dyn` field forwards only what its trait promises, and `presentation` above is the first field
+/// here that is not plain data. Bounded by `Debug` alone it took FOUR of these off a public type —
+/// `Send` and `Sync`, which a caller sharing one configured renderer between worker threads needs,
+/// and `UnwindSafe` and `RefUnwindSafe`, which one rendering inside `catch_unwind` needs. `Unpin`
+/// was the only one that survived, and only because a reference is `Unpin` whatever it points at.
+///
+/// So the whole set is named, not the subset a reader thinks to check. Two of the four went
+/// unnoticed through a review that caught the other two, which is the argument for asserting the
+/// set rather than the pair: the next field of this kind should fail the build instead of a
+/// caller's.
+///
+/// Both forms, because they fail differently. The concrete one is the type the documentation hands
+/// out; the generic one says the renderer adds nothing of its own to whatever the palette already
+/// was, and stays true for a palette this crate has never seen.
+const _: fn() = || {
+  fn carries<T: Send + Sync + Unpin + UnwindSafe + RefUnwindSafe>() {}
+  fn over_any_palette<P: Send + Sync + Unpin + UnwindSafe + RefUnwindSafe>() {
+    carries::<Terminal<P>>();
+  }
+  carries::<Terminal<Theme>>();
+  over_any_palette::<Theme>();
+};
 
 impl Terminal<Theme> {
   /// The built-in theme, with no colour until a caller asks for some.
@@ -981,23 +1010,44 @@ impl<'a> Plan<'a> {
     // asked of `Measure::draws_the_start_of`, which is the same bounded walk that will place the
     // mark, and not of a second reckoning of what is visible.
     //
-    // `blank` used to be the last term of a short-circuited `&&` whose previous term was `drawn`,
-    // and that ordering was the only thing bounding it — "is this indentation" is a scan over as
-    // many bytes as a caller cares to indent with. Handing a style three FACTS means computing
-    // three facts, so the scan carries the geometry walk's own byte budget now. It changes nothing
-    // observable, because an opening the row drew is inside that budget by construction; what it
-    // changes is that the fact is true on its own rather than true given another one.
+    // The other is whether the span begins at the line's first non-blank, and it is stated that way
+    // rather than as "nothing but blanks precedes it" because the second names a SET. A style that
+    // drops the start marker leaves the row to say where the span began, and a row with no marker
+    // on it can name one cell: the first one holding something. Every column of the indentation
+    // satisfies the weaker fact and every one of them decodes to that same cell — so two openings
+    // at two columns of one indented line both compacted and rendered identically. See
+    // `Onset::at_first_nonblank`.
+    //
+    // Both halves ask `char::is_whitespace`, deliberately: a prefix judged blank by one predicate
+    // and a head judged non-blank by another would leave a gap between them wide enough for the
+    // same defect.
+    //
+    // It used to be the last term of a short-circuited `&&` whose previous term was `drawn`, and
+    // that ordering was the only thing bounding it — "is this indentation" is a scan over as many
+    // bytes as a caller cares to indent with. Handing a style a set of FACTS means computing them
+    // all, so the scan carries the geometry walk's own byte budget now, and the head test past it
+    // is one character. It changes nothing observable, because an opening the row drew is inside
+    // that budget by construction; what it changes is that the fact is true on its own rather than
+    // true given another one.
     for placement in &mut placements {
       if placement.closing.is_none() {
         continue;
       }
       let line = placement.opening.line().line();
       let covered = placement.opening.line().covered();
+      let text = line.text();
       let before = covered.start() - line.span().start();
-      let blank = u64::try_from(before).is_ok_and(|bytes| bytes <= measure.budget.bytes)
-        && line.text()[..before].chars().all(char::is_whitespace);
-      placement.compact =
-        style.opens_in_margin(Onset::new(measure.draws_the_start_of(line, covered), blank));
+      let at_first_nonblank = u64::try_from(before)
+        .is_ok_and(|bytes| bytes <= measure.budget.bytes)
+        && text[..before].chars().all(char::is_whitespace)
+        && text[before..]
+          .chars()
+          .next()
+          .is_some_and(|first| !first.is_whitespace());
+      placement.compact = style.opens_in_margin(Onset::new(
+        measure.draws_the_start_of(line, covered),
+        at_first_nonblank,
+      ));
     }
     anchors.dedup_by_key(|line| line.number());
 

@@ -166,8 +166,8 @@ impl Presentation for Miette {
   /// Always. The bracket is in the margin whatever precedes the span, so this style never needs a
   /// row for an opening — and never marks the cell one would have pointed at.
   ///
-  /// So it reads none of [`Onset`]'s three facts, and that is the honest measure of how much of
-  /// the other style's rule was the other style's: the whole of it.
+  /// So it reads neither of [`Onset`]'s facts, and that is the honest measure of how much of the
+  /// other style's rule was the other style's: the whole of it.
   fn opens_in_margin(&self, _onset: Onset) -> bool {
     true
   }

@@ -1873,6 +1873,16 @@ fn bracketed() -> Vec<Bracketed> {
       &[Span::new(2, 26), Span::new(23, 26)],
       "a multi-line span sharing its CLOSING line with a label, which is the other end of that",
     ),
+    // The case the corpus did not hold when the same-line guard was removed, which is why planting
+    // its removal reddened nothing: permuting a corpus that never opens two multi-line spans at two
+    // COLUMNS of one indented line cannot produce one.
+    case(
+      "  identifier(\n    body\n  )\n",
+      &[Span::new(2, 26), Span::new(0, 26)],
+      "two multi-line spans opening at different columns of one indented line, one at the first \
+       non-blank and one inside the indentation — so only the first may be announced by a `/` that \
+       points at no cell, and the other needs a corner row saying which column it is",
+    ),
   ]
 }
 
@@ -2095,9 +2105,16 @@ fn drawn_rows(source: Source<'_>, span: Span) -> usize {
 /// Whether a span's opening is announced in the margin instead of by a marker of its own.
 ///
 /// The `Rustc` style's rule restated from the spec rather than read back off the renderer: a
-/// multi-line span holding nothing but blanks before it on its opening line opens with a `/` and
-/// no corner row, so its start cell is not marked. What that costs a reader is which column
-/// INSIDE THE INDENTATION the span begins at, and what it buys is a row.
+/// multi-line span that BEGINS at its opening line's first non-blank opens with a `/` and no
+/// corner row, so its start cell is not marked. What that costs a reader is nothing, and the
+/// condition is what makes it nothing — a row with no marker on it names one cell, the first one
+/// holding something, so the rule is exactly "the span starts where an unmarked row would say it
+/// does".
+///
+/// It used to restate the weaker "nothing but blanks precedes it on that line", which every column
+/// of the indentation satisfies, so a `/` stood in for starts it was not at and two of them on one
+/// line were indistinguishable. See
+/// `an_opening_the_row_cannot_name_is_marked_rather_than_compacted`.
 ///
 /// **Its inputs are the span and the source, and nothing else.** That is what
 /// `which_cells_are_marked_is_a_function_of_the_span_alone` rests on and is why the third
@@ -2118,8 +2135,13 @@ fn opens_in_margin(source: Source<'_>, span: Span) -> bool {
   let region = source.resolve(span);
   let drawn = region.lines().next().expect("a region covers a line");
   let line = drawn.line();
+  let text = line.text();
   let before = drawn.covered().start() - line.span().start();
-  line.text()[..before].chars().all(char::is_whitespace)
+  text[..before].chars().all(char::is_whitespace)
+    && text[before..]
+      .chars()
+      .next()
+      .is_some_and(|first| !first.is_whitespace())
 }
 
 /// The cells one span's ENDS occupy, whatever the style draws them with.
@@ -2320,6 +2342,49 @@ fn compact_rows(rendered: &str, source: Source<'_>) -> Vec<u64> {
   }
   found.sort_unstable();
   found
+}
+
+#[test]
+fn an_opening_the_row_cannot_name_is_marked_rather_than_compacted() {
+  // The compact form drops a span's start MARKER and puts a `/` in the margin, and what makes that
+  // a saving rather than a loss is that the row still says where the span begins. A row carrying no
+  // marker names exactly one cell — the line's first non-blank, which is the only position the
+  // line's own text picks out — so an opening anywhere else in the indentation is compacted into a
+  // claim about a cell it does not start at. Every column of the indentation decodes to the same
+  // answer, and only one of them is right.
+  //
+  // Two openings on one line is where that stops being merely wrong and becomes unreadable. The
+  // guard that used to prevent it asked whether the span's opening was the only thing marked on its
+  // line, and was removed because planting its removal reddened nothing across the whole suite.
+  // That was a fact about the CORPUS: no case in it opened two multi-line spans at two different
+  // columns of one indented line, and permuting a corpus that never contains the case cannot
+  // produce it. This is the case.
+  const TEXT: &str = "  identifier(\n    body\n  )\n";
+  let source = Source::new(TEXT);
+  // Line 1 is `  identifier(`, so its first non-blank is byte 2 and column 3. The other two open
+  // at columns 1 and 2, inside the indentation, and all three close on line 3.
+  let heads = Span::new(2, 26);
+  let indented = Span::new(0, 26);
+  let one_space_in = Span::new(1, 26);
+
+  // `compact_rows` counts the `/` glyphs on each source row, so two of them against line 1 is two
+  // spans laying claim to one start.
+  let rendered = render_spans(Style::Rustc, TEXT, &[heads, indented]);
+  assert_eq!(
+    compact_rows(&rendered, source),
+    vec![1],
+    "line 1 carries a `/` for an opening that is not where a `/` says it is, so two spans three \
+     columns apart are announced identically\n{rendered}"
+  );
+
+  // The same defect stated where a reader meets it, and this half needs no rule restated at all:
+  // the rendering is the whole of what a reader is given, so two diagnostics that differ cannot be
+  // one string. These two differ only in which column of the indentation the second span opens at.
+  let moved = render_spans(Style::Rustc, TEXT, &[heads, one_space_in]);
+  assert_ne!(
+    rendered, moved,
+    "an opening at column 1 and an opening at column 2 rendered to the same bytes\n{rendered}"
+  );
 }
 
 // ── An opening the row does not draw ────────────────────────────────────────────────────────────

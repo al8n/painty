@@ -396,8 +396,9 @@ advice[mylang::test::final-byte]: the last thing in the file
 
 #[test]
 fn a_multi_line_span_is_bracketed_between_the_lines_it_covers() {
-  // The compact opening: nothing else is drawn under line 2 and nothing but blanks precedes the
-  // span on it, so the `/` in the margin opens the bracket and no corner row is needed.
+  // The compact opening: the span begins at line 2's first non-blank, which is the one cell a row
+  // carrying no marker is able to name, so the `/` in the margin opens the bracket and no corner
+  // row is needed.
   let text = "query Hero {\n  hero {\n    name\n    friends\n  }\n}\n";
   let message = "this selection set is nested too deeply";
   let start = text.find("hero {").expect("the fixture selects");

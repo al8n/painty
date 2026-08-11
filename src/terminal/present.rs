@@ -65,7 +65,7 @@
 //! [`Terminal::like_miette`](super::Terminal::like_miette) — which is the whole of what the design
 //! asked for, and which can grow into a public trait later without breaking anything.
 
-use core::fmt;
+use core::{fmt, panic::RefUnwindSafe};
 
 use super::{
   paint::Painter,
@@ -92,7 +92,7 @@ pub(super) enum Part {
 /// What a style is told about the line a multi-line span opens on.
 ///
 /// Facts, not a recommendation, and each independently true — which costs something the
-/// short-circuited conjunction this replaced did not pay. See [`Onset::blank`].
+/// short-circuited conjunction this replaced did not pay. See [`Onset::at_first_nonblank`].
 ///
 /// # Both facts are about the span and its own line, and that is the point
 ///
@@ -100,17 +100,24 @@ pub(super) enum Part {
 /// removing it is what makes `which_cells_are_marked_is_a_function_of_the_span_alone` statable in
 /// full. While it was here, adding an unrelated label to a line could change whether a DIFFERENT
 /// span's opening cell was marked: a property saying otherwise would have failed, and one written
-/// around it would have been the gate weakened to pass. See
-/// [`Rustc::opens_in_margin`](super::rustc::Rustc::opens_in_margin) for what dropping it cost.
+/// around it would have been the gate weakened to pass.
+///
+/// Dropping it is only sound because the two that remain are enough to make an unmarked opening
+/// **recoverable**, and it was not sound while the second of them said merely that the span's
+/// prefix was blank — see [`at_first_nonblank`](Self::at_first_nonblank) for the case that
+/// falsified it and for what a row with no marker on it is able to name.
 #[derive(Debug, Clone, Copy)]
 pub(super) struct Onset {
   drawn: bool,
-  blank: bool,
+  at_first_nonblank: bool,
 }
 
 impl Onset {
-  pub(super) const fn new(drawn: bool, blank: bool) -> Self {
-    Self { drawn, blank }
+  pub(super) const fn new(drawn: bool, at_first_nonblank: bool) -> Self {
+    Self {
+      drawn,
+      at_first_nonblank,
+    }
   }
 
   /// Whether the row, as it will be drawn, shows the cell the span opens at.
@@ -123,7 +130,21 @@ impl Onset {
     self.drawn
   }
 
-  /// Whether nothing but blanks precedes the span on that line.
+  /// Whether the span begins at the first non-blank of that line — the one cell an unmarked row is
+  /// able to name.
+  ///
+  /// # It used to say only that the prefix was blank, and that names a set rather than a cell
+  ///
+  /// A style that suppresses a span's start marker leaves the row to say where the span begins,
+  /// and a row carrying no marker offers a reader exactly one position: the first cell of the line
+  /// that holds something. Every column of the indentation satisfies "nothing but blanks precedes
+  /// it", and every one of them decodes to that same cell, so the weaker fact let an opening
+  /// inside the indentation be announced as an opening at the text.
+  ///
+  /// Two of them on one line is where that stopped being recoverable at all — both compacted, both
+  /// drew a glyph in the margin, and neither marked a cell, so two spans at different columns
+  /// produced identical bytes. `an_opening_the_row_cannot_name_is_marked_rather_than_compacted`
+  /// is that case.
   ///
   /// **Bounded here rather than by the caller's `&&`.** This used to be the last term of a
   /// short-circuited conjunction whose previous term was [`drawn`](Self::drawn), and that ordering
@@ -132,8 +153,8 @@ impl Onset {
   /// scan is now bounded by the same byte budget the geometry walk spends. Nothing observable
   /// changes — an opening the row drew is inside that budget by construction — and the fact is
   /// true on its own instead of true given another one.
-  pub(super) const fn blank(&self) -> bool {
-    self.blank
+  pub(super) const fn at_first_nonblank(&self) -> bool {
+    self.at_first_nonblank
   }
 }
 
@@ -205,7 +226,24 @@ impl<'m> Frame<'m> {
 /// Object-safe on purpose. The renderer holds a `&'static dyn Presentation`, so the choice is a
 /// value rather than a type parameter: a caller reading `--style` out of a flag keeps one
 /// `Terminal` type, and nothing in this crate's public signatures mentions the trait.
-pub(super) trait Presentation: fmt::Debug {
+///
+/// # `Sync + RefUnwindSafe` are the two an `&'static` forwards
+///
+/// A trait object carries only the auto traits its trait names, and this one sits in a field of
+/// [`Terminal`](super::Terminal), which is public. Bounded by `Debug` alone it took `Send`, `Sync`,
+/// `UnwindSafe` and `RefUnwindSafe` off every `Terminal` — a compatibility break for a caller that
+/// shares one configured renderer between worker threads, and for one that renders inside
+/// `catch_unwind`.
+///
+/// These two are what fix all four rather than the two that name them: `&T` is `Send` when `T` is
+/// `Sync`, and `&T` is both `UnwindSafe` and `RefUnwindSafe` when `T` is `RefUnwindSafe`. Adding
+/// `Send` or `UnwindSafe` here would constrain implementors to buy nothing, because the renderer
+/// never owns a `Presentation` and never moves one. What the pair asks of an implementor is what a
+/// presentation already is: an immutable `'static` value with no interior mutability and no thread
+/// affinity. The set is pinned where the field is — see the assertion under
+/// [`Terminal`](super::Terminal) — so the next field of this kind fails the build instead of a
+/// caller's.
+pub(super) trait Presentation: fmt::Debug + Sync + RefUnwindSafe {
   /// The severity, the code and the message.
   ///
   /// **Diverges:** `error[code]: message` on one line, against the code on a line of its own and
