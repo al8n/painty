@@ -737,7 +737,7 @@ impl Measure {
   ///
   /// It bounds the prefix scan at the one call site as a side effect, which is the whole of what
   /// the byte test that used to sit there was doing: an opening the row DREW is fewer than
-  /// [`Row::drawn_end`] bytes into the line, and that is at most [`Budget::bytes`]; an opening on a
+  /// [`Row::drawn_end`](super::width::Row::drawn_end) bytes into the line, and that is at most [`Budget::bytes`]; an opening on a
   /// row that was not cut is at most the length of a line that fitted the byte budget entire.
   fn draws_the_start_of(&self, line: Line<'_>, covered: Span) -> bool {
     let mut marks = [Mark::new(covered, ())];

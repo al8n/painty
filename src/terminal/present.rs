@@ -15,10 +15,52 @@
 //!
 //! # It is crate-private, and that is a decision
 //!
-//! Phase 3 is HTML, and it is the FOURTH example. HTML has no cell column, no monospace advance
-//! and no drawn glyph; most of what is below is expressed in exactly those terms, so a public
-//! trait frozen here would be a public trait Phase 3 has to break. `docs/` carries the per-method
-//! verdict. What a caller gets instead is the choice —
+//! Phase 3 is HTML, and it is the FOURTH example — the one the design says is most likely to
+//! collapse a trait fitted to terminals. So every method below was checked against it before this
+//! was frozen, and the answer is that **most of them do not survive**:
+//!
+//! | method | can HTML answer it? |
+//! |---|---|
+//! | [`header`](Presentation::header) | yes |
+//! | [`open_block`](Presentation::open_block) | yes, ignoring `gutter` |
+//! | [`close_block`](Presentation::close_block) | yes, ignoring `gutter` |
+//! | [`help`](Presentation::help) | yes, ignoring `gutter` |
+//! | [`opens_in_margin`](Presentation::opens_in_margin) | yes, but vacuously — see below |
+//! | [`line_field`](Presentation::line_field) | **no** |
+//! | [`elision_row`](Presentation::elision_row) | **no** |
+//! | [`bracket`](Presentation::bracket) | **no** |
+//! | [`whole`](Presentation::whole) | **no** |
+//! | [`opens`](Presentation::opens) | **no** |
+//! | [`closes`](Presentation::closes) | **no** |
+//!
+//! The six failures have ONE shape, which is what makes this a finding rather than a list.
+//! Everything that positions or draws a mark is denominated in **display cells** and in **`char`**:
+//! `whole` takes a `Range<u64>` of cells, `opens` and `closes` take a cell, `bracket` returns a
+//! character to stand in a cell, and `line_field` and `elision_row` pad to a cell width. HTML has
+//! no cell. Its mark is an element wrapped around the span's BYTES, its bracket is a border or a
+//! pseudo-element rather than a glyph, and its alignment is the browser's rather than something
+//! painted one column at a time. An HTML style could return `Some('│')` and pad with `&nbsp;`, but
+//! that is emulating a terminal in a medium that has real boxes.
+//!
+//! §4 of the design already draws that line — resolution reports *character* columns and the
+//! terminal converts to *display* columns — and this trait sits **below** the conversion, because
+//! [`Terminal::render`](super::Terminal::render) has already turned every span into cells before a
+//! style is called. So `Presentation` is a terminal trait by construction, and the honest reading
+//! of the two that pass on a technicality is worth stating too: three of the four ignore `gutter`,
+//! and `opens_in_margin` survives only because HTML's answer is a constant — its inputs are
+//! whether a CELL budget cut the row and whether the source is indented, and a browser never cuts
+//! a row.
+//!
+//! **So Phase 3 is a peer of [`Terminal`](super::Terminal), not an implementor of this.** What the
+//! two outputs share is [`Plan`](super::render::Plan) — which lines are drawn, where each span's
+//! ends fall, which bracket runs where, what is elided — and a plan is stated in lines and byte
+//! spans, which both media have. If a medium-independent version of this trait is ever wanted, the
+//! change it needs is already visible: hand a style a `RegionLine`, which carries the line and the
+//! byte span it covers, instead of a `Range<u64>` of cells, and a semantic bracket value instead of
+//! a `char`. That is a bigger claim than two terminal styles can support, which is why it is not
+//! being made here.
+//!
+//! What a caller gets instead of a trait is the choice —
 //! [`Terminal::like_rustc`](super::Terminal::like_rustc) and
 //! [`Terminal::like_miette`](super::Terminal::like_miette) — which is the whole of what the design
 //! asked for, and which can grow into a public trait later without breaking anything.
