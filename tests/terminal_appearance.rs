@@ -44,11 +44,12 @@ const SCHEMA: &str = "type Widget {\n  width: Int\n  width: Int\n}\n";
 /// the RENDERER's promises, and a style is the newest thing able to break one — it writes rows of
 /// its own choosing through the same painter. So those two are asked of every style, and a style
 /// added without a row here is a style that was never asked.
-fn every_style(terminal: Terminal<Theme>) -> [Terminal<Theme>; 3] {
+fn every_style(terminal: Terminal<Theme>) -> [Terminal<Theme>; 4] {
   [
     terminal.like_rustc(),
     terminal.like_miette(),
     terminal.like_ariadne(),
+    terminal.like_codespan(),
   ]
 }
 

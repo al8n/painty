@@ -608,6 +608,7 @@ fn a_refused_write_is_reported_and_leaves_no_style_open() {
       terminal.with_tab_width(case.tab_width).like_rustc(),
       terminal.with_tab_width(case.tab_width).like_miette(),
       terminal.with_tab_width(case.tab_width).like_ariadne(),
+      terminal.with_tab_width(case.tab_width).like_codespan(),
     ] {
       let mut full = String::new();
       styled

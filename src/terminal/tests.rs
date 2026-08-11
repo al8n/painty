@@ -1861,6 +1861,17 @@ fn bracketed() -> Vec<Bracketed> {
       &[Span::new(2, 8), Span::new(11, 17)],
       "two multi-line spans that do NOT overlap, which need only one column between them",
     ),
+    // Added with the fourth style, which crosses a margin differently from the first. Nothing in
+    // the corpus reached the case: nested spans close innermost-first, so the column a closing
+    // corner runs through is always empty by the time it runs, and two styles that disagree about
+    // what to draw in an OCCUPIED column drew the same bytes everywhere. Partial overlap is the
+    // arrangement where a span closes while one that opened later is still open.
+    case(
+      "a (\n b [\nc\n)\n d\n]\n",
+      &[Span::new(2, 12), Span::new(7, 17)],
+      "two multi-line spans that PARTIALLY overlap, so one closes while the other is still open — \
+       the only arrangement where a closing corner crosses a bar that is not its own",
+    ),
     case(
       "start {\n a\n b\n c\n d\n e\n f\n g\n h\n i\n j\n}\nend\n",
       &[Span::new(6, 39)],
@@ -1932,9 +1943,12 @@ enum Style {
   Miette,
   /// One frame around the whole report, and arrows drawn into the source rows.
   Ariadne,
+  /// The indented arrangement drawn in box characters, with corners that pass behind what they
+  /// cross.
+  Codespan,
 }
 
-const STYLES: [Style; 3] = [Style::Rustc, Style::Miette, Style::Ariadne];
+const STYLES: [Style; 4] = [Style::Rustc, Style::Miette, Style::Ariadne, Style::Codespan];
 
 impl Style {
   fn terminal(self) -> Terminal<Theme> {
@@ -1943,6 +1957,7 @@ impl Style {
       Style::Rustc => terminal.like_rustc(),
       Style::Miette => terminal.like_miette(),
       Style::Ariadne => terminal.like_ariadne(),
+      Style::Codespan => terminal.like_codespan(),
     }
   }
 
@@ -1950,7 +1965,7 @@ impl Style {
   const fn wall(self) -> char {
     match self {
       Style::Rustc => '|',
-      Style::Miette | Style::Ariadne => '\u{2502}',
+      Style::Miette | Style::Ariadne | Style::Codespan => '\u{2502}',
     }
   }
 
@@ -1959,9 +1974,9 @@ impl Style {
     match self {
       Style::Rustc => '|',
       Style::Miette => '\u{b7}',
-      // Unchanged from the source rows: this style's frame runs unbroken, and what says a row is
+      // Unchanged from the source rows: these styles' walls run unbroken, and what says a row is
       // not a line of the file is that it carries no number.
-      Style::Ariadne => '\u{2502}',
+      Style::Ariadne | Style::Codespan => '\u{2502}',
     }
   }
 
@@ -1972,6 +1987,9 @@ impl Style {
       Style::Miette => &['\u{2501}', '\u{2533}', '\u{2500}', '\u{252c}'],
       // No heavy pair, because this style tells a primary from a secondary by colour alone.
       Style::Ariadne => &['\u{2500}', '\u{252c}'],
+      // The same pair as the indented style for a span drawn on one line, and a third character
+      // for the END of a multi-line one, which sits on a cell of its own at the end of a rule.
+      Style::Codespan => &['^', '-', '\''],
     }
   }
 
@@ -1986,6 +2004,9 @@ impl Style {
       Style::Rustc => &[],
       Style::Miette => &['\u{2570}', '\u{2517}'],
       Style::Ariadne => &['\u{2570}'],
+      // None, for the indented style's reason: this one's corner rows are box characters, which
+      // are not marks, and each carries a real end mark that must be counted.
+      Style::Codespan => &[],
     }
   }
 
@@ -2000,7 +2021,7 @@ impl Style {
   /// margin, the other points an arrow at the line — which is what makes this an axis rather than
   /// one style's quirk.
   const fn marks_multiline_ends(self) -> bool {
-    matches!(self, Style::Rustc)
+    matches!(self, Style::Rustc | Style::Codespan)
   }
 }
 

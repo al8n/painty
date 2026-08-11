@@ -9,6 +9,7 @@ use std::collections::BinaryHeap;
 use super::{
   ColorCapability, LineCells,
   ariadne::Ariadne,
+  codespan::Codespan,
   miette::Miette,
   paint::Painter,
   present::{Drawn, Frame, Onset, Part, Presentation},
@@ -423,6 +424,23 @@ impl<P: Palette> Terminal<P> {
   #[must_use]
   pub fn like_ariadne(mut self) -> Self {
     self.presentation = &Ariadne;
+    self
+  }
+
+  /// Draws in the shape `codespan-reporting` does.
+  ///
+  /// The arrangement [`like_rustc`](Self::like_rustc) draws — an arrow to the location, carets
+  /// under the cells, the label on the marker's own row — in box-drawing characters, with a
+  /// multi-line span's two corners reaching back into the source behind whatever they cross.
+  ///
+  /// Named for the renderer whose shape it follows, and not byte-compatible with it. One departure
+  /// is deliberate rather than incidental: that crate announces a multi-line span in the margin
+  /// whenever the span begins at or before its line's first non-blank, which cannot distinguish two
+  /// spans opening at two columns of the same indentation. painty uses the rule
+  /// [`like_rustc`](Self::like_rustc) uses.
+  #[must_use]
+  pub fn like_codespan(mut self) -> Self {
+    self.presentation = &Codespan;
     self
   }
 

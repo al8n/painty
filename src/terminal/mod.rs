@@ -3,6 +3,7 @@
 //! Public, unlike the other modules, because a caller selects this renderer by name.
 
 mod ariadne;
+mod codespan;
 mod detect;
 mod miette;
 mod paint;

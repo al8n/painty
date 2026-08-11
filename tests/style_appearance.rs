@@ -50,6 +50,7 @@ struct Case {
   rustc: &'static str,
   miette: &'static str,
   ariadne: &'static str,
+  codespan: &'static str,
 }
 
 /// The span of `needle`'s first occurrence in `text`.
@@ -82,6 +83,7 @@ fn cases() -> Vec<Case> {
   const NESTED: &str = "outer (\n  inner (\n    x\n  )\n)\n";
   const WIDE: &str = "\tlet x = \u{65e5}\u{672c};\n";
   const SHARED: &str = "  identifier(\n    body\n  )\n";
+  const BORROWS: &str = "let a = &x;\nlet b = &y;\nuse(a);\nuse(b);\n";
 
   vec![
     Case {
@@ -125,6 +127,15 @@ mylang::schema::duplicate-field
    │
    │ Help: rename one of the two definitions
 ───╯
+",
+      codespan: "\
+error[mylang::schema::duplicate-field]: `width` is defined twice
+  ┌─ widget.graphql:3:3
+  │
+3 │   width: Int
+  │   ^^^^^ redefined here
+  │
+  = rename one of the two definitions
 ",
     },
     Case {
@@ -173,6 +184,16 @@ mylang::schema::duplicate-field
    │     ╰── redefined here
 ───╯
 ",
+      codespan: "\
+error[mylang::schema::duplicate-field]: `width` is defined twice
+  ┌─ 3:3
+  │
+2 │   width: Int
+  │   ----- first defined here
+3 │   width: Int
+  │   ^^^^^ redefined here
+  │
+",
     },
     Case {
       why: "two labels on one line, in the caller's order and not by column",
@@ -216,6 +237,15 @@ mylang::schema::duplicate-field
    │               ──┬──
    │                 ╰── first defined here
 ───╯
+",
+      codespan: "\
+error[mylang::schema::duplicate-field]: `width` is defined twice
+  ┌─ widget.graphql:1:27
+  │
+1 │ type Widget { width: Int, width: Float }
+  │                           ^^^^^ redefined here
+  │               ----- first defined here
+  │
 ",
     },
     Case {
@@ -263,6 +293,17 @@ mylang::query::too-deep
    │ │
    │ ╰──── this selection set
 ───╯
+",
+      codespan: "\
+error[mylang::query::too-deep]: this selection set is nested too deeply
+  ┌─ hero.graphql:2:3
+  │
+2 │ ╭   hero {
+3 │ │     name
+4 │ │     friends
+5 │ │   }
+  │ ╰───^ this selection set
+  │
 ",
     },
     Case {
@@ -314,6 +355,19 @@ mylang::type::branches
    │ │
    │ ╰──── this expression
 ───╯
+",
+      codespan: "\
+error[mylang::type::branches]: the branches disagree
+  ┌─ 1:9
+  │
+1 │   let x = if a {
+  │ ╭─────────^
+2 │ │   1
+3 │ │ } else {
+4 │ │   2
+5 │ │ };
+  │ ╰─^ this expression
+  │
 ",
     },
     Case {
@@ -367,6 +421,19 @@ mylang::query::unused-fragment
    │ │
    │ ╰──── declared here
 ───╯
+",
+      codespan: "\
+warning[mylang::query::unused-fragment]: this fragment is never used
+  ┌─ 1:1
+  │
+1 │ ╭ fragment F on Query {
+2 │ │   a
+3 │ │   b
+4 │ │   c
+  · │
+9 │ │ }
+  │ ╰─^ declared here
+  │
 ",
     },
     Case {
@@ -423,6 +490,20 @@ mylang::type::nested
    │ ╰───── this one
 ───╯
 ",
+      codespan: "\
+error[mylang::type::nested]: two of these disagree
+  ┌─ 1:7
+  │
+1 │    outer (
+  │ ╭────────^
+2 │ │╭   inner (
+3 │ ││     x
+4 │ ││   )
+  │ │╰───' and this one
+5 │ │  )
+  │ ╰──^ this one
+  │
+",
     },
     Case {
       why: "a tab and two-cell ideographs, where a cell is not a character",
@@ -462,6 +543,14 @@ mylang::test::wide
    │               ╰── two cells each
 ───╯
 ",
+      codespan: "\
+advice[mylang::test::wide]: a wide name behind a tab
+  ┌─ 1:10
+  │
+1 │     let x = 日本;
+  │             ^^^^ two cells each
+  │
+",
     },
     Case {
       why: "nothing to point at, so neither style opens a block",
@@ -484,6 +573,9 @@ mylang::input::synthesized
 ",
       ariadne: "\
 [mylang::input::synthesized] Warning: this document was generated, so it has no positions
+",
+      codespan: "\
+warning[mylang::input::synthesized]: this document was generated, so it has no positions
 ",
     },
     // What closing the compact form's residual looks like. The `/` in the margin used to be a
@@ -538,6 +630,88 @@ mylang::type::arity
    │ ╰──── this call
 ───╯
 ",
+      codespan: "\
+error[mylang::type::arity]: this call takes one argument
+  ┌─ 1:3
+  │
+1 │ ╭   identifier(
+  │ │   ---------- declared with none
+2 │ │     body
+3 │ │   )
+  │ ╰───^ this call
+  │
+",
+    },
+    // Two spans that overlap without nesting, which is the only arrangement where a corner runs
+    // through a column that is not empty — and where the styles disagree about what to do with the
+    // bar it crosses. Nothing else in this table reaches it: nested spans close innermost-first, so
+    // the column a closing corner passes is always free by the time it passes.
+    Case {
+      why: "two multi-line spans that partially overlap, so a corner crosses a bar still in use",
+      text: BORROWS,
+      origin: None,
+      code: "mylang::borrow::overlapping",
+      severity: Severity::Error,
+      message: "these two borrows overlap",
+      primary: Some(between(BORROWS, "&x", "use(a)")),
+      primary_label: Some("this one"),
+      labels: vec![(between(BORROWS, "&y", "use(b)"), "and this one")],
+      help: None,
+      rustc: "\
+error[mylang::borrow::overlapping]: these two borrows overlap
+ --> 1:9
+  |
+1 |    let a = &x;
+  |  __________^
+2 | |  let b = &y;
+  | | _________-
+3 | || use(a);
+  | |_______^ this one
+4 |  | use(b);
+  |  |______- and this one
+  |
+",
+      miette: "\
+mylang::borrow::overlapping
+
+  × these two borrows overlap
+   ╭─[1:9]
+ 1 │ ┏  let a = &x;
+ 2 │ ┃╭ let b = &y;
+ 3 │ ┣│ use(a);
+   · ┗━━━━━ this one
+ 4 │  ├ use(b);
+   ·  ╰──── and this one
+   ╰────
+",
+      ariadne: "\
+[mylang::borrow::overlapping] Error: these two borrows overlap
+   ╭─[ 1:9 ]
+   │
+ 1 │ ╭──▶ let a = &x;
+ 2 │ │╭─▶ let b = &y;
+ 3 │ ├──▶ use(a);
+   │ ││
+   │ ╰───── this one
+ 4 │  ├─▶ use(b);
+   │  │
+   │  ╰──── and this one
+───╯
+",
+      codespan: "\
+error[mylang::borrow::overlapping]: these two borrows overlap
+  ┌─ 1:9
+  │
+1 │    let a = &x;
+  │ ╭──────────^
+2 │ │  let b = &y;
+  │ │╭─────────'
+3 │ ││ use(a);
+  │ ╰│──────^ this one
+4 │  │ use(b);
+  │  ╰──────' and this one
+  │
+",
     },
   ]
 }
@@ -581,6 +755,7 @@ fn styles(case: &Case) -> Vec<(&'static str, Terminal<Theme>, &'static str)> {
     ("rustc", Terminal::plain().like_rustc(), case.rustc),
     ("miette", Terminal::plain().like_miette(), case.miette),
     ("ariadne", Terminal::plain().like_ariadne(), case.ariadne),
+    ("codespan", Terminal::plain().like_codespan(), case.codespan),
   ]
 }
 
@@ -601,19 +776,33 @@ fn each_style_draws_the_whole_set() {
 #[test]
 fn no_two_styles_draw_the_same_bytes() {
   // A style that renders identically to one already here is not a style, it is a second name for
-  // one — and the rule this phase works to is that what has no divergence behind it does not get
-  // a file. Asserted over the whole set rather than over one case, because two styles can agree
-  // on a diagnostic that exercises neither of the things they differ in.
-  for case in cases() {
-    let drawn = styles(&case);
-    for (index, (name, _, expected)) in drawn.iter().enumerate() {
-      for (other, _, against) in &drawn[index + 1..] {
-        assert_ne!(
-          expected, against,
-          "{name} and {other} drew the same bytes: {}",
-          case.why
-        );
-      }
+  // one — and the rule this phase works to is that what has no divergence behind it does not get a
+  // file.
+  //
+  // Over the whole SET rather than case by case, and the difference is a finding rather than a
+  // convenience. Two styles can agree on a diagnostic that exercises nothing they differ in, and
+  // the corpus holds one: a diagnostic naming no position it can draw is a header and nothing
+  // else, and `codespan`'s header is `rustc`'s to the byte — two renderers designed independently
+  // of one another arrived at `error[code]: message`. Written per case, this would have to be
+  // satisfied by inventing a difference in the one method where two of the styles genuinely have
+  // none, which is the opposite of what these files exist to measure.
+  //
+  // What it does still catch is a whole style that is a copy: for two styles to pass here they
+  // have to differ SOMEWHERE in ten diagnostics that between them cover a header, a location line,
+  // one label and two, a compact and a non-compact multi-line opening, two open at once, an
+  // elision, a help line, and a block that is never opened.
+  let all = cases();
+  let names: Vec<&str> = styles(&all[0]).iter().map(|(name, _, _)| *name).collect();
+  for (index, name) in names.iter().enumerate() {
+    for (offset, other) in names[index + 1..].iter().enumerate() {
+      let differs = all
+        .iter()
+        .any(|case| styles(case)[index].2 != styles(case)[index + 1 + offset].2);
+      assert!(
+        differs,
+        "{name} and {other} drew the same bytes for every case in the set, so one of them is not \
+         a style"
+      );
     }
   }
 }
