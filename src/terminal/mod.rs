@@ -3,7 +3,11 @@
 //! Public, unlike the other modules, because a caller selects this renderer by name.
 
 mod detect;
+mod miette;
+mod paint;
+mod present;
 mod render;
+mod rustc;
 mod width;
 
 pub use detect::{CapturedEnvironment, ColorCapability, ColorChoice, Environment};

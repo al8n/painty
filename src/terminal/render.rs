@@ -1,13 +1,21 @@
-use core::{cmp::Reverse, fmt};
+use core::{
+  cmp::Reverse,
+  fmt,
+  panic::{RefUnwindSafe, UnwindSafe},
+};
 
 use std::collections::BinaryHeap;
 
 use super::{
   ColorCapability, LineCells,
-  width::{Budget, Mark, Row, control_picture},
+  miette::Miette,
+  paint::Painter,
+  present::{Frame, Onset, Part, Presentation},
+  rustc::Rustc,
+  width::{Budget, Mark},
 };
 use crate::{
-  Color, Diagnostic, Line, Palette, RegionLine, Role, Source, Span, Style, Theme,
+  Diagnostic, Line, Palette, RegionLine, Role, Source, Span, Theme,
   source::{Opening, Walk},
 };
 
@@ -66,13 +74,13 @@ impl<'a> Input<'a> {
 /// [the numeric widths](crate#numeric-widths) makes it a `usize`, where spelling a `u32` here would
 /// be declaring a ceiling that is `Location`'s to declare and not this file's.
 #[derive(Debug, Clone, Copy)]
-struct Drawable<'a> {
-  at: usize,
-  input: usize,
-  from: Input<'a>,
-  span: Span,
-  text: Option<&'a str>,
-  primary: bool,
+pub(super) struct Drawable<'a> {
+  pub(super) at: usize,
+  pub(super) input: usize,
+  pub(super) from: Input<'a>,
+  pub(super) span: Span,
+  pub(super) text: Option<&'a str>,
+  pub(super) primary: bool,
 }
 
 /// Which part of a span one mark draws.
@@ -82,7 +90,7 @@ struct Drawable<'a> {
 /// a different line and the two are the same span — which is why this is a property of the mark
 /// rather than of the row it lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ends {
+pub(super) enum Ends {
   /// The whole of a span that is drawn on one line.
   Whole,
   /// Where a span that reaches a later line begins.
@@ -93,36 +101,31 @@ enum Ends {
 
 /// What one marker row says, and where the position under it starts.
 #[derive(Debug, Clone, Copy)]
-struct Phrase<'a> {
-  text: Option<&'a str>,
-  primary: bool,
+pub(super) struct Phrase<'a> {
+  pub(super) text: Option<&'a str>,
+  pub(super) primary: bool,
   /// Where this was in the caller's order.
-  at: usize,
+  pub(super) at: usize,
   /// The line the mark is drawn under. Carried rather than paired up outside, because the marks of
   /// a whole render are one flat run and an excerpt takes its slice of them by walking it.
-  line: u64,
-  ends: Ends,
+  pub(super) line: u64,
+  pub(super) ends: Ends,
   /// The connector column the span was given, counting from 1, or zero for a span that needs none.
-  depth: u64,
-  /// Opens with a `/` in the margin rather than with an underscore run of its own.
-  compact: bool,
+  pub(super) depth: u64,
+  /// Opens in the margin rather than with a row of its own — see
+  /// [`Presentation::opens_in_margin`].
+  pub(super) compact: bool,
 }
 
 impl Phrase<'_> {
   /// The style everything this mark draws is written in — the marker, the label, and the connector
   /// that joins them.
-  const fn role(&self) -> Role {
+  pub(super) const fn role(&self) -> Role {
     if self.primary {
       Role::PrimaryLabel
     } else {
       Role::SecondaryLabel
     }
-  }
-
-  /// The character a reader already knows: a caret for the position the diagnostic is about, a dash
-  /// for one it is only mentioning.
-  const fn marker(&self) -> char {
-    if self.primary { '^' } else { '-' }
   }
 }
 
@@ -134,37 +137,43 @@ impl Phrase<'_> {
 /// It may name none. A line between a multi-line span's ends carries no mark and is drawn anyway,
 /// because a bracket down the margin of lines a reader cannot see says nothing.
 #[derive(Debug, Clone)]
-struct Excerpt<'a> {
-  line: Line<'a>,
-  marks: core::ops::Range<usize>,
+pub(super) struct Excerpt<'a> {
+  pub(super) line: Line<'a>,
+  pub(super) marks: core::ops::Range<usize>,
   /// The line before this one in the same input, when lines were left out between them and a `...`
   /// row stands in for what is missing.
-  after: Option<u64>,
+  pub(super) after: Option<u64>,
 }
 
 /// One multi-line span's connector: the rows it runs down, the column it runs in, and how it starts.
 #[derive(Debug, Clone, Copy)]
-struct Connector {
-  first: u64,
-  last: u64,
+pub(super) struct Connector {
+  pub(super) first: u64,
+  pub(super) last: u64,
   /// Counting from 1. Two spans open at the same row never share one — see [`Plan::block`].
-  depth: u64,
-  role: Role,
-  /// Drawn as `/` on the source row itself, rather than as an underscore run below it.
-  compact: bool,
+  pub(super) depth: u64,
+  pub(super) role: Role,
+  /// Opens in the margin rather than with a row of its own — see
+  /// [`Presentation::opens_in_margin`].
+  pub(super) compact: bool,
 }
 
 impl Connector {
-  /// What stands in this connector's column on the source row of `line`.
-  const fn on_source_row(&self, line: u64) -> Option<char> {
+  /// Which part of this bracket the source row of `line` shows, and `None` where the bracket is
+  /// not open at all.
+  ///
+  /// Arithmetic over the connector's two ends, so it is the renderer's and not a style's: a style
+  /// that worked out for itself which line was which could disagree with the plan about where a
+  /// span ends. What the style is asked is only what to DRAW for the answer.
+  pub(super) const fn part_on(&self, line: u64) -> Option<Part> {
     if line < self.first || line > self.last {
       None
     } else if line == self.first {
-      // The span has not opened yet on its own source row: what opens it is either the `/` here or
-      // the underscore run on the row below, and those are the same decision.
-      if self.compact { Some('/') } else { None }
+      Some(Part::Opens)
+    } else if line == self.last {
+      Some(Part::Closes)
     } else {
-      Some('|')
+      Some(Part::Runs)
     }
   }
 
@@ -172,26 +181,26 @@ impl Connector {
   ///
   /// A span's ends are both drawn, so neither can be inside a gap — which is what makes this a
   /// comparison against the two lines that bound it rather than against the lines it hides.
-  const fn spans_the_gap(&self, above: u64, below: u64) -> bool {
+  pub(super) const fn spans_the_gap(&self, above: u64, below: u64) -> bool {
     self.first <= above && self.last >= below
   }
 }
 
 /// One input's whole block: what the `-->` line says, and the geometry every row under it shares.
 #[derive(Debug, Clone)]
-struct Block<'a> {
-  origin: Option<&'a str>,
+pub(super) struct Block<'a> {
+  pub(super) origin: Option<&'a str>,
   /// Where the input's earliest caller position is, in the units the `-->` line reports.
-  line: u64,
-  column: u64,
+  pub(super) line: u64,
+  pub(super) column: u64,
   /// The earliest caller position anywhere in this input, which is where the input sits among the
   /// others.
-  at: usize,
+  pub(super) at: usize,
   /// How many connector columns this input's multi-line spans need, and zero when it has none —
   /// which is what keeps an input without them flush against the gutter.
-  depth: u64,
-  excerpts: core::ops::Range<usize>,
-  connectors: core::ops::Range<usize>,
+  pub(super) depth: u64,
+  pub(super) excerpts: core::ops::Range<usize>,
+  pub(super) connectors: core::ops::Range<usize>,
 }
 
 /// Where a span is drawn, before the lines are gathered into excerpts.
@@ -304,7 +313,40 @@ pub struct Terminal<P> {
   palette: P,
   capability: ColorCapability,
   tab_width: u64,
+  /// How the rows are drawn — see [`like_rustc`](Self::like_rustc).
+  ///
+  /// A value rather than a type parameter on `Terminal`, and a `&'static dyn` rather than an
+  /// enum matched at every hook. A caller reading `--style` out of a flag keeps ONE renderer
+  /// type, which a type parameter would not have given it, and nothing in this crate's public
+  /// signatures mentions the trait — which is what keeps the seam unfrozen until HTML has been
+  /// through it.
+  presentation: &'static dyn Presentation,
 }
+
+/// Every auto trait a [`Terminal`] carries, pinned rather than left to be inherited.
+///
+/// A `dyn` field forwards only what its trait promises, and `presentation` above is the first field
+/// here that is not plain data. Bounded by `Debug` alone it took FOUR of these off a public type —
+/// `Send` and `Sync`, which a caller sharing one configured renderer between worker threads needs,
+/// and `UnwindSafe` and `RefUnwindSafe`, which one rendering inside `catch_unwind` needs. `Unpin`
+/// was the only one that survived, and only because a reference is `Unpin` whatever it points at.
+///
+/// So the whole set is named, not the subset a reader thinks to check. Two of the four went
+/// unnoticed through a review that caught the other two, which is the argument for asserting the
+/// set rather than the pair: the next field of this kind should fail the build instead of a
+/// caller's.
+///
+/// Both forms, because they fail differently. The concrete one is the type the documentation hands
+/// out; the generic one says the renderer adds nothing of its own to whatever the palette already
+/// was, and stays true for a palette this crate has never seen.
+const _: fn() = || {
+  fn carries<T: Send + Sync + Unpin + UnwindSafe + RefUnwindSafe>() {}
+  fn over_any_palette<P: Send + Sync + Unpin + UnwindSafe + RefUnwindSafe>() {
+    carries::<Terminal<P>>();
+  }
+  carries::<Terminal<Theme>>();
+  over_any_palette::<Theme>();
+};
 
 impl Terminal<Theme> {
   /// The built-in theme, with no colour until a caller asks for some.
@@ -318,6 +360,7 @@ impl Terminal<Theme> {
       palette: Theme::new(),
       capability: ColorCapability::None,
       tab_width: LineCells::default_tab_width(),
+      presentation: &Rustc,
     }
   }
 }
@@ -330,7 +373,39 @@ impl<P: Palette> Terminal<P> {
       palette,
       capability: ColorCapability::None,
       tab_width: LineCells::default_tab_width(),
+      presentation: &Rustc,
     }
+  }
+
+  /// Draws in the shape `rustc` does — the default.
+  ///
+  /// An arrow to the location, an indented gutter, `^` and `-` under the cells a span occupies,
+  /// and a multi-line span reaching back into the source to mark the cell it ends at.
+  ///
+  /// Named for the renderer whose shape it follows, and not byte-compatible with it. What painty
+  /// promises is the arrangement, not the bytes.
+  #[must_use]
+  pub fn like_rustc(mut self) -> Self {
+    self.presentation = &Rustc;
+    self
+  }
+
+  /// Draws in the shape `miette` does.
+  ///
+  /// A boxed location line, a box-drawing wall, a label hanging from its own row, and a
+  /// multi-line span bracketed down the margin instead of reaching into the source.
+  ///
+  /// The two differ in **glyphs and layout only**. Colour is [`Theme`]'s and is unchanged by
+  /// this, which is the split [`Role`] exists to make; and *what* is pointed at is the plan's, so
+  /// a style cannot move a mark onto text the diagnostic is not about. The one thing it does
+  /// change is whether a multi-line span's end is marked on a CELL at all: this style says it in
+  /// the margin, so it is not.
+  ///
+  /// Named for the renderer whose shape it follows, and not byte-compatible with it.
+  #[must_use]
+  pub fn like_miette(mut self) -> Self {
+    self.presentation = &Miette;
+    self
   }
 
   /// Sets how much colour the output can carry — see [`ColorChoice::resolve`](super::ColorChoice).
@@ -478,7 +553,7 @@ impl<P: Palette> Terminal<P> {
   }
 
   /// How this renderer measures a line, and what measuring one may spend.
-  fn measure(&self) -> Measure {
+  pub(super) fn measure(&self) -> Measure {
     Measure {
       tab_width: self.tab_width,
       budget: Budget {
@@ -511,76 +586,16 @@ impl<P: Palette> Terminal<P> {
     inputs: &[Input<'_>],
     out: &mut impl fmt::Write,
   ) -> fmt::Result {
-    let severity = diagnostic.severity();
-    self.styled(out, Role::Severity(severity), severity.as_str())?;
-    self.styled(out, Role::Code, "[")?;
-    self.styled(out, Role::Code, diagnostic.code())?;
-    self.styled(out, Role::Code, "]")?;
-    out.write_str(": ")?;
-    write_shown(out, diagnostic.message())?;
-    out.write_char('\n')?;
-
-    // Every position the diagnostic names, in the order the caller gave them, and then only those
-    // that can be drawn at all: an input the caller did not supply and a position with no span both
-    // draw nothing, on the same terms as `Location::entire`.
-    let mut positions = Vec::with_capacity(1 + diagnostic.labels().len());
-    positions.push((diagnostic.primary(), diagnostic.primary_label(), true));
-    for label in diagnostic.labels() {
-      positions.push((label.location(), Some(label.text()), false));
-    }
-    let mut drawable: Vec<Drawable<'_>> = Vec::with_capacity(positions.len());
-    drawable.extend(positions.into_iter().enumerate().filter_map(
-      |(at, (location, text, primary))| {
-        let input = location.source() as usize;
-        Some(Drawable {
-          at,
-          input,
-          from: *inputs.get(input)?,
-          span: location.span()?,
-          text,
-          primary,
-        })
-      },
-    ));
-
-    // RESOLUTION order, which is not the order any of this is drawn in. Layer 2 walks forwards, so
-    // a set of spans resolved in ascending order over one input costs one pass; resolved in the
-    // caller's order it costs one pass EACH, and on a multi-megabyte line each pass is the whole
-    // line again. The caller's order is carried in `at` and put back below.
-    drawable.sort_unstable_by_key(|position| (position.input, position.span.start(), position.at));
-
-    // One block per input, worked out completely before anything is written: the gutter is as wide
-    // as the widest line number the whole render will show, and the first row does not know what is
-    // coming.
-    //
     // Measured against the same stops and the same budget the rows below are, and by one value
     // rather than two, because the plan decides one thing about a row it does not draw — see
     // [`Measure`].
     let measure = self.measure();
-    let mut plan = Plan::default();
-    let mut run = 0;
-    while run < drawable.len() {
-      let input = drawable[run].input;
-      let mut end = run;
-      while end < drawable.len() && drawable[end].input == input {
-        end += 1;
-      }
-      plan.block(&drawable[run..end], measure);
-      run = end;
-    }
+    let style = self.presentation;
+    let mut plan = Plan::of(diagnostic, inputs, measure, style);
+    let gutter = plan.gutter();
+    let mut paint = Painter::new(out, &self.palette, self.capability);
 
-    // By the order each input FIRST appears, not by its index: the primary is pushed first, so
-    // sorting by index would move another file's label above the position the diagnostic is
-    // actually about. Only the blocks are sorted — the LINES inside one are in source order, which
-    // is what a connector running down the margin between two of them is able to mean.
-    plan.blocks.sort_unstable_by_key(|block| block.at);
-
-    let gutter = plan
-      .excerpts
-      .iter()
-      .map(|excerpt| digits(excerpt.line.number()))
-      .max()
-      .unwrap_or(1);
+    style.header(&mut paint, diagnostic)?;
 
     let Plan {
       blocks,
@@ -621,14 +636,10 @@ impl<P: Palette> Terminal<P> {
       // WHICH position it names is the caller's earliest one in this input, not the topmost line
       // drawn. A multi-line span opening twenty lines above the primary would otherwise send an
       // editor to a line the diagnostic is not about.
-      pad(out, gutter)?;
-      out.write_str("--> ")?;
-      if let Some(origin) = block.origin {
-        write_shown(out, origin)?;
-        out.write_char(':')?;
-      }
-      writeln!(out, "{}:{}", block.line, block.column)?;
-      self.bar(out, gutter)?;
+      //
+      // The style writes it, because how a location is announced is one of the things the two
+      // differ in; WHICH location it announces is decided here, and is not a style's to move.
+      style.open_block(&mut paint, gutter, block)?;
 
       let running = &connectors[block.connectors.clone()];
       margin.clear();
@@ -641,40 +652,72 @@ impl<P: Palette> Terminal<P> {
         let placed = &mut marks[excerpt.marks.clone()];
         let row = cells.place_marks(placed, measure.budget);
 
-        // Lines were left out above this one, so a `...` stands where they would have been — with
+        // Lines were left out above this one, so a row stands where they would have been — with
         // the connectors of every span that runs THROUGH them, since a bracket that vanished over a
         // gap would read as two brackets.
         if let Some(above) = excerpt.after {
           fill(&mut margin, running, |connector| {
-            connector.spans_the_gap(above, number).then_some('|')
+            connector
+              .spans_the_gap(above, number)
+              .then(|| style.bracket(Part::Runs, connector.role, connector.compact))
+              .flatten()
           });
-          self.elision_row(out, gutter, &margin)?;
+          style.elision_row(&mut paint, Frame::new(gutter, block.depth, &margin))?;
         }
 
+        // WHICH part of a bracket a row shows is arithmetic over the connector's two ends and is
+        // settled here; what stands there is the style's answer and nothing else.
         fill(&mut margin, running, |connector| {
-          connector.on_source_row(number)
+          let part = connector.part_on(number)?;
+          style.bracket(part, connector.role, connector.compact)
         });
-        self.source_row(out, gutter, &margin, &cells, &row)?;
+
+        // The field is the style's, the margin and the text are not. Straight to the writer, not
+        // through a `String` first: materialising the row commits the allocation before the writer
+        // is ever consulted, so a caller with a bounded or refusing `fmt::Write` — the whole reason
+        // this takes one — cannot decline what it never saw.
+        //
+        // And bounded, because streaming only moves the cost to a writer that accepts: a row is the
+        // line's length times the tab width, both caller-owned, so the ceiling is on the product.
+        // The `…` is inside the styled run deliberately — it stands where source would have stood,
+        // occupies the one cell `underline` reserved for it, and is what stops the cut being
+        // silent.
+        //
+        // Written ONCE for the line rather than once per label, and placed against the stop the one
+        // walk found. `underline` would answer the same columns — it is `never_empty` over that same
+        // call — but asking again would walk the window again.
+        style.line_field(&mut paint, gutter, number)?;
+        Frame::new(gutter, block.depth, &margin).margin(&mut paint)?;
+        paint.styled_with(Role::SourceText, |shown| {
+          cells.write_expanded_upto(shown, row.drawn_end)?;
+          if row.elided {
+            fmt::Write::write_char(shown, '\u{2026}')?;
+          }
+          Ok(())
+        })?;
+        paint.newline()?;
 
         // Under the source row, a span that OPENS here is open from the row that says so onwards —
-        // which is the `/` just drawn in the margin, or the underscore run below.
+        // which is whatever the style just drew in the margin, or the row it is about to write.
         for mark in placed.iter() {
           let phrase = *mark.payload();
           let columns = never_empty(mark.columns());
+          let frame = Frame::new(gutter, block.depth, &margin);
           match phrase.ends {
-            Ends::Whole => self.marker_row(out, gutter, &margin, columns, phrase)?,
+            Ends::Whole => style.whole(&mut paint, frame, columns, phrase)?,
             Ends::Opens => {
-              if !phrase.compact {
-                let frame = Frame::new(gutter, block.depth, &margin);
-                self.connector_row(out, frame, columns.start, phrase, false)?;
-              }
+              // Called for every opening, not only for the ones that need a row: whether one is
+              // needed is the style's own rule, and testing `compact` here would be this file
+              // holding half of it.
+              style.opens(&mut paint, frame, columns.start, phrase)?;
               if let Some(column) = column_of(&mut margin, phrase.depth) {
-                *column = Some(('|', phrase.role()));
+                *column = style
+                  .bracket(Part::Runs, phrase.role(), phrase.compact)
+                  .map(|glyph| (glyph, phrase.role()));
               }
             }
             Ends::Closes => {
-              let frame = Frame::new(gutter, block.depth, &margin);
-              self.connector_row(out, frame, columns.end - 1, phrase, true)?;
+              style.closes(&mut paint, frame, columns.end - 1, phrase)?;
               if let Some(column) = column_of(&mut margin, phrase.depth) {
                 *column = None;
               }
@@ -682,266 +725,13 @@ impl<P: Palette> Terminal<P> {
           }
         }
       }
-      self.bar(out, gutter)?;
+      style.close_block(&mut paint, gutter)?;
     }
 
     if let Some(help) = diagnostic.help() {
-      pad(out, gutter + 1)?;
-      out.write_str("= ")?;
-      self.styled(out, Role::Help, "help")?;
-      out.write_str(": ")?;
-      self.styled(out, Role::Help, help)?;
-      out.write_char('\n')?;
+      style.help(&mut paint, gutter, help)?;
     }
     Ok(())
-  }
-
-  /// One `  |` separator row.
-  ///
-  /// Carries no connectors, and deliberately: it is drawn once above an input's first line and once
-  /// below its last, where nothing is open.
-  fn bar(&self, out: &mut impl fmt::Write, gutter: u64) -> fmt::Result {
-    pad(out, gutter + 1)?;
-    self.styled(out, Role::Gutter, "|")?;
-    out.write_char('\n')
-  }
-
-  /// The connector columns of one row, and the blank that separates them from the source.
-  ///
-  /// One slot per column the input needs, counting from 1, refilled per row rather than allocated
-  /// per row: the widest this gets is one column per multi-line span, which is the same k the
-  /// marker rows already cost. Spelled out rather than given a name, because
-  /// `tests/numeric_widths.rs` refuses a type alias outright — an alias is a place a primitive
-  /// integer can hide from the surface scan, and it offers no exception.
-  fn margin(&self, out: &mut impl fmt::Write, margin: &[Option<(char, Role)>]) -> fmt::Result {
-    if margin.is_empty() {
-      return Ok(());
-    }
-    for column in margin {
-      match column {
-        Some((glyph, role)) => self.styled(out, *role, glyph.encode_utf8(&mut [0; 4]))?,
-        None => out.write_char(' ')?,
-      }
-    }
-    out.write_char(' ')
-  }
-
-  /// One source line, written once.
-  fn source_row(
-    &self,
-    out: &mut impl fmt::Write,
-    gutter: u64,
-    margin: &[Option<(char, Role)>],
-    cells: &LineCells<'_>,
-    row: &Row,
-  ) -> fmt::Result {
-    let number = cells.line().number();
-    pad(out, gutter - digits(number))?;
-    self.styled(out, Role::LineNumber, &number.to_string())?;
-    out.write_char(' ')?;
-    self.styled(out, Role::Gutter, "|")?;
-    out.write_char(' ')?;
-    self.margin(out, margin)?;
-    // Straight to `out`, not through a `String` first: materialising the row commits the allocation
-    // before `out` is ever consulted, so a caller with a bounded or refusing `fmt::Write` — the
-    // whole reason this takes one — cannot decline what it never saw.
-    //
-    // And bounded, because streaming only moves the cost to a writer that accepts: a row is the
-    // line's length times the tab width, both caller-owned, so the ceiling is on the product. The
-    // `…` is inside the styled run deliberately — it stands where source would have stood, occupies
-    // the one cell `underline` reserved for it, and is what stops the cut being silent.
-    //
-    // Written ONCE for the line rather than once per label, and placed against the stop the one
-    // walk found. `underline` would answer the same columns — it is `never_empty` over that same
-    // call — but asking again would walk the window again.
-    self.styled_with(out, Role::SourceText, |shown| {
-      cells.write_expanded_upto(shown, row.drawn_end)?;
-      if row.elided {
-        fmt::Write::write_char(shown, '…')?;
-      }
-      Ok(())
-    })?;
-    out.write_char('\n')
-  }
-
-  /// The `...` that stands for the lines a multi-line span reaches over.
-  ///
-  /// Written where the line NUMBER would be, which is what says that numbers are missing rather
-  /// than that a row is. Trailing blanks are dropped, so a row that says nothing after the last
-  /// connector ends there.
-  fn elision_row(
-    &self,
-    out: &mut impl fmt::Write,
-    gutter: u64,
-    margin: &[Option<(char, Role)>],
-  ) -> fmt::Result {
-    self.styled(out, Role::LineNumber, "...")?;
-    let Some(last) = margin.iter().rposition(Option::is_some) else {
-      return out.write_char('\n');
-    };
-    pad(out, gutter)?;
-    for column in &margin[..=last] {
-      match column {
-        Some((glyph, role)) => self.styled(out, *role, glyph.encode_utf8(&mut [0; 4]))?,
-        None => out.write_char(' ')?,
-      }
-    }
-    out.write_char('\n')
-  }
-
-  /// One row of markers, and whatever the label attached to it says.
-  fn marker_row(
-    &self,
-    out: &mut impl fmt::Write,
-    gutter: u64,
-    margin: &[Option<(char, Role)>],
-    marks: core::ops::Range<u64>,
-    phrase: Phrase<'_>,
-  ) -> fmt::Result {
-    pad(out, gutter + 1)?;
-    self.styled(out, Role::Gutter, "|")?;
-    out.write_char(' ')?;
-    self.margin(out, margin)?;
-    pad(out, marks.start - 1)?;
-
-    let role = phrase.role();
-    let marker = phrase.marker();
-    self.styled_with(out, role, |shown| {
-      for _ in 0..marks.end - marks.start {
-        fmt::Write::write_char(shown, marker)?;
-      }
-      Ok(())
-    })?;
-    if let Some(text) = phrase.text {
-      out.write_char(' ')?;
-      self.styled(out, role, text)?;
-    }
-    out.write_char('\n')
-  }
-
-  /// One end of a multi-line span: the corner that joins its column to the cell it marks.
-  ///
-  /// The run of underscores reaches from this span's own connector column to the marker, so it
-  /// crosses every column to the right of it. That is not an accident of drawing order: a span
-  /// still open out there opened LATER than this one, so what the crossing says is that this
-  /// bracket closes over it, and a run broken into pieces to avoid the crossing would stop reading
-  /// as one connector at all.
-  fn connector_row(
-    &self,
-    out: &mut impl fmt::Write,
-    frame: Frame<'_>,
-    column: u64,
-    phrase: Phrase<'_>,
-    closing: bool,
-  ) -> fmt::Result {
-    let Frame {
-      gutter,
-      depth,
-      margin,
-    } = frame;
-    pad(out, gutter + 1)?;
-    self.styled(out, Role::Gutter, "|")?;
-    out.write_char(' ')?;
-    // Only what is to the LEFT is written from the margin. Everything from this span's own column
-    // rightwards is the corner below.
-    let own = slot(phrase.depth).saturating_sub(1).min(margin.len());
-    self.margin_upto(out, &margin[..own])?;
-
-    let role = phrase.role();
-    let marker = phrase.marker();
-    let reach = (depth + column).saturating_sub(phrase.depth);
-    self.styled_with(out, role, |shown| {
-      fmt::Write::write_char(shown, if closing { '|' } else { ' ' })?;
-      for _ in 0..reach {
-        fmt::Write::write_char(shown, '_')?;
-      }
-      fmt::Write::write_char(shown, marker)
-    })?;
-    // Said where the span CLOSES, because that is where a reader has seen all of it.
-    if closing && let Some(text) = phrase.text {
-      out.write_char(' ')?;
-      self.styled(out, role, text)?;
-    }
-    out.write_char('\n')
-  }
-
-  /// The connector columns left of a corner, without the blank that would follow them.
-  fn margin_upto(&self, out: &mut impl fmt::Write, margin: &[Option<(char, Role)>]) -> fmt::Result {
-    for column in margin {
-      match column {
-        Some((glyph, role)) => self.styled(out, *role, glyph.encode_utf8(&mut [0; 4]))?,
-        None => out.write_char(' ')?,
-      }
-    }
-    Ok(())
-  }
-
-  /// Writes `text` in the style the palette gives `role`, and nothing at all when it asks for
-  /// nothing.
-  fn styled(&self, out: &mut impl fmt::Write, role: Role, text: &str) -> fmt::Result {
-    // Fully qualified for the reason `write_shown` is, below: the numeric census cannot see through
-    // an imported `fmt::Write`, and this file keeps the trait out of scope rather than exempt.
-    self.styled_with(out, role, |shown| fmt::Write::write_str(shown, text))
-  }
-
-  /// The same, for a row that is written rather than held.
-  ///
-  /// `body` receives the sanitizer, so what it writes is substituted exactly as a `&str` would be,
-  /// and it goes through to `out` as it is written. That is what lets a row whose length is decided
-  /// by the input be produced without ever existing as one value.
-  ///
-  /// # The reset is not conditional on the body succeeding
-  ///
-  /// The opener and the reset have to be balanced, and a closure alone does not balance them. It
-  /// stops a caller *forgetting* the reset; it does nothing about the body *not reaching* it, and a
-  /// `?` on a failing write is exactly that — which is how this shipped leaving an SGR open whenever
-  /// a bounded writer refused mid-row. Two different failure modes, and only the first is a
-  /// consequence of the shape.
-  ///
-  /// So the body's result is held rather than propagated, the reset is attempted either way, and the
-  /// body's error is the one returned — it says what actually went wrong, where the reset's would
-  /// only say that the writer is still refusing.
-  ///
-  /// **Panics are deliberately not covered.** Restoring the terminal while unwinding means writing
-  /// to the writer from a `Drop`, and a panic there during an unwind aborts the process: it would
-  /// trade a caller's recoverable bug for a dead one, using the very writer that just misbehaved,
-  /// and buy nothing at all under `panic = "abort"`. The reset is best-effort on the error path,
-  /// which is the path a caller can actually reach by design.
-  fn styled_with<W: fmt::Write>(
-    &self,
-    out: &mut W,
-    role: Role,
-    body: impl FnOnce(&mut Shown<'_, W>) -> fmt::Result,
-  ) -> fmt::Result {
-    let style = self.narrow(self.palette.style(role));
-    if style.is_plain() {
-      return body(&mut Shown(out));
-    }
-    let ansi = to_anstyle(style);
-    // Once an opener has been offered a reset is offered too, including when the opener was itself
-    // refused. That keeps the rule total — an opener is never the last thing this writes — instead
-    // of leaving a case where it depends on how far the writer got. `and_then` is what holds the
-    // other half: a refused opener must not run the body, which is the expensive part.
-    let opened = write!(out, "{}", ansi.render());
-    let written = opened.and_then(|()| body(&mut Shown(out)));
-    let reset = write!(out, "{}", ansi.render_reset());
-    written.and(reset)
-  }
-
-  /// Brings a style down to what the output can carry.
-  ///
-  /// [`ColorCapability::None`] means **no escape sequences at all**, not "no colour but keep the
-  /// bold". A capability of none is a file or a pipe, and a bold escape written into a file is as
-  /// wrong as a red one. A caller who wants attributes without colour — the honest fallback for a
-  /// two-colour terminal — asks for [`Theme::monochrome`] at a capability that can carry escapes,
-  /// which is a different request and gets a different answer.
-  fn narrow(&self, style: Style) -> Style {
-    match self.capability {
-      ColorCapability::None => Style::plain(),
-      ColorCapability::Ansi16 => style.to_ansi16(),
-      ColorCapability::Ansi256 => style.to_ansi256(),
-      ColorCapability::TrueColor => style,
-    }
   }
 }
 
@@ -953,14 +743,14 @@ impl<P: Palette> Terminal<P> {
 /// have to measure the line identically, and a caller pairing a tab width with somebody else's
 /// budget is a caret placed against a row nobody drew.
 #[derive(Debug, Clone, Copy)]
-struct Measure {
-  tab_width: u64,
-  budget: Budget,
+pub(super) struct Measure {
+  pub(super) tab_width: u64,
+  pub(super) budget: Budget,
 }
 
 impl Measure {
   /// One line, as this render measures it.
-  const fn cells<'a>(&self, line: Line<'a>) -> LineCells<'a> {
+  pub(super) const fn cells<'a>(&self, line: Line<'a>) -> LineCells<'a> {
     LineCells::new(line, self.tab_width)
   }
 
@@ -976,7 +766,7 @@ impl Measure {
   ///
   /// It bounds the prefix scan at the one call site as a side effect, which is the whole of what
   /// the byte test that used to sit there was doing: an opening the row DREW is fewer than
-  /// [`Row::drawn_end`] bytes into the line, and that is at most [`Budget::bytes`]; an opening on a
+  /// [`Row::drawn_end`](super::width::Row::drawn_end) bytes into the line, and that is at most [`Budget::bytes`]; an opening on a
   /// row that was not cut is at most the length of a line that fitted the byte budget entire.
   fn draws_the_start_of(&self, line: Line<'_>, covered: Span) -> bool {
     let mut marks = [Mark::new(covered, ())];
@@ -999,17 +789,102 @@ const CONTEXT: u64 = 3;
 /// and lines it turns out to have, and the gutter — which is as wide as the widest line number
 /// anywhere in it — can be sized before the first row is written.
 #[derive(Debug, Default)]
-struct Plan<'a> {
-  blocks: Vec<Block<'a>>,
-  excerpts: Vec<Excerpt<'a>>,
-  marks: Vec<Mark<Phrase<'a>>>,
-  connectors: Vec<Connector>,
+pub(super) struct Plan<'a> {
+  pub(super) blocks: Vec<Block<'a>>,
+  pub(super) excerpts: Vec<Excerpt<'a>>,
+  pub(super) marks: Vec<Mark<Phrase<'a>>>,
+  pub(super) connectors: Vec<Connector>,
 }
 
 impl<'a> Plan<'a> {
+  /// Everything one render works out before it writes anything.
+  ///
+  /// Style-independent, and that is the claim this function makes rather than a convenience: which
+  /// lines are drawn, which cells each end of each span occupies, and which column a bracket runs
+  /// down are answers about the SOURCE and the caller's positions. A presentation chooses the
+  /// glyphs and the rows that carry them; it does not get to move a mark. So both styles are built
+  /// on this one plan, and `which_cells_are_marked_is_the_same_in_both_styles` is what holds that
+  /// claim to more than an intention.
+  pub(super) fn of(
+    diagnostic: &Diagnostic<'a>,
+    inputs: &[Input<'a>],
+    measure: Measure,
+    style: &dyn Presentation,
+  ) -> Plan<'a> {
+    // Every position the diagnostic names, in the order the caller gave them, and then only those
+    // that can be drawn at all: an input the caller did not supply and a position with no span both
+    // draw nothing, on the same terms as `Location::entire`.
+    let mut positions = Vec::with_capacity(1 + diagnostic.labels().len());
+    positions.push((diagnostic.primary(), diagnostic.primary_label(), true));
+    for label in diagnostic.labels() {
+      positions.push((label.location(), Some(label.text()), false));
+    }
+    let mut drawable: Vec<Drawable<'a>> = Vec::with_capacity(positions.len());
+    drawable.extend(positions.into_iter().enumerate().filter_map(
+      |(at, (location, text, primary))| {
+        let input = location.source() as usize;
+        Some(Drawable {
+          at,
+          input,
+          from: *inputs.get(input)?,
+          span: location.span()?,
+          text,
+          primary,
+        })
+      },
+    ));
+
+    // RESOLUTION order, which is not the order any of this is drawn in. Layer 2 walks forwards, so
+    // a set of spans resolved in ascending order over one input costs one pass; resolved in the
+    // caller's order it costs one pass EACH, and on a multi-megabyte line each pass is the whole
+    // line again. The caller's order is carried in `at` and put back below.
+    drawable.sort_unstable_by_key(|position| (position.input, position.span.start(), position.at));
+
+    // One block per input, worked out completely before anything is written: the gutter is as wide
+    // as the widest line number the whole render will show, and the first row does not know what is
+    // coming.
+    let mut plan = Plan::default();
+    let mut run = 0;
+    while run < drawable.len() {
+      let input = drawable[run].input;
+      let mut end = run;
+      while end < drawable.len() && drawable[end].input == input {
+        end += 1;
+      }
+      plan.block(&drawable[run..end], measure, style);
+      run = end;
+    }
+
+    // By the order each input FIRST appears, not by its index: the primary is pushed first, so
+    // sorting by index would move another file's label above the position the diagnostic is
+    // actually about. Only the blocks are sorted — the LINES inside one are in source order, which
+    // is what a connector running down the margin between two of them is able to mean.
+    plan.blocks.sort_unstable_by_key(|block| block.at);
+    plan
+  }
+
+  /// How many cells the line-number field takes: the widest number this whole render will show.
+  ///
+  /// Asked of the finished plan rather than of the first row, because the first row does not know
+  /// what is coming and a gutter that widened partway down would leave every row above it
+  /// misaligned.
+  pub(super) fn gutter(&self) -> u64 {
+    self
+      .excerpts
+      .iter()
+      .map(|excerpt| digits(excerpt.line.number()))
+      .max()
+      .unwrap_or(1)
+  }
+
   /// Works out one input's block: where each of its spans is drawn, which lines that puts on the
   /// page, and which column each multi-line connector runs down.
-  fn block(&mut self, drawable: &[Drawable<'a>], measure: Measure) {
+  pub(super) fn block(
+    &mut self,
+    drawable: &[Drawable<'a>],
+    measure: Measure,
+    style: &dyn Presentation,
+  ) {
     let Some(leading) = drawable.first() else {
       return;
     };
@@ -1123,36 +998,56 @@ impl<'a> Plan<'a> {
     }
     anchors.sort_unstable_by_key(Line::number);
 
-    // A span opens with a `/` in its column when the row it opens on DRAWS the cell it opens at,
-    // nothing else is drawn under that line, and nothing but blanks precedes it there — so it needs
-    // no corner row and its start cell carries no marker.
+    // Whether a multi-line span opens in the MARGIN or with a row of its own. Both facts are
+    // worked out here because one of them needs a measurement of a row that does not exist yet;
+    // which of them matters is the style's, and the two styles disagree about both.
     //
-    // That first condition is the one a reader would not think to ask for, and it is the one whose
-    // absence made this wrong. Suppressing the marker is only a saving if the cell the marker would
-    // have gone on is on the page: a row is cut at `max_rendered_width` CELLS, so an opening five
-    // thousand spaces into a line is out past the `…` and the compact form leaves the span with a
-    // `/` in the margin and nothing at all pointing into the row. It is asked of
-    // `Measure::draws_the_start_of`, which is the same bounded walk that will place the mark, and
-    // not of a second reckoning of what is visible.
+    // `drawn` is the one a reader would not think to ask for, and it is the one whose absence made
+    // this wrong. Suppressing a marker is only a saving if the cell the marker would have gone on
+    // is on the page: a row is cut at `max_rendered_width` CELLS, so an opening five thousand
+    // spaces into a line is out past the `…`, and a style told only that the line is blank would
+    // leave the span with a glyph in the margin and nothing at all pointing into the row. It is
+    // asked of `Measure::draws_the_start_of`, which is the same bounded walk that will place the
+    // mark, and not of a second reckoning of what is visible.
     //
-    // It also bounds the prefix scan, which is why no byte test appears here: "is this
-    // indentation" is a question over as many bytes as a caller cares to indent with, and an
-    // unbounded scan taken to choose between two glyphs is the class this crate keeps finding one
-    // door along. An opening the row drew is inside the walk's own byte budget by construction.
+    // The other is whether the span begins at the line's first non-blank, and it is stated that way
+    // rather than as "nothing but blanks precedes it" because the second names a SET. A style that
+    // drops the start marker leaves the row to say where the span began, and a row with no marker
+    // on it can name one cell: the first one holding something. Every column of the indentation
+    // satisfies the weaker fact and every one of them decodes to that same cell — so two openings
+    // at two columns of one indented line both compacted and rendered identically. See
+    // `Onset::at_first_nonblank`.
+    //
+    // Both halves ask `char::is_whitespace`, deliberately: a prefix judged blank by one predicate
+    // and a head judged non-blank by another would leave a gap between them wide enough for the
+    // same defect.
+    //
+    // It used to be the last term of a short-circuited `&&` whose previous term was `drawn`, and
+    // that ordering was the only thing bounding it — "is this indentation" is a scan over as many
+    // bytes as a caller cares to indent with. Handing a style a set of FACTS means computing them
+    // all, so the scan carries the geometry walk's own byte budget now, and the head test past it
+    // is one character. It changes nothing observable, because an opening the row drew is inside
+    // that budget by construction; what it changes is that the fact is true on its own rather than
+    // true given another one.
     for placement in &mut placements {
       if placement.closing.is_none() {
         continue;
       }
-      let first = placement.opening.line().line().number();
-      let alone = anchors.partition_point(|line| line.number() <= first)
-        - anchors.partition_point(|line| line.number() < first)
-        == 1;
       let line = placement.opening.line().line();
       let covered = placement.opening.line().covered();
+      let text = line.text();
       let before = covered.start() - line.span().start();
-      placement.compact = alone
-        && measure.draws_the_start_of(line, covered)
-        && line.text()[..before].chars().all(char::is_whitespace);
+      let at_first_nonblank = u64::try_from(before)
+        .is_ok_and(|bytes| bytes <= measure.budget.bytes)
+        && text[..before].chars().all(char::is_whitespace)
+        && text[before..]
+          .chars()
+          .next()
+          .is_some_and(|first| !first.is_whitespace());
+      placement.compact = style.opens_in_margin(Onset::new(
+        measure.draws_the_start_of(line, covered),
+        at_first_nonblank,
+      ));
     }
     anchors.dedup_by_key(|line| line.number());
 
@@ -1320,45 +1215,26 @@ fn close<'a>(walk: &mut Walk<'a>, placement: &mut Placement<'a>) {
   }
 }
 
-/// The fixed geometry a connector row is drawn against: how wide the gutter is, how many connector
-/// columns the input needs, and what is standing in them.
-///
-/// One value rather than three parameters, because the three are read together on every row and a
-/// caller pairing them by position is a caller that can pair them wrongly.
-#[derive(Debug, Clone, Copy)]
-struct Frame<'m> {
-  gutter: u64,
-  depth: u64,
-  margin: &'m [Option<(char, Role)>],
-}
-
-impl<'m> Frame<'m> {
-  const fn new(gutter: u64, depth: u64, margin: &'m [Option<(char, Role)>]) -> Self {
-    Self {
-      gutter,
-      depth,
-      margin,
-    }
-  }
-}
-
 /// A connector column as an index into a row's margin.
 ///
 /// There is one column per multi-line span and the spans came out of a `Vec`, so this cannot lose
 /// anything. `try_from` rather than `as` all the same: if that reasoning were ever wrong the answer
 /// is a column past the end of the margin, which draws nothing, rather than a column near the
 /// gutter, which draws a bar under the wrong span.
-fn slot(column: u64) -> usize {
+pub(super) fn slot(column: u64) -> usize {
   usize::try_from(column).unwrap_or(usize::MAX)
 }
 
 /// The margin slot a connector's column occupies.
-fn column_of(margin: &mut [Option<(char, Role)>], depth: u64) -> Option<&mut Option<(char, Role)>> {
+pub(super) fn column_of(
+  margin: &mut [Option<(char, Role)>],
+  depth: u64,
+) -> Option<&mut Option<(char, Role)>> {
   margin.get_mut(slot(depth).checked_sub(1)?)
 }
 
 /// Refills every connector column of one row.
-fn fill(
+pub(super) fn fill(
   margin: &mut [Option<(char, Role)>],
   connectors: &[Connector],
   mut glyph: impl FnMut(&Connector) -> Option<char>,
@@ -1375,82 +1251,11 @@ fn fill(
   }
 }
 
-/// Writes caller-supplied text with every control character replaced by a visible stand-in.
-///
-/// The capability gate decides which escapes painty PRODUCES; it said nothing about the ones a
-/// caller's own strings contain, so a message, a code, an origin or a label holding
-/// `\x1b[38;5;196m` reached the terminal verbatim — at every level, `ColorCapability::None`
-/// included. Escape injection through diagnostic text, and it defeated the per-level guarantee from
-/// the one direction that guarantee did not control: its input.
-///
-/// Source excerpts are handled a layer down, by
-/// [`LineCells::write_expanded`](super::LineCells::write_expanded), because there the walk that
-/// writes a cluster is the walk that counted its cells. The strings here are never measured, so
-/// they are substituted at the point they are written.
-///
-/// A TAB is the sharp edge of that split. Down there a tab is a device unit spent against a stop;
-/// up here there is no stop — the frame's columns are painty's, not the caller's — and U+0009 is a
-/// C0 control that moves the cursor as surely as ESC sets a colour. So it is shown as `␉` like the
-/// rest, and `control_picture` is what says so, rather than an exception at this call site that the
-/// next writer of caller text would not know to repeat.
-fn write_shown(out: &mut impl fmt::Write, text: impl fmt::Display) -> fmt::Result {
-  // Fully qualified rather than `write!` over an imported trait: the numeric census rejects a
-  // renamed import outright — `Write as _` is a name it cannot see through — and it offers no
-  // allowlist on purpose.
-  fmt::Write::write_fmt(&mut Shown(out), format_args!("{text}"))
-}
-
-/// A writer that substitutes as it goes.
-///
-/// An adapter rather than a function over `&str`, so that a message's own [`fmt::Display`] is
-/// covered: the text a caller's type writes is as caller-supplied as the text it hands over
-/// directly, and a `Display` that emits an escape would otherwise walk straight past this.
-struct Shown<'a, W: fmt::Write>(&'a mut W);
-
-impl<W: fmt::Write> fmt::Write for Shown<'_, W> {
-  fn write_str(&mut self, text: &str) -> fmt::Result {
-    for character in text.chars() {
-      // `self.0`, not `self` — the default `write_char` forwards to `write_str`.
-      self
-        .0
-        .write_char(control_picture(character).unwrap_or(character))?;
-    }
-    Ok(())
-  }
-}
-
-/// Writes `count` spaces.
-///
-/// # Why this is not `{:width$}`
-///
-/// The formatter's width is a `usize`, and a display column is a `u64` — rule 1 of
-/// [the numeric widths](crate#numeric-widths), because it is painty's own rendered geometry and not
-/// anything about the machine. Passing one to the other needs an `as usize`, which is exact on a
-/// 64-bit target and **narrows on a 32-bit one**: a line of tabs a few tens of MiB long reaches a
-/// column past `u32::MAX`, the cast wraps it to a small number, and the marker is drawn near the
-/// gutter under nothing at all. The tab bound does not save this. Clamping the tab width bounds the
-/// multiplier; the line length is the caller's and still owns the product.
-///
-/// So the count stays `u64` and is spent in chunks a `usize` certainly holds. Streamed rather than
-/// refused, because totality is the rule here — a diagnostic that declines to draw is a diagnostic
-/// lost — and chunked rather than one space at a time so an ordinary gutter costs one `write_str`.
-/// The writer is consulted once per chunk, so a bounded one still stops early.
-pub(super) fn pad(out: &mut impl fmt::Write, count: u64) -> fmt::Result {
-  const SPACES: &str = "                                                                ";
-  let mut left = count;
-  while left >= SPACES.len() as u64 {
-    out.write_str(SPACES)?;
-    left -= SPACES.len() as u64;
-  }
-  // Below the chunk length now, so this is the one narrowing in the file that cannot lose anything.
-  out.write_str(&SPACES[..left as usize])
-}
-
 /// A marker range that a reader can see.
 ///
 /// A zero-width span is a caret, and a caret of no cells is not a caret. Shared by
 /// [`Terminal::underline`] and the row that draws it so the two cannot disagree about it.
-fn never_empty(columns: core::ops::Range<u64>) -> core::ops::Range<u64> {
+pub(super) fn never_empty(columns: core::ops::Range<u64>) -> core::ops::Range<u64> {
   if columns.end > columns.start {
     columns
   } else {
@@ -1459,63 +1264,11 @@ fn never_empty(columns: core::ops::Range<u64>) -> core::ops::Range<u64> {
 }
 
 /// How many decimal digits a line number occupies.
-fn digits(mut number: u64) -> u64 {
+pub(super) fn digits(mut number: u64) -> u64 {
   let mut count = 1;
   while number >= 10 {
     number /= 10;
     count += 1;
   }
   count
-}
-
-fn to_anstyle(style: Style) -> anstyle::Style {
-  let mut effects = anstyle::Effects::new();
-  if style.bold() {
-    effects |= anstyle::Effects::BOLD;
-  }
-  if style.italic() {
-    effects |= anstyle::Effects::ITALIC;
-  }
-  if style.underline() {
-    effects |= anstyle::Effects::UNDERLINE;
-  }
-  anstyle::Style::new()
-    .fg_color(style.foreground().map(to_anstyle_color))
-    .bg_color(style.background().map(to_anstyle_color))
-    .effects(effects)
-}
-
-fn to_ansi_color(colour: crate::Ansi16) -> anstyle::AnsiColor {
-  use crate::Ansi16;
-  match colour {
-    Ansi16::Black => anstyle::AnsiColor::Black,
-    Ansi16::Red => anstyle::AnsiColor::Red,
-    Ansi16::Green => anstyle::AnsiColor::Green,
-    Ansi16::Yellow => anstyle::AnsiColor::Yellow,
-    Ansi16::Blue => anstyle::AnsiColor::Blue,
-    Ansi16::Magenta => anstyle::AnsiColor::Magenta,
-    Ansi16::Cyan => anstyle::AnsiColor::Cyan,
-    Ansi16::White => anstyle::AnsiColor::White,
-    Ansi16::BrightBlack => anstyle::AnsiColor::BrightBlack,
-    Ansi16::BrightRed => anstyle::AnsiColor::BrightRed,
-    Ansi16::BrightGreen => anstyle::AnsiColor::BrightGreen,
-    Ansi16::BrightYellow => anstyle::AnsiColor::BrightYellow,
-    Ansi16::BrightBlue => anstyle::AnsiColor::BrightBlue,
-    Ansi16::BrightMagenta => anstyle::AnsiColor::BrightMagenta,
-    Ansi16::BrightCyan => anstyle::AnsiColor::BrightCyan,
-    Ansi16::BrightWhite => anstyle::AnsiColor::BrightWhite,
-  }
-}
-
-fn to_anstyle_color(colour: Color) -> anstyle::Color {
-  match colour {
-    // The SIXTEEN, not their indices in the 256 palette. Emitting `Ansi256(1)` where `Ansi(Red)` is
-    // meant produces an escape a sixteen-colour terminal was never promised — the same defect as a
-    // capability of none emitting a bold sequence, one level along: output exceeding the capability
-    // it was narrowed to. `tests/terminal_appearance.rs` now enumerates, per level, which escape
-    // families may appear.
-    Color::Ansi16(sixteen) => anstyle::Color::Ansi(to_ansi_color(sixteen)),
-    Color::Ansi256(index) => anstyle::Color::Ansi256(anstyle::Ansi256Color(index)),
-    Color::Rgb(red, green, blue) => anstyle::Color::Rgb(anstyle::RgbColor(red, green, blue)),
-  }
 }

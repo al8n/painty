@@ -594,38 +594,45 @@ fn a_refused_write_is_reported_and_leaves_no_style_open() {
     )
     .with_primary_label("here");
     let inputs = [Input::new(Source::new(&case.text))];
-    let styled = terminal.with_tab_width(case.tab_width);
-
-    let mut full = String::new();
-    styled
-      .render(&diagnostic, &inputs, &mut full)
-      .expect("a String is writable");
-    assert!(
-      !ends_styled(&full),
-      "{}: the frame ends styled even when nothing refuses",
-      case.what
-    );
-
-    let length = full.chars().count();
-    let budgets: Vec<usize> = if length <= 400 {
-      (0..length).collect()
-    } else {
-      (0..200).chain((200..length).step_by(97)).collect()
-    };
-    for budget in budgets {
-      let mut out = Recording::new(budget);
-      let result = styled.render(&diagnostic, &inputs, &mut out);
+    // Both presentations. The reset discipline is the PAINTER's and the two styles share it, which
+    // is exactly why it is worth asking twice: a style writes rows of its own and one of them —
+    // the boxed underline and the label hanging off it — opens two styled runs where the other
+    // opens one, so "the body did not reach the reset" has a second shape to happen in.
+    for styled in [
+      terminal.with_tab_width(case.tab_width).like_rustc(),
+      terminal.with_tab_width(case.tab_width).like_miette(),
+    ] {
+      let mut full = String::new();
+      styled
+        .render(&diagnostic, &inputs, &mut full)
+        .expect("a String is writable");
       assert!(
-        result.is_err(),
-        "{}: refusing after {budget} of {length} characters was reported as success",
+        !ends_styled(&full),
+        "{}: the frame ends styled even when nothing refuses",
         case.what
       );
-      assert!(
-        !ends_styled(&out.offered),
-        "{}: refusing after {budget} characters left a style open: {:?}",
-        case.what,
-        out.offered
-      );
+
+      let length = full.chars().count();
+      let budgets: Vec<usize> = if length <= 400 {
+        (0..length).collect()
+      } else {
+        (0..200).chain((200..length).step_by(97)).collect()
+      };
+      for budget in budgets {
+        let mut out = Recording::new(budget);
+        let result = styled.render(&diagnostic, &inputs, &mut out);
+        assert!(
+          result.is_err(),
+          "{}: refusing after {budget} of {length} characters was reported as success",
+          case.what
+        );
+        assert!(
+          !ends_styled(&out.offered),
+          "{}: refusing after {budget} characters left a style open: {:?}",
+          case.what,
+          out.offered
+        );
+      }
     }
   }
 }
