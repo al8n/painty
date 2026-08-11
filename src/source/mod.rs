@@ -109,8 +109,27 @@ const fn continues_a_character(byte: u8) -> bool {
 /// bounded by the length of a `&str`, so it cannot reach its maximum, and if that reasoning were
 /// ever wrong a debug build would panic here instead of handing back a number that quietly stopped
 /// being true. The column is bounded the same way, by the length of one line.
-fn advance(bytes: &[u8], mut cursor: Cursor, target: usize) -> Cursor {
+fn advance(bytes: &[u8], cursor: Cursor, target: usize) -> Cursor {
+  advance_to(bytes, cursor, target, false)
+}
+
+/// The same walk, stopping **on** a line break that ends exactly at `target` rather than crossing
+/// it.
+///
+/// That is the difference between where an offset IS and the last line a region reaching it is
+/// DRAWN on, and it is [`Region::lines`]'s rule rather than a second one: a span that swallowed its
+/// own trailing newline has nothing of it to draw on the line after the break, so the line before
+/// is the one it closes on. Stated here, where the walk can act on it, instead of being recovered
+/// afterwards from a column of 1 — which needs the span's own start line to be right about, and
+/// leaves the caller holding a line the walk has already gone past.
+#[cfg(feature = "terminal")]
+fn advance_to_drawn_end(bytes: &[u8], cursor: Cursor, target: usize) -> Cursor {
+  advance_to(bytes, cursor, target, true)
+}
+
+fn advance_to(bytes: &[u8], mut cursor: Cursor, target: usize, stop_on_a_break: bool) -> Cursor {
   let mut index = cursor.offset;
+  let mut reached = target;
   while index < target {
     match line::break_at(bytes, index) {
       Some(line_break) => {
@@ -126,6 +145,14 @@ fn advance(bytes: &[u8], mut cursor: Cursor, target: usize) -> Cursor {
           // counter has not reached it.
           break;
         }
+        if stop_on_a_break && after == target {
+          // Stopped BEFORE the break, so the cursor keeps the line the break ended and the column
+          // one past its last character. `reached` is where the walk actually got to rather than
+          // where it was sent, because a cursor that claims an offset it is not standing on is the
+          // one thing a carried walk must never hand on.
+          reached = index;
+          break;
+        }
         index = after;
         cursor.line += 1;
         cursor.line_start = index;
@@ -139,7 +166,7 @@ fn advance(bytes: &[u8], mut cursor: Cursor, target: usize) -> Cursor {
       }
     }
   }
-  cursor.offset = target;
+  cursor.offset = reached;
   cursor
 }
 
@@ -259,6 +286,24 @@ impl<'a> Source<'a> {
   pub fn line_at(&self, offset: usize) -> Line<'a> {
     let cursor = advance(self.text.as_bytes(), Cursor::START, self.floor(offset));
     line::scan(self.text, cursor.line_start, cursor.line)
+  }
+
+  /// Returns the line after `line`, or `None` when it ended the text.
+  ///
+  /// Linear in the line it returns rather than in the offset it starts at, which is what makes it
+  /// the way to reach a line a renderer is already standing next to: [`line`](Self::line) and
+  /// [`line_at`](Self::line_at) both scan from the top.
+  ///
+  /// Agrees with [`Lines`] on the empty line a trailing break leaves behind, because it is the same
+  /// scan: `"a\n"` has a second line and this returns it.
+  ///
+  /// Gated on the one output that has a use for it, exactly as [`Walk`] is: a renderer drawing the
+  /// lines BETWEEN a multi-line span's ends walks from one to the next, and nothing else here does.
+  #[cfg(feature = "terminal")]
+  pub(crate) fn line_after(&self, line: Line<'a>) -> Option<Line<'a>> {
+    let line_break = line.line_break()?;
+    let start = line.span().end() + line_break.byte_len();
+    Some(line::scan(self.text, start, line.number() + 1))
   }
 
   /// Returns the line and column `offset` lands on.
@@ -461,12 +506,25 @@ impl<'a> Walk<'a> {
     }
   }
 
-  /// Returns where `span` starts and the first line it is drawn on.
+  /// Returns the byte range `span` resolves to, without walking anything.
   ///
-  /// Exactly `(source.resolve(span).start(), source.resolve(span).lines().next().unwrap())`, and
-  /// the `unwrap` is why this returns no `Option`: a region always covers at least the line it
-  /// starts on, so the first line is never absent and a caller has no case to handle.
-  pub(crate) fn first_line(&mut self, span: Span) -> (Position, RegionLine<'a>) {
+  /// [`Source::resolve`]'s clamping, offered on its own so that a caller ordering a set of stops
+  /// knows where each one lands before it asks for any of them. Exposed rather than re-derived
+  /// because the order the three clamping steps run in is subtle enough to have erased a character
+  /// once, and a second copy of it is a second place to get it wrong.
+  #[inline]
+  pub(crate) fn clamped(&self, span: Span) -> Span {
+    self.source.clamped(span)
+  }
+
+  /// Returns where `span` starts, the first line it is drawn on, and whether it is drawn on
+  /// another.
+  ///
+  /// The first two are exactly
+  /// `(source.resolve(span).start(), source.resolve(span).lines().next().unwrap())`, and the
+  /// `unwrap` is why this returns no `Option`: a region always covers at least the line it starts
+  /// on, so the first line is never absent and a caller has no case to handle.
+  pub(crate) fn open(&mut self, span: Span) -> Opening<'a> {
     let clamped = self.source.clamped(span);
     if clamped.start() < self.cursor.offset {
       self.cursor = Cursor::START;
@@ -475,17 +533,99 @@ impl<'a> Walk<'a> {
 
     let (at, cursor) = self.source.position_from(self.cursor, clamped.start());
     self.cursor = cursor;
-    // Keyed on where the line STARTS rather than on its number, because that is what the cursor
-    // carries and what `line::scan` would be handed. A number would have to agree with the walk by
-    // a second argument.
-    let line = match self.line {
+    let line = self.standing_on(cursor);
+    // What `Region::is_multiline` says, decided from the first line alone so that a renderer can
+    // ask before paying for the walk to the far end. A span reaching only as far as the break that
+    // ended this line has nothing of itself to draw on the next one, which is the same rule
+    // `Region::lines` applies from the other direction.
+    let content = line.span().end();
+    let reaches_another_line =
+      clamped.end() > content + line.line_break().map_or(0, |ended| ended.byte_len());
+
+    Opening {
+      at,
+      line: region::clip(line, clamped),
+      span: clamped,
+      reaches_another_line,
+    }
+  }
+
+  /// Returns the LAST line `opening`'s span is drawn on, with the part of it that falls there.
+  ///
+  /// Exactly `source.resolve(span).lines().last().unwrap()`. Only meaningful for a span that
+  /// [reaches another line](Opening::reaches_another_line) — for one that does not, the answer is
+  /// [`Opening::line`], which the caller already holds.
+  ///
+  /// Forward from wherever the walk has got to, so a caller that interleaves this with
+  /// [`open`](Self::open) in ascending offset order pays for one pass over the input rather than
+  /// two. Total anyway: a span behind the cursor restarts the walk, on the same terms as `open`.
+  pub(crate) fn close(&mut self, opening: &Opening<'a>) -> RegionLine<'a> {
+    let span = opening.span;
+    if span.end() < self.cursor.offset {
+      self.cursor = Cursor::START;
+      self.line = None;
+    }
+
+    let cursor = advance_to_drawn_end(self.source.text.as_bytes(), self.cursor, span.end());
+    self.cursor = cursor;
+    region::clip(self.standing_on(cursor), span)
+  }
+
+  /// The line `cursor` stands on, scanned once and then remembered.
+  ///
+  /// Keyed on where the line STARTS rather than on its number, because that is what the cursor
+  /// carries and what `line::scan` would be handed. A number would have to agree with the walk by
+  /// a second argument.
+  fn standing_on(&mut self, cursor: Cursor) -> Line<'a> {
+    match self.line {
       Some(line) if line.span().start() == cursor.line_start => line,
       _ => {
         let scanned = line::scan(self.source.text, cursor.line_start, cursor.line);
         self.line = Some(scanned);
         scanned
       }
-    };
-    (at, region::clip(line, clamped))
+    }
+  }
+}
+
+/// Where a span begins, the first line it is drawn on, and whether it is drawn on any other.
+///
+/// The third answer is here rather than left to the caller because it decides whether the walk is
+/// asked to go on to the far end at all, and a renderer deriving it for itself would be stating
+/// [`Region`]'s rule about a swallowed trailing newline a second time — in the one place where
+/// getting it wrong draws a bracket around a line the span does not cover.
+#[cfg(feature = "terminal")]
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Opening<'a> {
+  at: Position,
+  line: RegionLine<'a>,
+  span: Span,
+  reaches_another_line: bool,
+}
+
+#[cfg(feature = "terminal")]
+impl<'a> Opening<'a> {
+  /// Returns where the span begins.
+  #[inline]
+  pub(crate) const fn at(&self) -> Position {
+    self.at
+  }
+
+  /// Returns the first line the span is drawn on, with the part of it that falls there.
+  #[inline]
+  pub(crate) const fn line(&self) -> RegionLine<'a> {
+    self.line
+  }
+
+  /// Returns the byte range the span resolved to.
+  #[inline]
+  pub(crate) const fn span(&self) -> Span {
+    self.span
+  }
+
+  /// Returns whether the span is drawn on a line after [`line`](Self::line).
+  #[inline]
+  pub(crate) const fn reaches_another_line(&self) -> bool {
+    self.reaches_another_line
   }
 }
