@@ -10,7 +10,7 @@ use core::fmt;
 
 use super::{
   paint::Painter,
-  present::{Frame, Onset, Part, Presentation},
+  present::{Drawn, Frame, Onset, Part, Presentation},
   render::{Block, Phrase, digits},
 };
 use crate::{Diagnostic, Role, Severity};
@@ -108,7 +108,15 @@ impl Presentation for Miette {
   ///
   /// Not a saving: the box has a top, the top has to say something, and where the excerpt came
   /// from is what it says.
-  fn open_block(&self, paint: &mut Painter<'_>, gutter: u64, block: &Block<'_>) -> fmt::Result {
+  ///
+  /// Every input gets a box of its own, so `first` is nothing to this style.
+  fn open_block(
+    &self,
+    paint: &mut Painter<'_>,
+    gutter: u64,
+    block: &Block<'_>,
+    _first: bool,
+  ) -> fmt::Result {
     paint.pad(gutter + 2)?;
     paint.styled(Role::Gutter, "╭─[")?;
     if let Some(origin) = block.origin {
@@ -139,6 +147,12 @@ impl Presentation for Miette {
     paint.frame_char(' ')
   }
 
+  /// The plan's columns and one blank. A bracket here opens and closes in its own column, so
+  /// nothing this style draws ever leaves the margin on a source row.
+  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>) -> fmt::Result {
+    frame.margin(paint)
+  }
+
   /// In the WALL's column rather than the number's, which is the other way round from `...`.
   ///
   /// Both are true and they say different things: `...` stands where the numbers would be and
@@ -158,7 +172,11 @@ impl Presentation for Miette {
     let glyphs = brackets(matches!(role, Role::PrimaryLabel));
     Some(match part {
       Part::Opens => glyphs.opens,
-      Part::Runs => glyphs.runs,
+      // A gap draws the bar it would have drawn on the rows it stands for. The `⋮` in the wall is
+      // where this style says rows are missing, and a bracket dashed alongside it would be saying
+      // the same thing twice — see [`Ariadne`](super::ariadne::Ariadne), which says it there
+      // instead and so answers this differently.
+      Part::Runs | Part::Gap => glyphs.runs,
       Part::Closes => glyphs.closes,
     })
   }
@@ -278,11 +296,16 @@ impl Presentation for Miette {
 
   /// At a fixed indent rather than under the gutter: the box has closed by the time this is
   /// written, so there is no gutter left to align to.
-  fn help(&self, paint: &mut Painter<'_>, _gutter: u64, help: &str) -> fmt::Result {
+  fn help(&self, paint: &mut Painter<'_>, _gutter: u64, help: &str, _drawn: Drawn) -> fmt::Result {
     paint.frame("  ")?;
     paint.styled(Role::Help, "help")?;
     paint.frame(": ")?;
     paint.styled(Role::Help, help)?;
     paint.newline()
+  }
+
+  /// Nothing. Every box closed itself, and the help was said outside them all.
+  fn close_render(&self, _paint: &mut Painter<'_>, _gutter: u64, _drawn: Drawn) -> fmt::Result {
+    Ok(())
   }
 }

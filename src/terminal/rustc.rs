@@ -3,12 +3,46 @@
 //! Named for the renderer whose shape it follows. It is not byte-compatible with `rustc`'s output
 //! and does not try to be; what it is is the arrangement a Rust reader already knows, which is why
 //! it is the default.
+//!
+//! # This is also the style `annotate-snippets` uses, and that is why there is no fourth file
+//!
+//! `annotate-snippets` was on the list of styles to add beside `ariadne` and `codespan-reporting`,
+//! and it is not here. It is the crate rustc's own emitter was extracted into, and its **default**
+//! character set (`DecorStyle::Ascii`, which is what `Renderer::plain()` and `Renderer::styled()`
+//! both start from) is this one glyph for glyph:
+//!
+//! | it calls it | it draws | this style draws |
+//! |---|---|---|
+//! | `file_start` | `--> ` | `--> ` |
+//! | `col_separator` | `\|` | `\|` |
+//! | `margin` (elided lines) | `...` | `...` |
+//! | `note_separator` | `= ` | `= ` |
+//! | `underline` / `label_start` | `^` primary, `-` secondary | the same pair |
+//! | `multiline_vertical` | `\|` | `\|` |
+//! | `multiline_horizontal` | `_` | `_` |
+//! | `multiline_whole_line` | `/` | `/` |
+//! | `multiline_end_same_line` | `^` primary, `-` secondary | the same pair |
+//!
+//! Its `DecorStyle::Unicode` is opt-in and is the **same arrangement re-glyphed** — `╭▸` for the
+//! location, `│` for the wall, `━━━` under the cells, `┏ ┃ ┗━━┛` around a multi-line span, `╰╴` to
+//! close. That is not a new layout, and three of those characters are
+//! [`Miette`](super::miette::Miette)'s heavy brackets already. So the choice was between a file
+//! that renders identically to this one and a file that renders as a blend of two that exist, and
+//! the rule this phase works to is that what has no divergence behind it does not get a file.
+//!
+//! **One thing it does that this style does not**, recorded because it is a gap here rather than a
+//! divergence there: a snippet from a *further* input is introduced with `::: ` instead of `--> `,
+//! which is rustc's own behaviour and reads as "and over here". This style writes `--> ` for every
+//! block. Closing that gap needs no trait change — [`open_block`](Presentation::open_block) is
+//! already told whether the block is the render's first, because
+//! [`Ariadne`](super::ariadne::Ariadne) needed it — so it is a change to this file and to its
+//! goldens, and it belongs to whoever wants it rather than to the style that was not added.
 
 use core::fmt;
 
 use super::{
   paint::Painter,
-  present::{Frame, Onset, Part, Presentation},
+  present::{Drawn, Frame, Onset, Part, Presentation},
   render::{Block, Phrase, digits},
 };
 use crate::{Diagnostic, Role};
@@ -83,7 +117,15 @@ impl Presentation for Rustc {
     paint.newline()
   }
 
-  fn open_block(&self, paint: &mut Painter<'_>, gutter: u64, block: &Block<'_>) -> fmt::Result {
+  /// The same two rows whether or not another block came before: this style's frame is the
+  /// block's, so `first` is nothing to it.
+  fn open_block(
+    &self,
+    paint: &mut Painter<'_>,
+    gutter: u64,
+    block: &Block<'_>,
+    _first: bool,
+  ) -> fmt::Result {
     paint.pad(gutter)?;
     paint.frame("--> ")?;
     if let Some(origin) = block.origin {
@@ -112,6 +154,13 @@ impl Presentation for Rustc {
     paint.frame_char(' ')
   }
 
+  /// The plan's columns and one blank, whatever is turning on the row: an opening is either the
+  /// `/` already standing in its own column or the underscore run on the row below, and a closing
+  /// reaches back into the source from a row of its own. Neither of them writes anything here.
+  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>) -> fmt::Result {
+    frame.margin(paint)
+  }
+
   /// Written where the line NUMBER would be, which is what says that numbers are missing rather
   /// than that a row is.
   fn elision_row(&self, paint: &mut Painter<'_>, frame: Frame<'_>) -> fmt::Result {
@@ -128,7 +177,10 @@ impl Presentation for Rustc {
       // The span has not opened yet on its own source row: what opens it is either the `/` here or
       // the underscore run on the row below, and those are the same decision.
       Part::Opens => compact.then_some('/'),
-      Part::Runs | Part::Closes => Some('|'),
+      // A row that stands for lines left out is one this style draws the running bar through: the
+      // `...` in the number's column is where it says the rows are missing, so saying it a second
+      // time in the connector would break the one thing a bracket is for.
+      Part::Runs | Part::Closes | Part::Gap => Some('|'),
     }
   }
 
@@ -233,12 +285,17 @@ impl Presentation for Rustc {
     self.corner(paint, frame, column, phrase, true)
   }
 
-  fn help(&self, paint: &mut Painter<'_>, gutter: u64, help: &str) -> fmt::Result {
+  fn help(&self, paint: &mut Painter<'_>, gutter: u64, help: &str, _drawn: Drawn) -> fmt::Result {
     paint.pad(gutter + 1)?;
     paint.frame("= ")?;
     paint.styled(Role::Help, "help")?;
     paint.frame(": ")?;
     paint.styled(Role::Help, help)?;
     paint.newline()
+  }
+
+  /// Nothing. Every block closed itself with a bar, so there is nothing left open to end.
+  fn close_render(&self, _paint: &mut Painter<'_>, _gutter: u64, _drawn: Drawn) -> fmt::Result {
+    Ok(())
   }
 }

@@ -1804,6 +1804,50 @@ struct Bracketed {
   why: &'static str,
 }
 
+// ── The rows of one source line, derived rather than collected ─────────────────────────────────
+//
+// Two defects in this corpus were found by a reviewer rather than by it, and both were the same
+// cause: **two spans interacting on one source row.** The margin a mark's hook reads is shared
+// with every other mark on that row, so what one draws depends on what the others are and — until
+// the renderer was fixed — on the order the caller sent them in. The first time, the missing
+// member was two spans overlapping without nesting; the second, one span closing where another
+// opens. Adding the member that was named would have been the same mistake twice, so what follows
+// is the list the CAUSE implies, and the cases below are one per member.
+//
+// Every span contributes exactly one of four things to a given source line:
+//
+// | | what it contributes |
+// |---|---|
+// | **W** | drawn whole on that line — a mark, and no connector |
+// | **O** | a multi-line span opening there — a mark, and a connector showing its opening |
+// | **C** | a multi-line span closing there — a mark, and a connector showing its closing |
+// | **R** | a multi-line span running through — a connector, and no mark at all |
+//
+// The cause is **pairwise** — one mark's hook reads the state another mark's hook writes — so the
+// unordered pairs are the closure, and the corpus needs one case per pair:
+//
+// | pair | reaches | case |
+// |---|---|---|
+// | W+W | neither touches a connector, so the cause implies nothing happens here — a case anyway, because that is a claim | `"alpha beta"` |
+// | W+O | a label's own row drawn against a margin holding an OPENING | `  identifier(` + a label |
+// | W+C | a label's own row drawn against a margin holding a CLOSING | `  identifier(` + a closing-line label |
+// | W+R | a label beside a bracket that only passes through | `q { a b c }` |
+// | O+O | two brackets opening on one row | `  (` twice |
+// | O+C | one closing where another opens | `) [` |
+// | O+R | an opening beside a bracket passing through | `outer (` / `inner (` |
+// | C+C | two brackets closing on one row | `) ]` |
+// | C+R | a closing beside a bracket passing through | the partially overlapping pair |
+// | R+R | neither is a mark, so no row is drawn under it to be wrong | any nested pair's middle lines |
+//
+// One triple as well — O+C+W, the densest row this model allows — because "the cause is pairwise"
+// is itself a claim, and three marks give six caller orders where two give two: if any order
+// dependence survived, a middle position is where it would differ from both ends.
+//
+// What the list does NOT cover, stated so the next reader can check the cause rather than the
+// list: interactions between two source lines (a bracket's two ends are on different rows by
+// definition, and the plan settles which), and the elision row, whose margin is filled from
+// [`Part::Gap`] before any mark hook runs and is never read by one.
+
 fn bracketed() -> Vec<Bracketed> {
   let case = |text: &'static str, spans: &[Span], why: &'static str| Bracketed {
     text,
@@ -1860,6 +1904,74 @@ fn bracketed() -> Vec<Bracketed> {
       "a (\n b\n)\nc (\n d\n)\n",
       &[Span::new(2, 8), Span::new(11, 17)],
       "two multi-line spans that do NOT overlap, which need only one column between them",
+    ),
+    // ── C+R ─────────────────────────────────────────────────────────────────────────────────
+    //
+    // Added with the fourth style, which crosses a margin differently from the first. Nothing in
+    // the corpus reached the case: nested spans close innermost-first, so the column a closing
+    // corner runs through is always empty by the time it runs, and two styles that disagree about
+    // what to draw in an OCCUPIED column drew the same bytes everywhere. Partial overlap is the
+    // arrangement where a span closes while one that opened later is still open.
+    case(
+      "a (\n b [\nc\n)\n d\n]\n",
+      &[Span::new(2, 12), Span::new(7, 17)],
+      "two multi-line spans that PARTIALLY overlap, so one closes while the other is still open — \
+       the only arrangement where a closing corner crosses a bar that is not its own",
+    ),
+    // ── O+C, C+C, W+W and the triple ────────────────────────────────────────────────────────
+    //
+    // The rest of the family the table above derives. O+C is the one a reviewer found: with the
+    // closing sent first, its rows were drawn while the opening's column still held the opening
+    // glyph, and every style that reads the margin copied it onto a row below the row it opened
+    // on. The others are its siblings, and they are here because the cause has siblings rather
+    // than because anybody saw them fail.
+    case(
+      TURNING_ROW,
+      &TURNING_SPANS,
+      "one multi-line span CLOSES on the row another OPENS on, so one row carries both ends and \
+       the two marks under it are drawn in the caller's order",
+    ),
+    case(
+      "a (\n b [\n c\n) ]\n",
+      &[Span::new(2, 13), Span::new(7, 15)],
+      "two multi-line spans CLOSING on one row, which is the other end of the same interaction",
+    ),
+    case(
+      "alpha beta\n",
+      &[Span::new(0, 5), Span::new(6, 10)],
+      "two spans drawn WHOLE on one row and no bracket at all — the member of the family where \
+       neither mark touches a connector, so nothing may happen and that is what is asserted",
+    ),
+    case(
+      "a (\n b\n) [ z\n c\n]\n",
+      &[Span::new(2, 8), Span::new(9, 17), Span::new(11, 12)],
+      "a closing, an opening and a whole span on ONE row — six caller orders rather than two, \
+       which is where an order dependence would show a middle position differing from both ends",
+    ),
+    // ── The turning shapes ──────────────────────────────────────────────────────────────────
+    //
+    // Two ends on one source row with a column between them that is not an end. The allocator
+    // reaches all three: a span takes the column after the deepest one still open, so an outer
+    // span closing on the same row as an inner one leaves whatever is between them showing its own
+    // state — a bar if that span is still open, nothing if it has already closed.
+    case(
+      "a (\n b (\n  c\n  d\n) [\n  e\n )\n  f\n]\n",
+      &[Span::new(2, 18), Span::new(7, 27), Span::new(19, 33)],
+      "a closing at depth 1 and an opening at depth 3 on ONE row, with a bracket still RUNNING at \
+       depth 2 between them — the run from the left end has a bar to cross",
+    ),
+    case(
+      "a (\n b [\n  c {\n ]\n  d\n) }\n",
+      &[Span::new(2, 23), Span::new(7, 17), Span::new(13, 25)],
+      "two closings, at depth 1 and depth 3, with the column between them EMPTY because its span \
+       closed two rows earlier — the run from the left end has a blank to cross",
+    ),
+    case(
+      "a (\n b [\n  c {\n   d\n) ] }\n",
+      &[Span::new(2, 21), Span::new(7, 23), Span::new(13, 25)],
+      "three closings on one row, all adjacent — the shape that renders the same whether a style \
+       reaches from the leftmost turn or the rightmost, which is what makes the count alone not \
+       the hazard",
     ),
     case(
       "start {\n a\n b\n c\n d\n e\n f\n g\n h\n i\n j\n}\nend\n",
@@ -1920,19 +2032,24 @@ const BRACKETED_TAB: u64 = 4;
 
 /// A presentation, and how its own output is read back.
 ///
-/// Both styles are put through everything below, which is the design's gate for this phase: one
-/// property asserted across both. What each of them DRAWS is its own, so reading the output back
-/// needs a reader per style — and the reader is written from what the style promises rather than
-/// from what its code does, for the reason the placement table is written by hand.
+/// Every style is put through everything below, which is the design's gate for this phase: one
+/// property asserted across all of them. What each of them DRAWS is its own, so reading the output
+/// back needs a reader per style — and the reader is written from what the style promises rather
+/// than from what its code does, for the reason the placement table is written by hand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Style {
   /// An arrow, an indented gutter, carets under the cells.
   Rustc,
   /// A boxed location line, a box-drawing wall, brackets down the margin.
   Miette,
+  /// One frame around the whole report, and arrows drawn into the source rows.
+  Ariadne,
+  /// The indented arrangement drawn in box characters, with corners that pass behind what they
+  /// cross.
+  Codespan,
 }
 
-const STYLES: [Style; 2] = [Style::Rustc, Style::Miette];
+const STYLES: [Style; 4] = [Style::Rustc, Style::Miette, Style::Ariadne, Style::Codespan];
 
 impl Style {
   fn terminal(self) -> Terminal<Theme> {
@@ -1940,6 +2057,8 @@ impl Style {
     match self {
       Style::Rustc => terminal.like_rustc(),
       Style::Miette => terminal.like_miette(),
+      Style::Ariadne => terminal.like_ariadne(),
+      Style::Codespan => terminal.like_codespan(),
     }
   }
 
@@ -1947,7 +2066,7 @@ impl Style {
   const fn wall(self) -> char {
     match self {
       Style::Rustc => '|',
-      Style::Miette => '\u{2502}',
+      Style::Miette | Style::Ariadne | Style::Codespan => '\u{2502}',
     }
   }
 
@@ -1956,6 +2075,9 @@ impl Style {
     match self {
       Style::Rustc => '|',
       Style::Miette => '\u{b7}',
+      // Unchanged from the source rows: these styles' walls run unbroken, and what says a row is
+      // not a line of the file is that it carries no number.
+      Style::Ariadne | Style::Codespan => '\u{2502}',
     }
   }
 
@@ -1964,30 +2086,113 @@ impl Style {
     match self {
       Style::Rustc => &['^', '-'],
       Style::Miette => &['\u{2501}', '\u{2533}', '\u{2500}', '\u{252c}'],
+      // No heavy pair, because this style tells a primary from a secondary by colour alone.
+      Style::Ariadne => &['\u{2500}', '\u{252c}'],
+      // The same pair as the indented style for a span drawn on one line, and a third character
+      // for the END of a multi-line one, which sits on a cell of its own at the end of a rule.
+      Style::Codespan => &['^', '-', '\''],
     }
   }
 
   /// Glyphs whose presence makes a row a connector rather than an underline.
   ///
-  /// One style's label row starts with a corner and runs rightwards in the same character its
-  /// underlines are drawn in, so a reader counting runs would take a bracket's reach for a mark.
-  /// The other's connector rows are underscores, which are not marks in the first place, and its
-  /// closing corner row carries a real end mark that must be counted.
+  /// Two of the styles draw a label row that starts with a corner and runs rightwards in the same
+  /// character their underlines are drawn in, so a reader counting runs would take a bracket's
+  /// reach for a mark. The indented style's connector rows are underscores, which are not marks in
+  /// the first place, and its closing corner row carries a real end mark that must be counted.
   const fn connectors(self) -> &'static [char] {
     match self {
       Style::Rustc => &[],
       Style::Miette => &['\u{2570}', '\u{2517}'],
+      Style::Ariadne => &['\u{2570}'],
+      // None, for the indented style's reason: this one's corner rows are box characters, which
+      // are not marks, and each carries a real end mark that must be counted.
+      Style::Codespan => &[],
     }
   }
 
   /// Whether this style marks the ends of a multi-line span on CELLS at all.
   ///
-  /// The one place the two genuinely disagree about what is pointed at, rather than about how it
-  /// looks: a bracket drawn wholly in the margin says which LINES a span covers and never which
-  /// column it ends in. Stated here, once, so that every assertion below can name the exception
-  /// instead of being written around it.
+  /// The one place the styles genuinely disagree about what is pointed at, rather than about how
+  /// it looks: a bracket that stays in the margin, or ends in an arrow at the whole line, says
+  /// which LINES a span covers and never which column it ends in. Stated here, once, so that every
+  /// assertion below can name the exception instead of being written around it.
+  ///
+  /// Two of three answer `false`, and they arrive there differently — one keeps its bracket in the
+  /// margin, the other points an arrow at the line — which is what makes this an axis rather than
+  /// one style's quirk.
+  /// Every glyph this style puts in a connector column for a bracket that OPENS on the row.
+  ///
+  /// Declared from what the style promises, like the readers above, rather than read back off its
+  /// `bracket` — an oracle that asked the code would agree with it whatever it said.
+  const fn openings(self) -> &'static [char] {
+    match self {
+      Style::Rustc => &['/'],
+      // Two, because this style says which position a diagnostic is about with a WEIGHT.
+      Style::Miette => &['\u{250f}', '\u{256d}'],
+      Style::Ariadne | Style::Codespan => &['\u{256d}'],
+    }
+  }
+
+  /// How many cells stand between the last connector column and the source text.
+  ///
+  /// One for the blank every style leaves there, and three for the style that spends two more of
+  /// them on an arrow. Declared rather than measured, for the same reason the readers above are.
+  const fn approach(self) -> usize {
+    match self {
+      Style::Rustc | Style::Miette | Style::Codespan => 1,
+      Style::Ariadne => 3,
+    }
+  }
+
+  /// Whether this style draws a bracket's END on the SOURCE row, reaching from that bracket's
+  /// column across every column to the right of it.
+  ///
+  /// **One of the four, and the other three are immune for one structural reason:** they say a
+  /// bracket's end on a row of ITS OWN, below the source row. A row that belongs to one span
+  /// carries one end by construction, so "how many ends does this row have" never enters their
+  /// drawing — and the run each of them draws starts at its own column, which it knows without
+  /// being told. Only a style that says the end on the shared source row has to be told where the
+  /// ends are, and only that style can be told wrongly.
+  const fn reaches_across_a_source_row(self) -> bool {
+    matches!(self, Style::Ariadne)
+  }
+
+  /// The glyphs a bracket's END is drawn with in a connector column.
+  const fn ends(self) -> &'static [char] {
+    match self {
+      // Its closing is the same character as its running bar, which is exactly why the renderer
+      // has to say which columns turn rather than leaving a style to read it off the glyphs.
+      Style::Rustc => &['/', '|'],
+      Style::Miette => &['\u{250f}', '\u{256d}', '\u{2523}', '\u{251c}'],
+      Style::Ariadne | Style::Codespan => &['\u{256d}', '\u{251c}'],
+    }
+  }
+
+  /// The glyphs this style reaches ACROSS a column with.
+  const fn crossings(self) -> &'static [char] {
+    match self {
+      Style::Rustc => &['_'],
+      Style::Miette => &['\u{2501}', '\u{2500}'],
+      Style::Ariadne | Style::Codespan => &['\u{2500}'],
+    }
+  }
+
+  /// How many of those a row BELOW a source row may legitimately carry.
+  ///
+  /// None for three of them: an opening is announced on the source row, so a row under it can only
+  /// say the bracket is running. One for the fourth, whose own opening corner row — a row that
+  /// belongs to the span that opens and reaches from its column to the cell — is spelled with the
+  /// same character it puts in the margin.
+  const fn rows_may_open(self) -> usize {
+    match self {
+      Style::Codespan => 1,
+      Style::Rustc | Style::Miette | Style::Ariadne => 0,
+    }
+  }
+
   const fn marks_multiline_ends(self) -> bool {
-    matches!(self, Style::Rustc)
+    matches!(self, Style::Rustc | Style::Codespan)
   }
 }
 
@@ -2245,7 +2450,7 @@ fn which_cells_are_marked_is_a_function_of_the_span_alone() {
   // The property goldens cannot state, in the form that is now actually true. A golden pins one
   // arrangement of rows; this pins that the arrangement is not what decides WHAT is pointed at —
   // the same span marks the same cells of the same lines however the rows came out, whatever ELSE
-  // the caller sent, and in both styles.
+  // the caller sent, and in every style.
   //
   // "Whatever else the caller sent" is the half that did not hold until this commit. The compact
   // rule took the line's mark count as an input, so adding an unrelated label to a line changed
@@ -2305,40 +2510,49 @@ fn a_style_changes_appearance_and_not_which_source_is_marked() {
   // The design's gate for this phase, and the exception is in the assertion rather than in a
   // comment beside it.
   //
-  // The full form — "style never changes which spans are marked" — is not true of these two, and
+  // The full form — "style never changes which spans are marked" — is not true of these, and
   // writing it would have produced either a red gate or a gate quietly weakened until it passed.
-  // A bracket drawn wholly in the MARGIN says which lines a span covers and never which column it
-  // ends in, so the boxed style marks no cell for a multi-line span at all. That is not a defect
-  // to fix: it is the form the design chose this pair for, because it is the furthest thing from
-  // reaching back into the source.
+  // A bracket that never leaves the MARGIN, and an arrow that points at a whole line, both say
+  // which lines a span covers and never which column it ends in, so neither marks a cell for a
+  // multi-line span at all. That is not a defect to fix: it is the form the design chose this set
+  // for, because those are the furthest things from reaching back into the source.
   //
-  // What IS true, and is what a style abstraction actually needs: neither style invents a
-  // position, neither drops a line, and every cell either of them marks is the same cell. So the
-  // difference between the two markings is asserted to be EXACTLY the ends of the multi-line
-  // spans — no more, which would mean the boxed style lost a single-line label, and no less,
-  // which would mean it marked a cell its bracket had already spoken for.
+  // What IS true, and is what a style abstraction actually needs: no style invents a position,
+  // none drops a line, and every cell any of them marks is the same cell. So the difference from
+  // the style that marks everything is asserted to be EXACTLY the ends of the multi-line spans —
+  // no more, which would mean a style lost a single-line label, and no less, which would mean it
+  // marked a cell its bracket had already spoken for.
+  //
+  // The exception is read off `marks_multiline_ends`, so a style added with the wrong answer
+  // reddens here rather than widening the exception to fit itself.
   for case in bracketed() {
     let source = Source::new(case.text);
     for order in orderings(case.spans.len()) {
       let spans: Vec<Span> = order.iter().map(|index| case.spans[*index]).collect();
-      let indented = render_spans(Style::Rustc, case.text, &spans);
-      let boxed = render_spans(Style::Miette, case.text, &spans);
+      let drawn: Vec<String> = STYLES
+        .iter()
+        .map(|style| render_spans(*style, case.text, &spans))
+        .collect();
 
-      assert_ne!(
-        indented, boxed,
-        "{:?}: the two styles drew the same bytes, so one of them is not a style",
-        case.text
-      );
-      assert_eq!(
-        shown(Style::Rustc, &indented, source),
-        shown(Style::Miette, &boxed, source),
-        "{:?} in caller order {order:?}: the styles disagree about which lines to show, which is \
-         the plan's to decide and not theirs\n{indented}\n{boxed}",
-        case.text
-      );
+      for (index, style) in STYLES.iter().enumerate() {
+        for (other, against) in STYLES.iter().zip(&drawn).skip(index + 1) {
+          assert_ne!(
+            drawn[index], *against,
+            "{:?}: {style:?} and {other:?} drew the same bytes, so one of them is not a style",
+            case.text
+          );
+        }
+      }
 
+      // The style that marks every end is the reference, because it is the only one that has an
+      // answer for every span in the corpus.
+      let reference = &drawn[0];
+      assert!(
+        STYLES[0].marks_multiline_ends(),
+        "the reference style has to be the one that marks the multi-line ends"
+      );
       let bracketed_ends = asked_for(
-        Style::Rustc,
+        STYLES[0],
         source,
         &spans
           .iter()
@@ -2346,13 +2560,28 @@ fn a_style_changes_appearance_and_not_which_source_is_marked() {
           .filter(|span| drawn_rows(source, *span) > 1)
           .collect::<Vec<_>>(),
       );
-      assert_eq!(
-        without(&marked(Style::Rustc, &indented, source), &bracketed_ends),
-        marked(Style::Miette, &boxed, source),
-        "{:?} in caller order {order:?}: the two styles mark different source, and the difference \
-         is not the multi-line ends the boxed style says in its margin\n{indented}\n{boxed}",
-        case.text
-      );
+
+      for (style, rendered) in STYLES.iter().zip(&drawn) {
+        assert_eq!(
+          shown(*style, rendered, source),
+          shown(STYLES[0], reference, source),
+          "{:?} in caller order {order:?}: {style:?} disagrees about which lines to show, which is \
+           the plan's to decide and not a style's\n{reference}\n{rendered}",
+          case.text
+        );
+        let expected = if style.marks_multiline_ends() {
+          marked(STYLES[0], reference, source)
+        } else {
+          without(&marked(STYLES[0], reference, source), &bracketed_ends)
+        };
+        assert_eq!(
+          marked(*style, rendered, source),
+          expected,
+          "{:?} in caller order {order:?}: {style:?} marks different source, and the difference is \
+           not the multi-line ends it says in its margin\n{reference}\n{rendered}",
+          case.text
+        );
+      }
     }
   }
 }
@@ -2676,4 +2905,581 @@ fn a_bracket_costs_the_same_rows_however_many_lines_it_covers() {
     rows.expect("three sizes were measured") < 16,
     "a bracketed span costs {rows:?} rows, which is not a bound anybody would call one"
   );
+}
+
+// ── What a style is handed below a source row ───────────────────────────────────────────────────
+
+/// A span closing on the same source row another opens on.
+///
+/// Line 3 is `) [`: the first span's `)` finishes it and the second's `[` starts one. So the row
+/// carries a `Part::Closes` in one connector column and a `Part::Opens` in the other, and the two
+/// marks under it are drawn in whatever order the caller sent them.
+const TURNING_ROW: &str = "a (\n b\n) [\n c\n]\n";
+
+/// The two spans of [`TURNING_ROW`], outermost first.
+const TURNING_SPANS: [Span; 2] = [Span::new(2, 8), Span::new(9, 15)];
+
+/// The rows a render draws under the source row for `line`, in the order it draws them.
+fn under(style: Style, rendered: &str, source: Source<'_>, line: u64) -> Vec<String> {
+  let mut rows = Vec::new();
+  let mut about = None;
+  for row in rendered.lines() {
+    if let Some((number, _, _)) = source_row(style, row, source) {
+      about = Some(number);
+      continue;
+    }
+    if about == Some(line) {
+      rows.push(row.to_owned());
+    }
+  }
+  rows
+}
+
+#[test]
+fn a_row_below_a_source_row_says_only_that_a_bracket_runs() {
+  // A bracket's opening is announced ON the source row — in its own column, or by an arrow, or by
+  // a corner row belonging to that span itself. A row drawn UNDER the source row is below the
+  // opening, so what it can truthfully say about that bracket is only that it is running.
+  //
+  // The renderer used to reach that state one mark at a time, as each mark's hook returned, so
+  // what a style was handed depended on the CALLER's order: with the closing sent first, the
+  // closing's own rows were drawn while the other span's column still held its opening glyph, and
+  // both styles that read `Frame::columns()` copied it verbatim onto a row below it.
+  let source = Source::new(TURNING_ROW);
+  for order in orderings(TURNING_SPANS.len()) {
+    let spans: Vec<Span> = order.iter().map(|index| TURNING_SPANS[*index]).collect();
+    for style in STYLES {
+      let rendered = render_spans(style, TURNING_ROW, &spans);
+      for row in under(style, &rendered, source, 3) {
+        // The style's own opening corner is drawn by the span that opens, in ITS column, and one
+        // style spells that corner with the same character it puts in the margin. What no row
+        // below a source row may carry is that character in a column the row does not own — so
+        // the count is what is asserted, and the count a wrong renderer produces is one more.
+        let opening = row.chars().filter(|c| style.openings().contains(c)).count();
+        assert!(
+          opening <= style.rows_may_open(),
+          "{style:?} in caller order {order:?}: a row below line 3 carries {opening} opening \
+           glyphs, where {} is all this style can account for — a bracket that opened on the row \
+           above is being announced again below it\n{row}\n{rendered}",
+          style.rows_may_open()
+        );
+      }
+    }
+
+    // The count above cannot see the other half of the same defect, and one style shows only that
+    // half: a bracket that does NOT put a glyph in its column until it is running leaves the column
+    // empty, so what a wrong margin produced there was an ABSENCE — a run painted straight through
+    // a bracket that is still open, saying it had ended. Both styles that read the margin are held
+    // to the bytes, in both orders, with the wrong bytes named.
+    //
+    // Uniform labels, because `render_spans` makes the first span the primary and the two orders
+    // would otherwise differ in the marker and the label as well as in what is under test.
+    let uniform: Vec<Span> = order.iter().map(|index| TURNING_SPANS[*index]).collect();
+    let arrows = under(
+      Style::Ariadne,
+      &render_labels(Style::Ariadne, TURNING_ROW, &uniform),
+      source,
+      3,
+    );
+    assert!(
+      arrows.iter().any(|row| row.ends_with("\u{2502}\u{2502}"))
+        && !arrows.iter().any(|row| row.contains("\u{2502}\u{256d}")),
+      "caller order {order:?}: the rows under line 3 are {arrows:?}, where the bracket that opened \
+       on line 3 has to read as running below it — `\u{2502}\u{2502}` and never `\u{2502}\u{256d}`"
+    );
+    let corners = under(
+      Style::Codespan,
+      &render_labels(Style::Codespan, TURNING_ROW, &uniform),
+      source,
+      3,
+    );
+    assert!(
+      corners.iter().any(|row| row.contains("\u{2570}\u{2502}"))
+        && !corners.iter().any(|row| row.contains("\u{2570}\u{2500}")),
+      "caller order {order:?}: the rows under line 3 are {corners:?}, where the closing corner has \
+       to pass BEHIND the bracket that opened on line 3 — `\u{2570}\u{2502}` and never \
+       `\u{2570}\u{2500}`, which paints over a bracket that is still open"
+    );
+  }
+}
+
+// ── What the renderer HANDS a style, as against what a style draws ──────────────────────────────
+//
+// Everything above reads a style's output back and infers the state behind it. That is the right
+// oracle for appearance and it has one blind spot, which is where this branch's defect lived: a
+// parser looking for MARKS steps over the connector columns, so a renderer that hands a style the
+// wrong margin ships green as long as the marks land where they should. `Frame::columns` was added
+// to this crate for the styles that draw ACROSS the margin, and a capability with nothing asserting
+// what it hands over is how the next one of these arrives.
+//
+// So the state is asserted where it is built. A presentation that draws nothing and records its
+// arguments turns "what a style was handed" into a value, and the oracle for that value comes from
+// layer 2 rather than from the renderer.
+
+/// The glyphs [`Recorder`] answers [`Presentation::bracket`] with, one per part.
+///
+/// Sentinels rather than any real style's characters: what is asserted is WHICH PART the renderer
+/// put in a column, and a real style's glyphs answer that only as far as it happens to spell the
+/// four differently — two of the styles spell two of them the same.
+const OPENS: char = 'O';
+const RUNS: char = 'R';
+const CLOSES: char = 'C';
+const GAP: char = 'G';
+
+/// Which hook a frame was handed to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Hook {
+  /// The source row itself.
+  Margin,
+  /// The row standing for lines left out above it.
+  Elision,
+  /// A row under a source row.
+  Mark,
+}
+
+/// One call, and the connector columns it was handed.
+#[derive(Debug, Clone)]
+struct Handed {
+  hook: Hook,
+  /// The line the row is about, for the hooks the renderer names one for.
+  line: Option<u64>,
+  columns: Vec<Option<char>>,
+}
+
+/// Every call of one render, in the order the renderer made them.
+///
+/// A `static` because the renderer holds a `&'static dyn Presentation`, and read by one test, which
+/// is what keeps a global sound here: nothing else touches it, so no other test can interleave.
+static HANDED: std::sync::Mutex<Vec<Handed>> = std::sync::Mutex::new(Vec::new());
+
+/// A presentation that draws nothing and records what it was handed.
+#[derive(Debug)]
+struct Recorder;
+
+static RECORDER: Recorder = Recorder;
+
+impl Recorder {
+  fn note(hook: Hook, line: Option<u64>, frame: super::present::Frame<'_>) {
+    HANDED
+      .lock()
+      .expect("only this test locks it, and it does not panic while holding it")
+      .push(Handed {
+        hook,
+        line,
+        columns: frame
+          .columns()
+          .iter()
+          .map(|column| column.map(|standing| standing.glyph()))
+          .collect(),
+      });
+  }
+}
+
+impl super::present::Presentation for Recorder {
+  fn header(&self, _: &mut super::paint::Painter<'_>, _: &Diagnostic<'_>) -> core::fmt::Result {
+    Ok(())
+  }
+
+  fn open_block(
+    &self,
+    _: &mut super::paint::Painter<'_>,
+    _: u64,
+    _: &super::render::Block<'_>,
+    _: bool,
+  ) -> core::fmt::Result {
+    Ok(())
+  }
+
+  fn close_block(&self, _: &mut super::paint::Painter<'_>, _: u64) -> core::fmt::Result {
+    Ok(())
+  }
+
+  fn line_field(&self, _: &mut super::paint::Painter<'_>, _: u64, _: u64) -> core::fmt::Result {
+    Ok(())
+  }
+
+  fn margin(
+    &self,
+    _: &mut super::paint::Painter<'_>,
+    frame: super::present::Frame<'_>,
+  ) -> core::fmt::Result {
+    Self::note(Hook::Margin, None, frame);
+    Ok(())
+  }
+
+  fn elision_row(
+    &self,
+    _: &mut super::paint::Painter<'_>,
+    frame: super::present::Frame<'_>,
+  ) -> core::fmt::Result {
+    Self::note(Hook::Elision, None, frame);
+    Ok(())
+  }
+
+  fn bracket(&self, part: super::present::Part, _: crate::Role, _: bool) -> Option<char> {
+    Some(match part {
+      super::present::Part::Opens => OPENS,
+      super::present::Part::Runs => RUNS,
+      super::present::Part::Closes => CLOSES,
+      super::present::Part::Gap => GAP,
+    })
+  }
+
+  /// Never, so every opening is drawn with a row of its own and every mark hook is reached.
+  fn opens_in_margin(&self, _: super::present::Onset) -> bool {
+    false
+  }
+
+  fn whole(
+    &self,
+    _: &mut super::paint::Painter<'_>,
+    frame: super::present::Frame<'_>,
+    _: core::ops::Range<u64>,
+    phrase: super::render::Phrase<'_>,
+  ) -> core::fmt::Result {
+    Self::note(Hook::Mark, Some(phrase.line), frame);
+    Ok(())
+  }
+
+  fn opens(
+    &self,
+    _: &mut super::paint::Painter<'_>,
+    frame: super::present::Frame<'_>,
+    _: u64,
+    phrase: super::render::Phrase<'_>,
+  ) -> core::fmt::Result {
+    Self::note(Hook::Mark, Some(phrase.line), frame);
+    Ok(())
+  }
+
+  fn closes(
+    &self,
+    _: &mut super::paint::Painter<'_>,
+    frame: super::present::Frame<'_>,
+    _: u64,
+    phrase: super::render::Phrase<'_>,
+  ) -> core::fmt::Result {
+    Self::note(Hook::Mark, Some(phrase.line), frame);
+    Ok(())
+  }
+
+  fn help(
+    &self,
+    _: &mut super::paint::Painter<'_>,
+    _: u64,
+    _: &str,
+    _: super::present::Drawn,
+  ) -> core::fmt::Result {
+    Ok(())
+  }
+
+  fn close_render(
+    &self,
+    _: &mut super::paint::Painter<'_>,
+    _: u64,
+    _: super::present::Drawn,
+  ) -> core::fmt::Result {
+    Ok(())
+  }
+}
+
+/// Every hook call of one render, with the columns each was handed.
+fn handed(text: &str, spans: &[Span]) -> Vec<Handed> {
+  let labels: Vec<Label<'_>> = spans[1..]
+    .iter()
+    .map(|span| Label::new(Location::new(0, *span), "there"))
+    .collect();
+  let message = "a message";
+  let diagnostic = diagnose(Location::new(0, spans[0]), &labels, &message);
+  HANDED.lock().expect("no other test locks this").clear();
+  let mut out = String::new();
+  Terminal::plain()
+    .with_tab_width(BRACKETED_TAB)
+    .with_presentation(&RECORDER)
+    .render(&diagnostic, &[Input::new(Source::new(text))], &mut out)
+    .expect("a String never fails to be written to");
+  HANDED.lock().expect("no other test locks this").clone()
+}
+
+/// How many of `spans` are open ACROSS `line` — open on it or before it, and closing after it.
+///
+/// From layer 2 rather than from the plan: `Region::lines` is the same independent source the
+/// placement oracle reads, and the plan's column assignment is the thing under test.
+fn open_across(source: Source<'_>, spans: &[Span], line: u64) -> usize {
+  spans
+    .iter()
+    .filter(|span| {
+      let region = source.resolve(**span);
+      let drawn: Vec<_> = region.lines().collect();
+      let (Some(first), Some(last)) = (drawn.first(), drawn.last()) else {
+        return false;
+      };
+      first.line().number() <= line && last.line().number() > line
+    })
+    .count()
+}
+
+#[test]
+fn what_a_style_is_handed_below_a_source_row_is_the_running_state() {
+  // The contract the renderer owes every style, asserted as a value rather than inferred from what
+  // one drew. A row under a source row is below both of a bracket's ends: an opening has opened and
+  // a closing has finished, so the only thing a connector column can say there is that its bracket
+  // is running.
+  //
+  // Two halves, and the second is what stops the first being satisfied by normalising a row too
+  // early. If the margin were rebuilt BEFORE the source row instead of after it, every assertion in
+  // the first half would still hold and every bracket end would vanish from the output.
+  for case in bracketed() {
+    let source = Source::new(case.text);
+    for order in orderings(case.spans.len()) {
+      let spans: Vec<Span> = order.iter().map(|index| case.spans[*index]).collect();
+      let recorded = handed(case.text, &spans);
+
+      for entry in &recorded {
+        let Some(line) = entry.line else {
+          continue;
+        };
+        let occupied: Vec<char> = entry.columns.iter().flatten().copied().collect();
+        assert!(
+          occupied.iter().all(|glyph| *glyph == RUNS),
+          "{:?} in caller order {order:?}: a row under line {line} was handed {occupied:?}, and \
+           anything but the running bar there is a bracket end being announced a second time below \
+           the row it happened on — {}",
+          case.text,
+          case.why
+        );
+        assert_eq!(
+          occupied.len(),
+          open_across(source, &spans, line),
+          "{:?} in caller order {order:?}: a row under line {line} was handed {} connectors where \
+           layer 2 says {} spans are open across it — {}",
+          case.text,
+          occupied.len(),
+          open_across(source, &spans, line),
+          case.why
+        );
+      }
+
+      // And the SOURCE row still shows the ends, which is what every style draws its corners and
+      // arrows from.
+      let ends = spans
+        .iter()
+        .any(|span| source.resolve(*span).lines().count() > 1);
+      assert_eq!(
+        recorded.iter().any(|entry| {
+          entry.hook == Hook::Margin
+            && entry
+              .columns
+              .iter()
+              .flatten()
+              .any(|glyph| *glyph == OPENS || *glyph == CLOSES)
+        }),
+        ends,
+        "{:?} in caller order {order:?}: the source rows carry {} bracket ends, and this case has \
+         {} multi-line span — {}",
+        case.text,
+        if ends { "no" } else { "some" },
+        if ends { "one" } else { "no" },
+        case.why
+      );
+    }
+  }
+}
+
+/// Every span as a secondary label with one text, and no primary position at all.
+///
+/// [`render_spans`] makes the FIRST span the primary, so permuting its argument changes which
+/// position the diagnostic is about — a different marker character, a different label, a different
+/// role. That is a real difference and it is not the one below is about. Here every span arrives
+/// the same way, so the caller's order is the only thing that differs between two renders and the
+/// property can be stated over the rows themselves rather than over a projection of them.
+fn render_labels(style: Style, text: &str, spans: &[Span]) -> String {
+  let labels: Vec<Label<'_>> = spans
+    .iter()
+    .map(|span| Label::new(Location::new(0, *span), "there"))
+    .collect();
+  let message = "a message";
+  let diagnostic = diagnose(Location::entire(0), &labels, &message);
+  let mut out = String::new();
+  style
+    .terminal()
+    .render(&diagnostic, &[Input::new(Source::new(text))], &mut out)
+    .expect("a String never fails to be written to");
+  out
+}
+
+#[test]
+fn the_caller_order_permutes_the_rows_under_a_line_and_does_not_change_them() {
+  // The same contract from the other side, in what a reader actually sees. The caller's order
+  // decides which marker row comes first under a line — that is what it is FOR — and it decides
+  // nothing else: the rows themselves are a function of the spans and the source.
+  //
+  // This is the property the defect this test was written for would have failed. A style reading
+  // `Frame::columns` on a row whose margin still held another mark's unconsumed end drew a
+  // different row depending on which mark the caller sent first, and every existing property
+  // stepped over it — the mark parsers skip the margin, and a golden pins one order.
+  //
+  // **One order dependence is legitimate and is excluded by name rather than by exception.** Two
+  // multi-line spans covering exactly the same lines are separated by nothing but the caller's
+  // order — the plan sorts by `(first, Reverse(last), at)` — so their COLUMNS swap when they are
+  // swapped, and every row a bracket touches moves with them. The corpus has such a pair, opening
+  // at two columns of one indented line. So the orderings compared are the ones that leave every
+  // tied pair in the order it arrived; nothing is skipped by case, and a case with no tie is
+  // compared over all of its orderings.
+  for case in bracketed() {
+    let source = Source::new(case.text);
+    let extents: Vec<Option<(u64, u64)>> = case
+      .spans
+      .iter()
+      .map(|span| {
+        let drawn: Vec<_> = source.resolve(*span).lines().collect();
+        let (first, last) = (drawn.first()?, drawn.last()?);
+        (drawn.len() > 1).then(|| (first.line().number(), last.line().number()))
+      })
+      .collect();
+    let untied = |order: &[usize]| {
+      let at = |span: usize| {
+        order
+          .iter()
+          .position(|found| *found == span)
+          .expect("an ordering names every span")
+      };
+      (0..case.spans.len()).all(|earlier| {
+        (earlier + 1..case.spans.len()).all(|later| {
+          extents[earlier].is_none()
+            || extents[earlier] != extents[later]
+            || at(earlier) < at(later)
+        })
+      })
+    };
+
+    for style in STYLES {
+      let mut first: Option<Vec<(u64, Vec<String>)>> = None;
+      for order in orderings(case.spans.len())
+        .into_iter()
+        .filter(|order| untied(order))
+      {
+        let spans: Vec<Span> = order.iter().map(|index| case.spans[*index]).collect();
+        let rendered = render_labels(style, case.text, &spans);
+        let rows: Vec<(u64, Vec<String>)> = shown(style, &rendered, source)
+          .into_iter()
+          .map(|line| {
+            let mut under = under(style, &rendered, source, line);
+            under.sort();
+            (line, under)
+          })
+          .collect();
+        match &first {
+          None => first = Some(rows),
+          Some(expected) => assert_eq!(
+            &rows, expected,
+            "{:?} as {style:?}: caller order {order:?} changed the rows under a line rather than \
+             their order — {}\n{rendered}",
+            case.text, case.why
+          ),
+        }
+      }
+    }
+  }
+}
+
+/// The connector columns of one source row, as the characters standing in them.
+///
+/// Read out of the row by the geometry [`source_row`] found, and cut at the style's own approach —
+/// what follows the columns is the blank before the source, and for one style an arrow as well.
+fn connectors_of(style: Style, row: &str, bar: usize, code: usize) -> Vec<char> {
+  let characters: Vec<char> = row.chars().collect();
+  let from = bar + 2;
+  let upto = code.saturating_sub(style.approach()).max(from);
+  characters[from.min(characters.len())..upto.min(characters.len())].to_vec()
+}
+
+/// How many multi-line spans have an END on `line`.
+///
+/// From layer 2, like every other oracle here: a span's two ends are the first and last lines of
+/// the region it resolves to, and the plan's column assignment — the thing under test — is not
+/// consulted.
+fn ends_on(source: Source<'_>, spans: &[Span], line: u64) -> usize {
+  spans
+    .iter()
+    .filter(|span| {
+      let drawn: Vec<_> = source.resolve(**span).lines().collect();
+      let (Some(first), Some(last)) = (drawn.first(), drawn.last()) else {
+        return false;
+      };
+      drawn.len() > 1 && (first.line().number() == line || last.line().number() == line)
+    })
+    .count()
+}
+
+#[test]
+fn a_bracket_end_on_a_source_row_reaches_across_every_column_to_its_right() {
+  // The contract one style states and the renderer has to make keepable. Its end is said on the
+  // source row itself, by a run that leaves the bracket's column and crosses everything to the
+  // right of it — so on a row where TWO brackets end, the left one still has to cross, including
+  // across the column of a third span that is merely running or has already closed.
+  //
+  // The renderer used to hand that style a single depth, "the column a bracket turns in, and the
+  // rightmost where two do". A projection of a set onto one of its members: with ends at depth 1
+  // and depth 3, only depth 3 was named, the left end drew no run at all, and the row read as two
+  // unconnected corners — `├│╭` and `├ ├`, against the `├─╭` and `├─├` the contract promises.
+  //
+  // Asserted on the rendered row, over every case and every caller order, in two directions. The
+  // style that reaches must reach the whole way and must lose no end; the three that do not reach
+  // must not have reached, which is what makes their immunity a checked fact rather than a claim
+  // about their code.
+  for case in bracketed() {
+    let source = Source::new(case.text);
+    for order in orderings(case.spans.len()) {
+      let spans: Vec<Span> = order.iter().map(|index| case.spans[*index]).collect();
+      for style in STYLES {
+        let rendered = render_labels(style, case.text, &spans);
+        for row in rendered.lines() {
+          let Some((number, bar, code)) = source_row(style, row, source) else {
+            continue;
+          };
+          let columns = connectors_of(style, row, bar, code);
+          if !style.reaches_across_a_source_row() {
+            assert!(
+              !columns
+                .iter()
+                .any(|glyph| style.crossings().contains(glyph)),
+              "{:?} as {style:?} in caller order {order:?}: line {number} reaches across its \
+               margin on the SOURCE row, which is the one thing this style says on a row of its \
+               own instead — {columns:?}\n{rendered}",
+              case.text
+            );
+            continue;
+          }
+          let Some(leftmost) = columns
+            .iter()
+            .position(|glyph| style.ends().contains(glyph))
+          else {
+            continue;
+          };
+          for glyph in &columns[leftmost..] {
+            assert!(
+              style.ends().contains(glyph) || style.crossings().contains(glyph),
+              "{:?} as {style:?} in caller order {order:?}: line {number} has a bracket ending at \
+               column {} and {glyph:?} standing to the right of it, where the run from that end \
+               has to cross — {columns:?}\n{rendered}",
+              case.text,
+              leftmost + 1
+            );
+          }
+          assert_eq!(
+            columns
+              .iter()
+              .filter(|glyph| style.ends().contains(glyph))
+              .count(),
+            ends_on(source, &spans, number),
+            "{:?} as {style:?} in caller order {order:?}: line {number} draws a different number \
+             of bracket ends than layer 2 says end there, so the run has painted over one — \
+             {columns:?}\n{rendered}",
+            case.text
+          );
+        }
+      }
+    }
+  }
 }

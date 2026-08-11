@@ -8,9 +8,11 @@ use std::collections::BinaryHeap;
 
 use super::{
   ColorCapability, LineCells,
+  ariadne::Ariadne,
+  codespan::Codespan,
   miette::Miette,
   paint::Painter,
-  present::{Frame, Onset, Part, Presentation},
+  present::{Drawn, Frame, Onset, Part, Presentation, Standing},
   rustc::Rustc,
   width::{Budget, Mark},
 };
@@ -408,6 +410,58 @@ impl<P: Palette> Terminal<P> {
     self
   }
 
+  /// Draws in the shape `ariadne` does.
+  ///
+  /// One frame around the whole report rather than one per input, an arrow drawn into the source
+  /// row where a multi-line span opens and closes, and a label hanging from a corner below.
+  ///
+  /// It distinguishes the position a diagnostic is ABOUT by **colour alone** — ariadne gives every
+  /// label a colour of its own — so at [`ColorCapability::None`] a primary and a secondary label
+  /// are drawn with the same glyphs. The other two styles reach for a second character or a
+  /// heavier one instead; a caller who needs the distinction without colour wants one of those.
+  ///
+  /// Named for the renderer whose shape it follows, and not byte-compatible with it.
+  #[must_use]
+  pub fn like_ariadne(mut self) -> Self {
+    self.presentation = &Ariadne;
+    self
+  }
+
+  /// Draws in the shape `codespan-reporting` does.
+  ///
+  /// The arrangement [`like_rustc`](Self::like_rustc) draws — an arrow to the location, carets
+  /// under the cells, the label on the marker's own row — in box-drawing characters, with a
+  /// multi-line span's two corners reaching back into the source behind whatever they cross.
+  ///
+  /// Named for the renderer whose shape it follows, and not byte-compatible with it. One departure
+  /// is deliberate rather than incidental: that crate announces a multi-line span in the margin
+  /// whenever the span begins at or before its line's first non-blank, which cannot distinguish two
+  /// spans opening at two columns of the same indentation. painty uses the rule
+  /// [`like_rustc`](Self::like_rustc) uses.
+  #[must_use]
+  pub fn like_codespan(mut self) -> Self {
+    self.presentation = &Codespan;
+    self
+  }
+
+  /// The renderer drawn by a presentation the crate's own tests supply.
+  ///
+  /// **`#[cfg(test)]`, and that is the whole of its exposure**: it does not exist in a build a
+  /// caller can make, so it adds nothing to the public surface and cannot be reached by one.
+  ///
+  /// It is here because the thing worth asserting about this seam is not what a style DRAWS but
+  /// what the renderer HANDS it. Every property before this one read a style's output back and
+  /// inferred the state behind it, which is an oracle that can only see what a style happens to
+  /// put on the page — and a connector the renderer got wrong is invisible to a parser looking for
+  /// marks. A presentation that draws nothing and records its arguments asserts the contract
+  /// itself; see `what_a_style_is_handed_below_a_source_row_is_the_running_state`.
+  #[cfg(test)]
+  #[must_use]
+  pub(super) fn with_presentation(mut self, presentation: &'static dyn Presentation) -> Self {
+    self.presentation = presentation;
+    self
+  }
+
   /// Sets how much colour the output can carry — see [`ColorChoice::resolve`](super::ColorChoice).
   #[must_use]
   pub fn with_capability(mut self, capability: ColorCapability) -> Self {
@@ -604,9 +658,9 @@ impl<P: Palette> Terminal<P> {
       connectors,
     } = &mut plan;
     // One slot per connector column, resized per block and refilled per row.
-    let mut margin: Vec<Option<(char, Role)>> = Vec::new();
+    let mut margin: Vec<Option<Standing>> = Vec::new();
 
-    for block in blocks.iter() {
+    for (index, block) in blocks.iter().enumerate() {
       // A header per input, and the key is the input INDEX rather than the origin string. Resolving
       // each span against its own input was half the multi-input fix; the other half is saying which
       // input a row came from, because a secondary label in another file was otherwise drawn under
@@ -637,9 +691,13 @@ impl<P: Palette> Terminal<P> {
       // drawn. A multi-line span opening twenty lines above the primary would otherwise send an
       // editor to a line the diagnostic is not about.
       //
-      // The style writes it, because how a location is announced is one of the things the two
+      // The style writes it, because how a location is announced is one of the things the styles
       // differ in; WHICH location it announces is decided here, and is not a style's to move.
-      style.open_block(&mut paint, gutter, block)?;
+      //
+      // Whether this is the render's FIRST block is the style's business too, and only because a
+      // third style made it one: two of them frame each block, and one frames the whole render, so
+      // a later input is introduced inside a frame that is already open.
+      style.open_block(&mut paint, gutter, block, index == 0)?;
 
       let running = &connectors[block.connectors.clone()];
       margin.clear();
@@ -659,17 +717,24 @@ impl<P: Palette> Terminal<P> {
           fill(&mut margin, running, |connector| {
             connector
               .spans_the_gap(above, number)
-              .then(|| style.bracket(Part::Runs, connector.role, connector.compact))
+              .then(|| style.bracket(Part::Gap, connector.role, connector.compact))
               .flatten()
+              .map(|glyph| Standing::new(glyph, connector.role, Part::Gap))
           });
           style.elision_row(&mut paint, Frame::new(gutter, block.depth, &margin))?;
         }
 
         // WHICH part of a bracket a row shows is arithmetic over the connector's two ends and is
         // settled here; what stands there is the style's answer and nothing else.
+        // WHICH part each column shows travels with the glyph, so a style drawing across the
+        // margin reads it one column at a time. It was a single `turns: Option<u64>` — the column a
+        // bracket turned in, and the rightmost where two did — until a row with ends at two depths
+        // and a bracket running between them showed what that projection cost. See [`Standing`].
         fill(&mut margin, running, |connector| {
           let part = connector.part_on(number)?;
-          style.bracket(part, connector.role, connector.compact)
+          style
+            .bracket(part, connector.role, connector.compact)
+            .map(|glyph| Standing::new(glyph, connector.role, part))
         });
 
         // The field is the style's, the margin and the text are not. Straight to the writer, not
@@ -687,7 +752,7 @@ impl<P: Palette> Terminal<P> {
         // walk found. `underline` would answer the same columns — it is `never_empty` over that same
         // call — but asking again would walk the window again.
         style.line_field(&mut paint, gutter, number)?;
-        Frame::new(gutter, block.depth, &margin).margin(&mut paint)?;
+        style.margin(&mut paint, Frame::new(gutter, block.depth, &margin))?;
         paint.styled_with(Role::SourceText, |shown| {
           cells.write_expanded_upto(shown, row.drawn_end)?;
           if row.elided {
@@ -697,40 +762,72 @@ impl<P: Palette> Terminal<P> {
         })?;
         paint.newline()?;
 
-        // Under the source row, a span that OPENS here is open from the row that says so onwards —
-        // which is whatever the style just drew in the margin, or the row it is about to write.
+        // ── The margin every row UNDER the source row is drawn against ──────────────────────────
+        //
+        // The source row is the last thing that shows a bracket's ends. Below it, an opening has
+        // opened and a closing has finished, so the only thing a connector column can truthfully
+        // say is that its bracket is still running — and every row under this one is drawn against
+        // that same state, whatever it says and in whatever order the marks arrive.
+        //
+        // **Rebuilt in one pass, before any mark hook can read it.** It used to be reached one mark
+        // at a time, as each hook returned: `Ends::Opens` set its own column to the running bar
+        // afterwards and `Ends::Closes` cleared its own column afterwards, which is the same
+        // destination by a route that passes through states no row should ever be drawn against.
+        // A hook drawn early was handed the columns of the marks that had not run yet — still
+        // holding the SOURCE row's opening and closing glyphs — so what a style drew in another
+        // span's column was a function of the CALLER's order.
+        //
+        // It shipped for as long as there were two styles because no test read a connector: the
+        // cross-style property parses marks and steps over the margin, and goldens pin one order.
+        // Both original styles were affected — `whole` writes the whole margin, so a label sharing
+        // a line with a multi-line opening drew that opening's glyph on its own row whenever the
+        // caller sent the label first. `a_row_below_a_source_row_shows_no_bracket_opening` and
+        // `the_caller_order_permutes_the_rows_under_a_line` are that case from the two directions,
+        // and `what_a_style_is_handed_below_a_source_row_is_the_running_state` asserts the state
+        // itself rather than a consequence of it.
+        //
+        // Which is why it is built HERE rather than tolerated in the styles. A style that coped
+        // with an unnormalised slice would be compensating for the renderer, and the next style
+        // would not know it had to.
+        fill(&mut margin, running, |connector| {
+          matches!(connector.part_on(number), Some(Part::Opens | Part::Runs))
+            .then(|| style.bracket(Part::Runs, connector.role, connector.compact))
+            .flatten()
+            .map(|glyph| Standing::new(glyph, connector.role, Part::Runs))
+        });
+
+        let frame = Frame::new(gutter, block.depth, &margin);
         for mark in placed.iter() {
           let phrase = *mark.payload();
           let columns = never_empty(mark.columns());
-          let frame = Frame::new(gutter, block.depth, &margin);
           match phrase.ends {
             Ends::Whole => style.whole(&mut paint, frame, columns, phrase)?,
-            Ends::Opens => {
-              // Called for every opening, not only for the ones that need a row: whether one is
-              // needed is the style's own rule, and testing `compact` here would be this file
-              // holding half of it.
-              style.opens(&mut paint, frame, columns.start, phrase)?;
-              if let Some(column) = column_of(&mut margin, phrase.depth) {
-                *column = style
-                  .bracket(Part::Runs, phrase.role(), phrase.compact)
-                  .map(|glyph| (glyph, phrase.role()));
-              }
-            }
-            Ends::Closes => {
-              style.closes(&mut paint, frame, columns.end - 1, phrase)?;
-              if let Some(column) = column_of(&mut margin, phrase.depth) {
-                *column = None;
-              }
-            }
+            // Called for every opening, not only for the ones that need a row: whether one is
+            // needed is the style's own rule, and testing `compact` here would be this file
+            // holding half of it.
+            Ends::Opens => style.opens(&mut paint, frame, columns.start, phrase)?,
+            Ends::Closes => style.closes(&mut paint, frame, columns.end - 1, phrase)?,
           }
         }
       }
       style.close_block(&mut paint, gutter)?;
     }
 
+    // Whether anything was drawn at all reaches BOTH of the hooks below, as one value. A style
+    // whose frame belongs to the whole render needs it twice — its help is a row inside the frame,
+    // and its closing rule is the frame's bottom — and a renderer that answered one of them by
+    // declining to make the call would be sending the same fact two ways.
+    let drawn = if blocks.is_empty() {
+      Drawn::Nothing
+    } else {
+      Drawn::Blocks
+    };
     if let Some(help) = diagnostic.help() {
-      style.help(&mut paint, gutter, help)?;
+      style.help(&mut paint, gutter, help, drawn)?;
     }
+    // After the help, because a style whose frame belongs to the whole render says the help INSIDE
+    // it.
+    style.close_render(&mut paint, gutter, drawn)?;
     Ok(())
   }
 }
@@ -802,9 +899,9 @@ impl<'a> Plan<'a> {
   /// Style-independent, and that is the claim this function makes rather than a convenience: which
   /// lines are drawn, which cells each end of each span occupies, and which column a bracket runs
   /// down are answers about the SOURCE and the caller's positions. A presentation chooses the
-  /// glyphs and the rows that carry them; it does not get to move a mark. So both styles are built
-  /// on this one plan, and `which_cells_are_marked_is_the_same_in_both_styles` is what holds that
-  /// claim to more than an intention.
+  /// glyphs and the rows that carry them; it does not get to move a mark. So every style is built
+  /// on this one plan, and `a_style_changes_appearance_and_not_which_source_is_marked` is what
+  /// holds that claim to more than an intention.
   pub(super) fn of(
     diagnostic: &Diagnostic<'a>,
     inputs: &[Input<'a>],
@@ -1029,7 +1126,8 @@ impl<'a> Plan<'a> {
 
     // Whether a multi-line span opens in the MARGIN or with a row of its own. Both facts are
     // worked out here because one of them needs a measurement of a row that does not exist yet;
-    // which of them matters is the style's, and the two styles disagree about both.
+    // which of them matters is the style's, and the styles disagree about both — one reads them,
+    // and three answer without looking.
     //
     // `drawn` is the one a reader would not think to ask for, and it is the one whose absence made
     // this wrong. Suppressing a marker is only a saving if the cell the marker would have gone on
@@ -1256,26 +1354,26 @@ pub(super) fn slot(column: u64) -> usize {
 
 /// The margin slot a connector's column occupies.
 pub(super) fn column_of(
-  margin: &mut [Option<(char, Role)>],
+  margin: &mut [Option<Standing>],
   depth: u64,
-) -> Option<&mut Option<(char, Role)>> {
+) -> Option<&mut Option<Standing>> {
   margin.get_mut(slot(depth).checked_sub(1)?)
 }
 
 /// Refills every connector column of one row.
 pub(super) fn fill(
-  margin: &mut [Option<(char, Role)>],
+  margin: &mut [Option<Standing>],
   connectors: &[Connector],
-  mut glyph: impl FnMut(&Connector) -> Option<char>,
+  mut standing: impl FnMut(&Connector) -> Option<Standing>,
 ) {
   for column in margin.iter_mut() {
     *column = None;
   }
   for connector in connectors {
-    if let Some(character) = glyph(connector)
+    if let Some(shown) = standing(connector)
       && let Some(column) = column_of(margin, connector.depth)
     {
-      *column = Some((character, connector.role));
+      *column = Some(shown);
     }
   }
 }
