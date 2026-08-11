@@ -200,25 +200,43 @@ impl Presentation for Ariadne {
   ///
   /// Where nothing turns, the arrow's cells are blank and the columns stand as the plan filled
   /// them.
-  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>, turns: Option<u64>) -> fmt::Result {
+  ///
+  /// # Two ends on one row, which is what the contract above has to survive
+  ///
+  /// The run starts at the **leftmost** end and every column from there is either an end of its
+  /// own — drawn as the plan filled it, because a corner and the run passing through it are the
+  /// same cell — or a cell of the run. A row can carry ends at depth 1 and depth 3 with a bracket
+  /// still running at depth 2, or with depth 2 already closed and empty, and in both the left end
+  /// has to reach: `├─╭` and `├─├`, not `├│╭` and `├ ├`.
+  ///
+  /// It could not, while the renderer said which columns turned by handing over one depth — *the
+  /// rightmost*, where two did. That is a set projected onto one of its members, and the member it
+  /// kept was the one with nothing to cross. The fact travels per column now; see [`Standing`].
+  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>) -> fmt::Result {
     let columns = frame.columns();
     if columns.is_empty() {
       return Ok(());
     }
-    let Some(depth) = turns else {
+    let Some(leftmost) = columns
+      .iter()
+      .position(|column| column.is_some_and(|standing| standing.turns()))
+    else {
       paint.margin(columns)?;
       return paint.pad(APPROACH);
     };
-    let own = slot(depth).min(columns.len());
-    paint.margin(&columns[..own])?;
-    let role = columns[..own]
-      .last()
-      .and_then(|column| column.map(|(_, role)| role))
-      .unwrap_or(Role::Gutter);
-    paint.styled_with(role, |shown| {
-      for _ in own..columns.len() {
-        fmt::Write::write_char(shown, RULE)?;
+    paint.margin(&columns[..leftmost])?;
+    // Every column from the leftmost end rightwards belongs to the run, except the cells where
+    // another bracket's own end stands — that cell is both, and the end is what a reader needs.
+    let role = columns[leftmost].map_or(Role::Gutter, |standing| standing.role());
+    for column in &columns[leftmost..] {
+      match column {
+        Some(standing) if standing.turns() => {
+          paint.styled(standing.role(), standing.glyph().encode_utf8(&mut [0; 4]))?;
+        }
+        _ => paint.styled(role, RULE.encode_utf8(&mut [0; 4]))?,
       }
+    }
+    paint.styled_with(role, |shown| {
       fmt::Write::write_char(shown, RULE)?;
       fmt::Write::write_char(shown, ARROW)
     })?;

@@ -100,9 +100,11 @@ impl Codespan {
       role,
       if closing { '╰' } else { '╭' }.encode_utf8(&mut [0; 4]),
     )?;
-    for standing in &columns[crossed..] {
-      match standing {
-        Some((glyph, occupant)) => paint.styled(*occupant, glyph.encode_utf8(&mut [0; 4]))?,
+    for column in &columns[crossed..] {
+      match column {
+        Some(standing) => {
+          paint.styled(standing.role(), standing.glyph().encode_utf8(&mut [0; 4]))?
+        }
         None => paint.styled(role, RULE.encode_utf8(&mut [0; 4]))?,
       }
     }
@@ -176,7 +178,7 @@ impl Presentation for Codespan {
 
   /// The plan's columns and one blank. Both ends of a multi-line span are drawn on rows of their
   /// own, so nothing this style draws reaches into a source row.
-  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>, _turns: Option<u64>) -> fmt::Result {
+  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>) -> fmt::Result {
     frame.margin(paint)
   }
 

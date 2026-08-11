@@ -149,7 +149,7 @@ impl Presentation for Miette {
 
   /// The plan's columns and one blank. A bracket here opens and closes in its own column, so
   /// nothing this style draws ever leaves the margin on a source row.
-  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>, _turns: Option<u64>) -> fmt::Result {
+  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>) -> fmt::Result {
     frame.margin(paint)
   }
 

@@ -1948,6 +1948,31 @@ fn bracketed() -> Vec<Bracketed> {
       "a closing, an opening and a whole span on ONE row — six caller orders rather than two, \
        which is where an order dependence would show a middle position differing from both ends",
     ),
+    // ── The turning shapes ──────────────────────────────────────────────────────────────────
+    //
+    // Two ends on one source row with a column between them that is not an end. The allocator
+    // reaches all three: a span takes the column after the deepest one still open, so an outer
+    // span closing on the same row as an inner one leaves whatever is between them showing its own
+    // state — a bar if that span is still open, nothing if it has already closed.
+    case(
+      "a (\n b (\n  c\n  d\n) [\n  e\n )\n  f\n]\n",
+      &[Span::new(2, 18), Span::new(7, 27), Span::new(19, 33)],
+      "a closing at depth 1 and an opening at depth 3 on ONE row, with a bracket still RUNNING at \
+       depth 2 between them — the run from the left end has a bar to cross",
+    ),
+    case(
+      "a (\n b [\n  c {\n ]\n  d\n) }\n",
+      &[Span::new(2, 23), Span::new(7, 17), Span::new(13, 25)],
+      "two closings, at depth 1 and depth 3, with the column between them EMPTY because its span \
+       closed two rows earlier — the run from the left end has a blank to cross",
+    ),
+    case(
+      "a (\n b [\n  c {\n   d\n) ] }\n",
+      &[Span::new(2, 21), Span::new(7, 23), Span::new(13, 25)],
+      "three closings on one row, all adjacent — the shape that renders the same whether a style \
+       reaches from the leftmost turn or the rightmost, which is what makes the count alone not \
+       the hazard",
+    ),
     case(
       "start {\n a\n b\n c\n d\n e\n f\n g\n h\n i\n j\n}\nend\n",
       &[Span::new(6, 39)],
@@ -2106,6 +2131,50 @@ impl Style {
       // Two, because this style says which position a diagnostic is about with a WEIGHT.
       Style::Miette => &['\u{250f}', '\u{256d}'],
       Style::Ariadne | Style::Codespan => &['\u{256d}'],
+    }
+  }
+
+  /// How many cells stand between the last connector column and the source text.
+  ///
+  /// One for the blank every style leaves there, and three for the style that spends two more of
+  /// them on an arrow. Declared rather than measured, for the same reason the readers above are.
+  const fn approach(self) -> usize {
+    match self {
+      Style::Rustc | Style::Miette | Style::Codespan => 1,
+      Style::Ariadne => 3,
+    }
+  }
+
+  /// Whether this style draws a bracket's END on the SOURCE row, reaching from that bracket's
+  /// column across every column to the right of it.
+  ///
+  /// **One of the four, and the other three are immune for one structural reason:** they say a
+  /// bracket's end on a row of ITS OWN, below the source row. A row that belongs to one span
+  /// carries one end by construction, so "how many ends does this row have" never enters their
+  /// drawing — and the run each of them draws starts at its own column, which it knows without
+  /// being told. Only a style that says the end on the shared source row has to be told where the
+  /// ends are, and only that style can be told wrongly.
+  const fn reaches_across_a_source_row(self) -> bool {
+    matches!(self, Style::Ariadne)
+  }
+
+  /// The glyphs a bracket's END is drawn with in a connector column.
+  const fn ends(self) -> &'static [char] {
+    match self {
+      // Its closing is the same character as its running bar, which is exactly why the renderer
+      // has to say which columns turn rather than leaving a style to read it off the glyphs.
+      Style::Rustc => &['/', '|'],
+      Style::Miette => &['\u{250f}', '\u{256d}', '\u{2523}', '\u{251c}'],
+      Style::Ariadne | Style::Codespan => &['\u{256d}', '\u{251c}'],
+    }
+  }
+
+  /// The glyphs this style reaches ACROSS a column with.
+  const fn crossings(self) -> &'static [char] {
+    match self {
+      Style::Rustc => &['_'],
+      Style::Miette => &['\u{2501}', '\u{2500}'],
+      Style::Ariadne | Style::Codespan => &['\u{2500}'],
     }
   }
 
@@ -3000,7 +3069,7 @@ impl Recorder {
         columns: frame
           .columns()
           .iter()
-          .map(|column| column.map(|(glyph, _)| glyph))
+          .map(|column| column.map(|standing| standing.glyph()))
           .collect(),
       });
   }
@@ -3033,7 +3102,6 @@ impl super::present::Presentation for Recorder {
     &self,
     _: &mut super::paint::Painter<'_>,
     frame: super::present::Frame<'_>,
-    _: Option<u64>,
   ) -> core::fmt::Result {
     Self::note(Hook::Margin, None, frame);
     Ok(())
@@ -3309,6 +3377,107 @@ fn the_caller_order_permutes_the_rows_under_a_line_and_does_not_change_them() {
              their order — {}\n{rendered}",
             case.text, case.why
           ),
+        }
+      }
+    }
+  }
+}
+
+/// The connector columns of one source row, as the characters standing in them.
+///
+/// Read out of the row by the geometry [`source_row`] found, and cut at the style's own approach —
+/// what follows the columns is the blank before the source, and for one style an arrow as well.
+fn connectors_of(style: Style, row: &str, bar: usize, code: usize) -> Vec<char> {
+  let characters: Vec<char> = row.chars().collect();
+  let from = bar + 2;
+  let upto = code.saturating_sub(style.approach()).max(from);
+  characters[from.min(characters.len())..upto.min(characters.len())].to_vec()
+}
+
+/// How many multi-line spans have an END on `line`.
+///
+/// From layer 2, like every other oracle here: a span's two ends are the first and last lines of
+/// the region it resolves to, and the plan's column assignment — the thing under test — is not
+/// consulted.
+fn ends_on(source: Source<'_>, spans: &[Span], line: u64) -> usize {
+  spans
+    .iter()
+    .filter(|span| {
+      let drawn: Vec<_> = source.resolve(**span).lines().collect();
+      let (Some(first), Some(last)) = (drawn.first(), drawn.last()) else {
+        return false;
+      };
+      drawn.len() > 1 && (first.line().number() == line || last.line().number() == line)
+    })
+    .count()
+}
+
+#[test]
+fn a_bracket_end_on_a_source_row_reaches_across_every_column_to_its_right() {
+  // The contract one style states and the renderer has to make keepable. Its end is said on the
+  // source row itself, by a run that leaves the bracket's column and crosses everything to the
+  // right of it — so on a row where TWO brackets end, the left one still has to cross, including
+  // across the column of a third span that is merely running or has already closed.
+  //
+  // The renderer used to hand that style a single depth, "the column a bracket turns in, and the
+  // rightmost where two do". A projection of a set onto one of its members: with ends at depth 1
+  // and depth 3, only depth 3 was named, the left end drew no run at all, and the row read as two
+  // unconnected corners — `├│╭` and `├ ├`, against the `├─╭` and `├─├` the contract promises.
+  //
+  // Asserted on the rendered row, over every case and every caller order, in two directions. The
+  // style that reaches must reach the whole way and must lose no end; the three that do not reach
+  // must not have reached, which is what makes their immunity a checked fact rather than a claim
+  // about their code.
+  for case in bracketed() {
+    let source = Source::new(case.text);
+    for order in orderings(case.spans.len()) {
+      let spans: Vec<Span> = order.iter().map(|index| case.spans[*index]).collect();
+      for style in STYLES {
+        let rendered = render_labels(style, case.text, &spans);
+        for row in rendered.lines() {
+          let Some((number, bar, code)) = source_row(style, row, source) else {
+            continue;
+          };
+          let columns = connectors_of(style, row, bar, code);
+          if !style.reaches_across_a_source_row() {
+            assert!(
+              !columns
+                .iter()
+                .any(|glyph| style.crossings().contains(glyph)),
+              "{:?} as {style:?} in caller order {order:?}: line {number} reaches across its \
+               margin on the SOURCE row, which is the one thing this style says on a row of its \
+               own instead — {columns:?}\n{rendered}",
+              case.text
+            );
+            continue;
+          }
+          let Some(leftmost) = columns
+            .iter()
+            .position(|glyph| style.ends().contains(glyph))
+          else {
+            continue;
+          };
+          for glyph in &columns[leftmost..] {
+            assert!(
+              style.ends().contains(glyph) || style.crossings().contains(glyph),
+              "{:?} as {style:?} in caller order {order:?}: line {number} has a bracket ending at \
+               column {} and {glyph:?} standing to the right of it, where the run from that end \
+               has to cross — {columns:?}\n{rendered}",
+              case.text,
+              leftmost + 1
+            );
+          }
+          assert_eq!(
+            columns
+              .iter()
+              .filter(|glyph| style.ends().contains(glyph))
+              .count(),
+            ends_on(source, &spans, number),
+            "{:?} as {style:?} in caller order {order:?}: line {number} draws a different number \
+             of bracket ends than layer 2 says end there, so the run has painted over one — \
+             {columns:?}\n{rendered}",
+            case.text
+          );
         }
       }
     }

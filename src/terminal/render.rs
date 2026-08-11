@@ -12,7 +12,7 @@ use super::{
   codespan::Codespan,
   miette::Miette,
   paint::Painter,
-  present::{Drawn, Frame, Onset, Part, Presentation},
+  present::{Drawn, Frame, Onset, Part, Presentation, Standing},
   rustc::Rustc,
   width::{Budget, Mark},
 };
@@ -658,7 +658,7 @@ impl<P: Palette> Terminal<P> {
       connectors,
     } = &mut plan;
     // One slot per connector column, resized per block and refilled per row.
-    let mut margin: Vec<Option<(char, Role)>> = Vec::new();
+    let mut margin: Vec<Option<Standing>> = Vec::new();
 
     for (index, block) in blocks.iter().enumerate() {
       // A header per input, and the key is the input INDEX rather than the origin string. Resolving
@@ -719,27 +719,23 @@ impl<P: Palette> Terminal<P> {
               .spans_the_gap(above, number)
               .then(|| style.bracket(Part::Gap, connector.role, connector.compact))
               .flatten()
+              .map(|glyph| Standing::new(glyph, connector.role, Part::Gap))
           });
           style.elision_row(&mut paint, Frame::new(gutter, block.depth, &margin))?;
         }
 
         // WHICH part of a bracket a row shows is arithmetic over the connector's two ends and is
         // settled here; what stands there is the style's answer and nothing else.
+        // WHICH part each column shows travels with the glyph, so a style drawing across the
+        // margin reads it one column at a time. It was a single `turns: Option<u64>` — the column a
+        // bracket turned in, and the rightmost where two did — until a row with ends at two depths
+        // and a bracket running between them showed what that projection cost. See [`Standing`].
         fill(&mut margin, running, |connector| {
           let part = connector.part_on(number)?;
-          style.bracket(part, connector.role, connector.compact)
+          style
+            .bracket(part, connector.role, connector.compact)
+            .map(|glyph| Standing::new(glyph, connector.role, part))
         });
-
-        // The connector column a bracket TURNS in on this row, and the rightmost where two of them
-        // do. A style that draws an end of a multi-line span on the source row itself needs to know
-        // where the run starts, and it cannot work it out from the glyphs: the column holding a
-        // corner is the style's own answer to `bracket`, and a style is free to give the same one
-        // for every part.
-        let turns = running
-          .iter()
-          .filter(|connector| matches!(connector.part_on(number), Some(Part::Opens | Part::Closes)))
-          .map(|connector| connector.depth)
-          .max();
 
         // The field is the style's, the margin and the text are not. Straight to the writer, not
         // through a `String` first: materialising the row commits the allocation before the writer
@@ -756,7 +752,7 @@ impl<P: Palette> Terminal<P> {
         // walk found. `underline` would answer the same columns — it is `never_empty` over that same
         // call — but asking again would walk the window again.
         style.line_field(&mut paint, gutter, number)?;
-        style.margin(&mut paint, Frame::new(gutter, block.depth, &margin), turns)?;
+        style.margin(&mut paint, Frame::new(gutter, block.depth, &margin))?;
         paint.styled_with(Role::SourceText, |shown| {
           cells.write_expanded_upto(shown, row.drawn_end)?;
           if row.elided {
@@ -797,6 +793,7 @@ impl<P: Palette> Terminal<P> {
           matches!(connector.part_on(number), Some(Part::Opens | Part::Runs))
             .then(|| style.bracket(Part::Runs, connector.role, connector.compact))
             .flatten()
+            .map(|glyph| Standing::new(glyph, connector.role, Part::Runs))
         });
 
         let frame = Frame::new(gutter, block.depth, &margin);
@@ -1357,26 +1354,26 @@ pub(super) fn slot(column: u64) -> usize {
 
 /// The margin slot a connector's column occupies.
 pub(super) fn column_of(
-  margin: &mut [Option<(char, Role)>],
+  margin: &mut [Option<Standing>],
   depth: u64,
-) -> Option<&mut Option<(char, Role)>> {
+) -> Option<&mut Option<Standing>> {
   margin.get_mut(slot(depth).checked_sub(1)?)
 }
 
 /// Refills every connector column of one row.
 pub(super) fn fill(
-  margin: &mut [Option<(char, Role)>],
+  margin: &mut [Option<Standing>],
   connectors: &[Connector],
-  mut glyph: impl FnMut(&Connector) -> Option<char>,
+  mut standing: impl FnMut(&Connector) -> Option<Standing>,
 ) {
   for column in margin.iter_mut() {
     *column = None;
   }
   for connector in connectors {
-    if let Some(character) = glyph(connector)
+    if let Some(shown) = standing(connector)
       && let Some(column) = column_of(margin, connector.depth)
     {
-      *column = Some((character, connector.role));
+      *column = Some(shown);
     }
   }
 }

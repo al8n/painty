@@ -149,6 +149,61 @@ pub(super) enum Part {
   Gap,
 }
 
+/// What is standing in one connector column of one row.
+///
+/// A glyph, the role it is painted in, and **which question it answers** — the part the renderer
+/// asked [`bracket`](Presentation::bracket) for when it put this here.
+///
+/// # The part travels with the glyph rather than beside it
+///
+/// [`margin`](Presentation::margin) used to take `turns: Option<u64>`, the column a bracket had an
+/// end in — *and the rightmost where two did*. That parenthesis is the whole defect: it is a set
+/// projected onto one of its members, and a row can have two ends with a column between them that
+/// is neither. With ends at depth 1 and depth 3 and a bracket still running at depth 2, the style
+/// that draws an end on the source row was told only about depth 3, so the end at depth 1 drew no
+/// run at all and the row read as two unconnected corners.
+///
+/// Two shapes were available for the repair. A second slice of parts, parallel to the columns, was
+/// the smaller change and is the one this crate has already rejected once: [`Frame`]'s own
+/// documentation says three things read together on every row are one value rather than three
+/// parameters, "because a caller pairing them by position is a caller that can pair them wrongly".
+/// So the part is attached to the slot it describes, `turns` is gone, and the projection that
+/// caused this cannot be written.
+///
+/// Every slot's part is true of the row it is on: a source row carries the parts the plan computed,
+/// a row under one carries [`Part::Runs`] for every bracket still open — that is what the
+/// normalisation below the source row MEANS — and an elision row carries [`Part::Gap`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) struct Standing {
+  glyph: char,
+  role: Role,
+  part: Part,
+}
+
+impl Standing {
+  pub(super) const fn new(glyph: char, role: Role, part: Part) -> Self {
+    Self { glyph, role, part }
+  }
+
+  /// What the style put here.
+  pub(super) const fn glyph(&self) -> char {
+    self.glyph
+  }
+
+  /// The style it is painted in.
+  pub(super) const fn role(&self) -> Role {
+    self.role
+  }
+
+  /// Whether a bracket has an END in this column on this row, rather than passing through it.
+  ///
+  /// The question `turns` used to answer for one column of the row. Asked of a slot, it cannot
+  /// collapse two ends into one.
+  pub(super) const fn turns(&self) -> bool {
+    matches!(self.part, Part::Opens | Part::Closes)
+  }
+}
+
 /// Whether the render drew a block at all.
 ///
 /// A diagnostic can name no position this renderer is able to draw — [`Location::entire`], or an
@@ -251,11 +306,11 @@ impl Onset {
 pub(super) struct Frame<'m> {
   gutter: u64,
   depth: u64,
-  margin: &'m [Option<(char, Role)>],
+  margin: &'m [Option<Standing>],
 }
 
 impl<'m> Frame<'m> {
-  pub(super) const fn new(gutter: u64, depth: u64, margin: &'m [Option<(char, Role)>]) -> Self {
+  pub(super) const fn new(gutter: u64, depth: u64, margin: &'m [Option<Standing>]) -> Self {
     Self {
       gutter,
       depth,
@@ -285,7 +340,7 @@ impl<'m> Frame<'m> {
   ///
   /// Read-only, which is what keeps the split intact: a style still cannot move a bracket into
   /// another span's column.
-  pub(super) const fn columns(&self) -> &'m [Option<(char, Role)>] {
+  pub(super) const fn columns(&self) -> &'m [Option<Standing>] {
     self.margin
   }
 
@@ -315,7 +370,7 @@ impl<'m> Frame<'m> {
   /// `None` when that is all of them.
   ///
   /// Trailing blanks are dropped, so an elision row ends where it stops saying anything.
-  pub(super) fn occupied(&self) -> Option<&'m [Option<(char, Role)>]> {
+  pub(super) fn occupied(&self) -> Option<&'m [Option<Standing>]> {
     let last = self.margin.iter().rposition(Option::is_some)?;
     Some(&self.margin[..=last])
   }
@@ -385,10 +440,10 @@ pub(super) trait Presentation: fmt::Debug + Sync + RefUnwindSafe {
 
   /// Everything between the line-number field and a source row's own text.
   ///
-  /// `turns` is the connector column a bracket has an END in on this row — the rightmost, where
-  /// two of them do — and `None` where every bracket the row shows is only passing through. What
-  /// stands in each column is already the style's own answer from [`bracket`](Self::bracket); this
-  /// is the row-wide question that a per-column answer cannot reach.
+  /// Which columns hold a bracket's END rather than a bracket passing through is read off
+  /// [`Standing::turns`], one column at a time. It was a single `turns: Option<u64>` for as long as
+  /// the only style that asked had one end per row to draw — see [`Standing`] for what that cost
+  /// and why the answer now travels with the column it is about.
   ///
   /// **Diverges, and this is the one a trait derived from two styles did not have.** Both of the
   /// first two say where a multi-line span opens either in the span's own column or on a row of
@@ -397,7 +452,7 @@ pub(super) trait Presentation: fmt::Debug + Sync + RefUnwindSafe {
   /// run that leaves the bracket's column, crosses every column to its right, and ends in an arrow
   /// pointing at the line — so the width of that region and what stands in it are a style's, and
   /// the renderer cannot write it.
-  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>, turns: Option<u64>) -> fmt::Result;
+  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>) -> fmt::Result;
 
   /// The row standing for the lines left out between two excerpts.
   ///

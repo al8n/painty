@@ -157,7 +157,7 @@ impl Presentation for Rustc {
   /// The plan's columns and one blank, whatever is turning on the row: an opening is either the
   /// `/` already standing in its own column or the underscore run on the row below, and a closing
   /// reaches back into the source from a row of its own. Neither of them writes anything here.
-  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>, _turns: Option<u64>) -> fmt::Result {
+  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>) -> fmt::Result {
     frame.margin(paint)
   }
 

@@ -147,10 +147,12 @@ impl<'a> Painter<'a> {
   /// plan's — one per multi-line span, assigned so a later span runs to the right of an earlier
   /// one — and only what stands in them is a style's. A style that could write its own margin
   /// could put a bracket in another span's column.
-  pub(super) fn margin(&mut self, columns: &[Option<(char, Role)>]) -> fmt::Result {
+  pub(super) fn margin(&mut self, columns: &[Option<super::present::Standing>]) -> fmt::Result {
     for column in columns {
       match column {
-        Some((glyph, role)) => self.styled(*role, glyph.encode_utf8(&mut [0; 4]))?,
+        Some(standing) => {
+          self.styled(standing.role(), standing.glyph().encode_utf8(&mut [0; 4]))?
+        }
         None => self.frame_char(' ')?,
       }
     }
