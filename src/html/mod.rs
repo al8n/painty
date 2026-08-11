@@ -766,6 +766,10 @@ fn in_input<'a>(
 /// terminal's rule and it is load-bearing for the terminal's reason: a walk asked for an offset it
 /// is already standing on cannot see that a line break ended there, and that is the one question a
 /// close exists to answer. `false` sorts before `true`, so the pair orders itself.
+// The elision this lint asks for — `Drawable<'_>` inside `impl Trait` — is unstable
+// (`anonymous_lifetime_in_impl_trait`), so the name stays. Naming it after `line` instead would
+// tie two lifetimes that callers are free to keep apart.
+#[allow(single_use_lifetimes)]
 fn next_stop<'a>(
   marks: impl Iterator<Item = (Drawable<'a>, Span)>,
   after: Option<(usize, bool)>,
@@ -818,6 +822,9 @@ fn stops_of(span: Span) -> impl Iterator<Item = (usize, bool)> {
 /// The one thing about the marks that [`elide::shown_between`] needs. Only a bracket earns context
 /// after it; an anchor that is merely where something ended, or where a single-line label sits, is
 /// followed straight by the gap.
+// Same as `next_stop`: eliding to `Drawable<'_>` in `impl Trait` position is unstable, and reusing
+// `line`'s lifetime here would constrain a caller that has no reason to share one.
+#[allow(single_use_lifetimes)]
 fn opens_a_bracket<'a>(
   mut marks: impl Iterator<Item = (Drawable<'a>, Span)>,
   line: Line<'_>,
