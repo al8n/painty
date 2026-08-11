@@ -122,11 +122,12 @@ impl<'a> Region<'a> {
 /// break that ended a line — a span naming the newline itself does — and a start clamped only from
 /// below would then sit past the text it indexes into.
 ///
-/// One function rather than one expression per caller: [`RegionLines`] walks every line of a region
-/// and `Walk` answers only the first, and two clipping rules for one question is how a walk that
-/// skipped the far end came to exist in the first place. Unlinked deliberately — `Walk` is behind
-/// the `terminal` feature, so a link to it is broken in every build that does not enable one.
-pub(super) fn clip<'a>(line: Line<'a>, span: Span) -> RegionLine<'a> {
+/// One function rather than one expression per caller: [`RegionLines`] walks every line of a region,
+/// `Walk` answers only the first, and the HTML renderer answers the ones in between for itself —
+/// and three clipping rules for one question is how a walk that skipped the far end came to exist
+/// in the first place. Unlinked deliberately — `Walk` and the HTML renderer are behind features, so
+/// a link to either is broken in every build that does not enable it.
+pub(crate) fn clip<'a>(line: Line<'a>, span: Span) -> RegionLine<'a> {
   let content = line.span();
   let start = span.start().max(content.start()).min(content.end());
   let end = span.end().min(content.end()).max(start);

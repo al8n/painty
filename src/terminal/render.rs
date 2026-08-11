@@ -17,53 +17,9 @@ use super::{
   width::{Budget, Mark},
 };
 use crate::{
-  Diagnostic, Line, Palette, RegionLine, Role, Source, Span, Theme,
+  Diagnostic, Input, Line, Palette, RegionLine, Role, Span, Theme,
   source::{Opening, Walk},
 };
-
-/// One of the caller's inputs: its text, and whatever the caller calls it.
-///
-/// A [`Location`](crate::Location) carries a `source: u32` that indexes the list the producer was
-/// numbering, so a renderer needs that same list to resolve a span. Mapping an index to a *name*
-/// stays with the caller — painty is not a source-file manager — which is why the name comes in
-/// here rather than being looked up.
-#[derive(Debug, Clone, Copy)]
-pub struct Input<'a> {
-  source: Source<'a>,
-  origin: Option<&'a str>,
-}
-
-impl<'a> Input<'a> {
-  /// An input with no name.
-  #[inline]
-  #[must_use]
-  pub const fn new(source: Source<'a>) -> Self {
-    Self {
-      source,
-      origin: None,
-    }
-  }
-
-  /// Names the input — a path, a URL, whatever the caller has.
-  #[inline]
-  #[must_use]
-  pub const fn with_origin(mut self, origin: &'a str) -> Self {
-    self.origin = Some(origin);
-    self
-  }
-
-  /// Returns the text.
-  #[inline]
-  pub const fn source(&self) -> Source<'a> {
-    self.source
-  }
-
-  /// Returns the caller's name for it, if it gave one.
-  #[inline]
-  pub const fn origin(&self) -> Option<&'a str> {
-    self.origin
-  }
-}
 
 /// One position a diagnostic named that this render can actually draw.
 ///
@@ -621,7 +577,7 @@ impl<P: Palette> Terminal<P> {
   ///
   /// # Why a list, and not one source
   ///
-  /// This took a single [`Source`] and resolved every span against it, ignoring
+  /// This took a single [`Source`](crate::Source) and resolved every span against it, ignoring
   /// [`Location::source`](crate::Location::source) entirely. A diagnostic whose label points into
   /// a *different* input — "first defined here", in another file, which is the commonest
   /// multi-file diagnostic there is — was rendered against the wrong text, with a confident line
@@ -1014,7 +970,7 @@ impl<'a> Plan<'a> {
     let Some(leading) = drawable.first() else {
       return;
     };
-    let source = leading.from.source;
+    let source = leading.from.source();
 
     // ── Both ends of every span, in ONE forward walk ────────────────────────────────────────
     //
@@ -1298,7 +1254,7 @@ impl<'a> Plan<'a> {
       .min_by_key(|placement| placement.at)
       .expect("a block is built from at least one drawable position");
     self.blocks.push(Block {
-      origin: leading.from.origin,
+      origin: leading.from.origin(),
       line: earliest.first(),
       column: earliest.opening.at().column(),
       at: earliest.at,

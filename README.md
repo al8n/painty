@@ -19,10 +19,14 @@ Renders a diagnostic and its source text to a terminal, to HTML, or to an export
 
 ## Status
 
-**Layer 2, and a single-line terminal renderer.** Resolution has landed: a diagnostic and the source
-text it points into go in, and lines, character columns, excerpts and the lines a multi-line span
-is drawn on come out. The terminal, HTML and model outputs are declared as features and are not
-written.
+**Layer 2, a terminal renderer in four styles, and HTML.** Resolution has landed: a diagnostic and
+the source text it points into go in, and lines, character columns, excerpts and the lines a
+multi-line span is drawn on come out. The terminal renderer draws them with box characters and ANSI
+colour, in whichever of `rustc`, `miette`, `ariadne` and `codespan`'s idioms the caller picks. The
+HTML renderer writes the same thing as elements and CSS classes, with every byte of the caller's
+text escaped; it is a **peer** of the terminal rather than another of its styles, because the seam
+the styles are written against sits below the conversion into display cells and HTML has no cell.
+The model export is declared as a feature and is not written.
 
 Nothing here is published to crates.io.
 
@@ -113,9 +117,21 @@ Layer 2 — resolution          byte offset -> (line, column); excerpt extractio
                               borrows from the source, still allocation-free
                               THE PUBLIC DATA MODEL — landed
 
-Layer 3 — outputs             terminal (ANSI) - HTML - model export for native UIs
-                              declared as features; not written
+Layer 3 — outputs             terminal (ANSI) — landed, four styles
+                              HTML (elements and classes) — landed, a PEER of the terminal
+                              model export for native UIs — declared as a feature; not written
 ```
+
+The two text outputs are peers rather than a renderer and a style of it, and that is a finding
+rather than a preference. The seam the four terminal styles are written against sits *below* the
+character-column-to-display-column conversion: one of its hooks returns a `char` to stand in a cell
+and four more position a mark by display column, and HTML has no cell. It also draws the line in
+the wrong place — a terminal style marks a row from *underneath*, and an HTML mark is an element
+*inside* the row, so the source row itself changes hands.
+
+What the two share is **layer 2**, which is stated in lines and byte spans and which every medium
+has. Not the terminal's plan: that is private to its own module, it is built by putting questions
+to a style and a cell budget, and it is four `Vec`s in a renderer that has no allocator.
 
 Layer 2 earns its keep twice. Beyond serving outputs that are not text, it is what makes the hard
 part assertable structurally instead of by snapshot: every reported column lies within its line's
@@ -222,7 +238,7 @@ crate is `no_std` and dependency-free until a caller asks for something.
 | *(default)* | —       | —                          | layer 2: resolution, `no_std`, no dependencies      |
 | `std`       | —       | —                          | anything needing the standard library               |
 | `terminal`  | `std`   | `unicode-width`, `unicode-segmentation`, `anstyle` | the terminal renderer: cell arithmetic, colour detection, ANSI |
-| `html`      | —       | —                          | HTML output: escaping and CSS classes               |
+| `html`      | —       | —                          | the HTML renderer: escaping and CSS classes, still `no_std` and allocation-free |
 | `model`     | —       | —                          | a stable C-ABI export of the resolved model         |
 | `tokora`    | —       | `tokora`                   | an adapter from `tokora::diagnostic::Diagnose`      |
 
@@ -241,6 +257,11 @@ model, so the question goes to the crate that implements the standard, exactly a
 line scanner decides what a public item is. `anstyle` is what `clap` and `cargo` already use, so a
 consumer's `--color` flag and this crate's theme interoperate without a conversion layer. All three
 sit behind `terminal`; the HTML and model outputs pull in none of them.
+
+`html` implies nothing at all, which is load-bearing rather than tidy: CI builds it for
+`thumbv6m-none-eabi`, so the renderer has no `std`, no `alloc` and no heap. That is why it does not
+consume the terminal's plan — a plan is four `Vec`s — and orders the caller's labels with selection
+scans over their own byte offsets instead.
 
 ### The placement model
 

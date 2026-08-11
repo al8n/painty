@@ -13,8 +13,14 @@ mod rustc;
 mod width;
 
 pub use detect::{CapturedEnvironment, ColorCapability, ColorChoice, Environment};
-pub use render::{Input, Terminal};
+pub use render::Terminal;
 pub use width::LineCells;
+
+/// Re-exported so that `painty::terminal::Input` keeps resolving. It moved to the crate root when
+/// the HTML renderer turned out to need the same type — see [`Input`]. Unlinked
+/// deliberately: `painty::html` is behind its own feature, so a link to it is broken in every
+/// build that enables this one and not that one.
+pub use crate::Input;
 
 #[cfg(test)]
 mod tests;

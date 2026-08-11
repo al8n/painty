@@ -9,6 +9,14 @@ mod region;
 pub use line::{Line, LineBreak, Lines};
 pub use region::{Region, RegionLine, RegionLines};
 
+/// The clipping rule, for the renderer that walks a region's lines itself instead of asking
+/// [`Region::lines`] for them.
+///
+/// One rule with two consumers rather than two rules, which is the whole reason it is a function —
+/// see its own note.
+#[cfg(feature = "html")]
+pub(crate) use region::clip;
+
 use crate::Span;
 
 #[cfg(test)]
@@ -122,7 +130,7 @@ fn advance(bytes: &[u8], cursor: Cursor, target: usize) -> Cursor {
 /// is the one it closes on. Stated here, where the walk can act on it, instead of being recovered
 /// afterwards from a column of 1 — which needs the span's own start line to be right about, and
 /// leaves the caller holding a line the walk has already gone past.
-#[cfg(feature = "terminal")]
+#[cfg(any(feature = "terminal", feature = "html"))]
 fn advance_to_drawn_end(bytes: &[u8], cursor: Cursor, target: usize) -> Cursor {
   advance_to(bytes, cursor, target, true)
 }
@@ -297,9 +305,10 @@ impl<'a> Source<'a> {
   /// Agrees with [`Lines`] on the empty line a trailing break leaves behind, because it is the same
   /// scan: `"a\n"` has a second line and this returns it.
   ///
-  /// Gated on the one output that has a use for it, exactly as [`Walk`] is: a renderer drawing the
+  /// Gated on the outputs that have a use for it, exactly as [`Walk`] is: a renderer drawing the
   /// lines BETWEEN a multi-line span's ends walks from one to the next, and nothing else here does.
-  #[cfg(feature = "terminal")]
+  /// Both text renderers draw them, so both are on the gate.
+  #[cfg(any(feature = "terminal", feature = "html"))]
   pub(crate) fn line_after(&self, line: Line<'a>) -> Option<Line<'a>> {
     let line_break = line.line_break()?;
     let start = line.span().end() + line_break.byte_len();
@@ -482,10 +491,16 @@ impl<'a> Source<'a> {
 /// one_does` holds the two together over the corpus at every offset — a carried cursor is exactly
 /// the kind of state that can be right on the case it was written for and wrong one line later.
 ///
-/// Gated on the one output that has it: this is layer 2's capability rather than the terminal's,
-/// and the gate follows the consumer so that a `--no-default-features` build does not carry code
-/// nothing reaches. The HTML and model outputs will want it, and the gate widens when they arrive.
-#[cfg(feature = "terminal")]
+/// Gated on the outputs that have it: this is layer 2's capability rather than the terminal's, and
+/// the gate follows the consumer so that a `--no-default-features` build does not carry code
+/// nothing reaches.
+///
+/// **HTML arrived and wanted it, which this note predicted.** What it did not predict is the
+/// reason: the terminal drains a multi-line span's far ends out of a `BinaryHeap` so that every
+/// stop of a whole block is visited in one ascending order, and `html` is allocation-free — it has
+/// no heap, so it opens and closes each span in turn and pays a restart wherever a later-starting
+/// span ends before an earlier one. Totality is what makes that a cost rather than a defect.
+#[cfg(any(feature = "terminal", feature = "html"))]
 pub(crate) struct Walk<'a> {
   source: Source<'a>,
   cursor: Cursor,
@@ -494,7 +509,7 @@ pub(crate) struct Walk<'a> {
   line: Option<Line<'a>>,
 }
 
-#[cfg(feature = "terminal")]
+#[cfg(any(feature = "terminal", feature = "html"))]
 impl<'a> Walk<'a> {
   /// A walk over `source`, positioned at the top of it.
   #[inline]
@@ -512,6 +527,11 @@ impl<'a> Walk<'a> {
   /// knows where each one lands before it asks for any of them. Exposed rather than re-derived
   /// because the order the three clamping steps run in is subtle enough to have erased a character
   /// once, and a second copy of it is a second place to get it wrong.
+  ///
+  /// Gated on the renderer that orders its stops ahead of visiting them. The HTML renderer visits
+  /// each span's two ends as it reaches it, so it never has to know where a stop lands before
+  /// asking for it.
+  #[cfg(feature = "terminal")]
   #[inline]
   pub(crate) fn clamped(&self, span: Span) -> Span {
     self.source.clamped(span)
@@ -594,7 +614,7 @@ impl<'a> Walk<'a> {
 /// asked to go on to the far end at all, and a renderer deriving it for itself would be stating
 /// [`Region`]'s rule about a swallowed trailing newline a second time — in the one place where
 /// getting it wrong draws a bracket around a line the span does not cover.
-#[cfg(feature = "terminal")]
+#[cfg(any(feature = "terminal", feature = "html"))]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Opening<'a> {
   at: Position,
@@ -603,7 +623,7 @@ pub(crate) struct Opening<'a> {
   reaches_another_line: bool,
 }
 
-#[cfg(feature = "terminal")]
+#[cfg(any(feature = "terminal", feature = "html"))]
 impl<'a> Opening<'a> {
   /// Returns where the span begins.
   #[inline]
