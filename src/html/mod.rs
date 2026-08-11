@@ -451,13 +451,24 @@ impl Page<'_> {
   /// | a span's own two stops never share an offset | follows from the first | follows from the first |
   /// | a tie is therefore always between two *different* spans | follows | follows |
   /// | `closes_on` is only ever asked about a genuine far end | follows | follows |
-  /// | every stop's line is a line some mark is drawn on | anchors are built from placements | `debug_assert` at the anchor, below |
+  /// | every stop's line is a line some mark is drawn on | anchors are built from placements | it is not assumed — it is the *definition* of an anchor, and the loop below applies it |
   /// | stops arrive in non-decreasing offset order | the heap drains ahead of each start | the scan takes the minimum above the last |
   /// | offsets are clamped before anything compares them | `Walk::clamped` at the ordering site | `in_input`, once per mark |
   ///
-  /// The fifth is the one that would have caught the defect, and it is now an assertion rather than
-  /// a consequence: the spurious stop produced a *monotone* sequence of anchors, so nothing about
-  /// the ordering looked wrong, and the extra row was blank and read as context.
+  /// The fifth is the one that changed shape twice. It was a consequence nobody had written down;
+  /// then it was a `debug_assert`, which is wrong output in release and a panic in debug; it is now
+  /// neither, because it was never an assumption. **A stop nominates a candidate line, and a
+  /// candidate is an anchor if a mark is drawn on it** — so it holds in every profile by
+  /// construction.
+  ///
+  /// What that does and does not buy is worth being exact about, because the first account of it
+  /// here was too generous. It makes **a row a reader is shown for nothing** impossible, in release
+  /// as well as in debug, and that is the whole of the harm the blank-row defect did. It does *not*
+  /// make a broken stop generator safe: a spurious stop landing on a line some *other* span covers
+  /// is indistinguishable from a real anchor and moves the elision, and planting the old
+  /// `stops_of` back proves it — 171 of the 3,120 grid points still disagree with the terminal,
+  /// all of them by drawing lines where the terminal elides rather than by drawing blanks. Those
+  /// are the first row of this table's job, and the grid's.
   fn block<'a>(
     &mut self,
     earliest: Drawable<'a>,
@@ -490,28 +501,40 @@ impl Page<'_> {
       } else {
         walk.closes_on(offset)
       };
-      // Every anchor is a line some mark is DRAWN on. The plan has no other reason to put a row on
-      // the page, and this is the invariant the stop generation exists to keep — a stop that
-      // resolved somewhere no mark reaches is a row a reader is shown for nothing. Asserted rather
-      // than argued because the way it went wrong once was silent: an empty span contributed a
-      // close stop at its own start offset, drawn-end semantics resolved that to the line BEFORE
-      // it, and the extra row was blank and monotone and looked like context.
-      debug_assert!(
-        marks.clone().any(|(_, span)| draws_on(anchor, span)),
-        "an anchor at line {} that no mark is drawn on",
-        anchor.number()
-      );
-      // Stops arrive in ascending offset order and a line number is monotone in the offset, so the
-      // walk never hands back a line behind the one it has reached.
-      debug_assert!(
-        above.is_none_or(|previous| previous.number() <= anchor.number()),
-        "a stop resolved to line {}, behind the walk's own position",
-        anchor.number()
-      );
-      // Several stops land on one line — a span's own two ends where it is drawn on one line, two
-      // labels on one line, one span closing where another opens. The anchors are the DISTINCT
-      // lines, and the repeats are therefore consecutive.
+      // ── A stop nominates a line; these two say whether it IS an anchor ──────────────────────
+      //
+      // Both of these were `debug_assert!` for one round, and that was the wrong shape twice over.
+      // A `debug_assert` picks "wrong output in release, panic in debug", which is the one
+      // combination nobody wants — and it was here to guard the class of defect the commit that
+      // added it exists to fix, so the builds that ship kept exactly the behaviour it was watching
+      // for. But promoting it to `assert!` would have been wrong too: painty renders diagnostics,
+      // so a panic lands while something is already reporting an error, and it would be a panic
+      // predicated on a proof of mine — which is the thing that had just turned out to have a hole
+      // in it.
+      //
+      // Neither, because neither was an assertion. **These are the definition of an anchor**, and
+      // the defect was writing the definition as "wherever a stop lands". A stop is how candidates
+      // are found cheaply; whether a candidate is an anchor is these two questions.
+      //
+      // Strictly after the last one, because an anchor sequence is strictly increasing by
+      // definition — several stops land on one line (a span's own two ends where it is drawn on one
+      // line, two labels on one line, one span closing where another opens) and they are one
+      // anchor.
       if above.is_some_and(|previous| previous.number() >= anchor.number()) {
+        continue;
+      }
+      // And a line some mark is DRAWN on, because that is the only reason the plan has to put a row
+      // on the page. **Filtering here cannot lose anything a reader would have seen**, and that is
+      // what makes it the definition rather than a fallback: this predicate and the one `row` uses
+      // to find the marks it writes are the same function, so a candidate that fails it is a
+      // candidate whose row would have contained nothing. An empty span used to contribute a close
+      // stop at its own start, drawn-end semantics resolved that to the line BEFORE it, and the
+      // blank row that produced is exactly what this drops.
+      //
+      // It is not a repair for a broken `stops_of` and is not here as one — a spurious candidate
+      // that lands inside another span passes this and moves the elision. Two different properties,
+      // kept in two places on purpose.
+      if !marks.clone().any(|(_, span)| draws_on(anchor, span)) {
         continue;
       }
 

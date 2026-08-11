@@ -67,3 +67,26 @@ fn an_anchor_with_no_bracket_earns_no_context() {
   assert_eq!(shown_between(1, 3, false), 2);
   assert_eq!(shown_between(1, 3, true), 2);
 }
+
+/// The degenerate call answers "nothing between them" rather than panicking or wrapping.
+///
+/// Both callers keep `next > previous` where they build their anchors, so this is unreachable — and
+/// it is written down as behaviour rather than as a `debug_assert` for the reason a whole review
+/// round was about: an assertion that only exists in debug leaves the build that ships subtracting
+/// past zero, and `next - 1` at `next == 0` is `u64::MAX`, which is a row count that quietly stopped
+/// being true.
+#[test]
+fn a_degenerate_pair_draws_nothing_between_and_does_not_wrap() {
+  for previous in [1u64, 2, 7, u64::MAX] {
+    for opens_a_bracket in [false, true] {
+      assert_eq!(shown_between(previous, previous, opens_a_bracket), previous);
+      if previous > 1 {
+        assert_eq!(
+          shown_between(previous, previous - 1, opens_a_bracket),
+          previous
+        );
+      }
+      assert_eq!(shown_between(previous, 0, opens_a_bracket), previous);
+    }
+  }
+}

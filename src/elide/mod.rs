@@ -52,13 +52,22 @@ pub(crate) const CONTEXT: u64 = 3;
 /// It is also the shape a span of exactly six lines leaves behind, which is why a six-line span is
 /// drawn whole and a seven-line one is not.
 ///
-/// # Panics
+/// # Total, and it does not panic
 ///
-/// Never in practice: `next > previous` for every caller, because the anchors of one input are
-/// strictly increasing. `next - 1` and `next - shown` would underflow otherwise, and a debug build
-/// says so rather than handing back a row count that quietly stopped being true.
+/// `next > previous` for every caller, because the anchors of one input are strictly increasing and
+/// both renderers enforce that where they build them. This used to say so with a `debug_assert` and
+/// then subtract, which is the shape a review round rejected everywhere else in this crate: a debug
+/// build panics, and the build that ships underflows `next - 1` to `u64::MAX` and draws rows off the
+/// end of the reasoning.
+///
+/// So the degenerate call answers `previous` — **nothing drawn between them** — which is the
+/// direction that is harmless if the caller's guarantee is ever wrong. A row too few is a row a
+/// reader can ask for again; a panic lands while something is already reporting an error, and a
+/// wrapped subtraction is a row count that quietly stopped being true.
 pub(crate) const fn shown_between(previous: u64, next: u64, opens_a_bracket: bool) -> u64 {
-  debug_assert!(next > previous, "anchors are strictly increasing");
+  if next <= previous {
+    return previous;
+  }
   let context = if opens_a_bracket {
     previous + CONTEXT
   } else {

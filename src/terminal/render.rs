@@ -982,6 +982,15 @@ impl<'a> Plan<'a> {
     // The order the one-pass claim rests on, checked where it is produced. A stop behind the cursor
     // would still render CORRECTLY — `Walk` restarts rather than answering from where it is — so no
     // test that reads output can see this go wrong, and a timer at this resolution cannot either.
+    //
+    // The three `debug_assert!`s below were re-examined in the review round that removed every
+    // other one in this crate, and they STAY. The rule that round settled is that a `debug_assert`
+    // is wrong wherever its violation is a wrong ANSWER, because it then chooses wrong output in
+    // release and a panic in debug. These three violate nothing about the answer: `Walk` is total
+    // against any order, so a stop out of sequence costs a second pass over the input and changes
+    // no byte of the render. They guard a RESOURCE claim, which is exactly the kind of property a
+    // debug-only check is the right instrument for — there is nothing for a release build to do
+    // differently, and nothing for it to get wrong.
     let mut reached = 0;
     for position in drawable {
       let start = walk.clamped(position.span).start();
