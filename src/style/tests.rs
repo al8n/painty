@@ -43,21 +43,19 @@ fn narrowing_to_the_sixteen_is_idempotent_and_total() {
     assert_eq!(once.to_ansi16(), once, "Ansi256({index})");
     assert!(matches!(once, Color::Ansi16(_)));
   }
-  let mut red = 0u16;
-  while red <= 255 {
-    let mut green = 0u16;
-    while green <= 255 {
-      let mut blue = 0u16;
-      while blue <= 255 {
-        let colour = Color::Rgb(red as u8, green as u8, blue as u8);
+  //
+  // Strided over `u8` rather than counted in a `u16` that is narrowed back at the call: a channel
+  // is a byte, and the wider counter existed only because `+= 17` walks off the end of one. The
+  // values are the same sixteen per channel, and the loop no longer has to narrow to state them.
+  for red in (0u8..=255).step_by(17) {
+    for green in (0u8..=255).step_by(17) {
+      for blue in (0u8..=255).step_by(17) {
+        let colour = Color::Rgb(red, green, blue);
         let once = colour.to_ansi16();
         assert_eq!(once.to_ansi16(), once, "{colour:?}");
         assert!(matches!(once, Color::Ansi16(_)), "{colour:?}");
-        blue += 17;
       }
-      green += 17;
     }
-    red += 17;
   }
 }
 
@@ -71,12 +69,10 @@ fn narrowing_to_the_palette_is_idempotent_and_leaves_the_narrow_alone() {
     let colour = Color::Ansi16(Ansi16::from_index(index).expect("below sixteen"));
     assert_eq!(colour.to_ansi256(), colour, "already narrower");
   }
-  let mut channel = 0u16;
-  while channel <= 255 {
-    let colour = Color::Rgb(channel as u8, 0, 128);
+  for channel in (0u8..=255).step_by(17) {
+    let colour = Color::Rgb(channel, 0, 128);
     let once = colour.to_ansi256();
     assert_eq!(once.to_ansi256(), once, "{colour:?}");
-    channel += 17;
   }
 }
 
@@ -177,7 +173,10 @@ fn setting_a_role_is_what_reading_it_back_returns() {
   // the shape a copy-paste puts the wrong field in. Every role is set to a value only it could
   // have, and read back.
   for (index, role) in ROLES.iter().enumerate() {
-    let marker = Style::plain().with_foreground(Color::Ansi256(index as u8));
+    // `try_from`: the whole method here is "a value only this role could have", and an index
+    // narrowed into a byte stops being one the moment the list outgrows the palette.
+    let distinct = u8::try_from(index).expect("ROLES is far shorter than the 256 palette");
+    let marker = Style::plain().with_foreground(Color::Ansi256(distinct));
     let theme = Theme::new().with(*role, marker);
     assert_eq!(theme.style(*role), marker, "{role:?} did not round-trip");
 

@@ -216,8 +216,20 @@ pub(super) fn pad(out: &mut (impl fmt::Write + ?Sized), count: u64) -> fmt::Resu
     out.write_str(SPACES)?;
     left -= SPACES.len() as u64;
   }
-  // Below the chunk length now, so this is the one narrowing in the file that cannot lose anything.
-  out.write_str(&SPACES[..left as usize])
+  // Below the chunk length now, so this is the one narrowing in the crate that cannot lose
+  // anything, and it is the one site `cast_possible_truncation` is silenced at.
+  //
+  // Silenced on this statement rather than on `pad`, so that it covers this cast and not whatever
+  // a later edit adds to the function. `expect` rather than `allow`: if the cast goes away — the
+  // chunk loop rewritten, the remainder spent some other way — the attribute becomes a lie, and
+  // this is the spelling that says so instead of sitting there.
+  #[expect(
+    clippy::cast_possible_truncation,
+    reason = "the loop above runs until `left < SPACES.len()`, which is 64, so the value converts \
+              exactly on a pointer of any width"
+  )]
+  let remainder = left as usize;
+  out.write_str(&SPACES[..remainder])
 }
 
 fn to_anstyle(style: Style) -> anstyle::Style {

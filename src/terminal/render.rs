@@ -822,6 +822,35 @@ impl<'a> Plan<'a> {
     let mut drawable: Vec<Drawable<'a>> = Vec::with_capacity(positions.len());
     drawable.extend(positions.into_iter().enumerate().filter_map(
       |(at, (location, text, primary))| {
+        // A caller's input index, used as a slice index. `as` rather than a check, and it cannot
+        // fail — but only because of two facts that live somewhere else. `Location::source` is a
+        // `u32`, by rule 3 of the numeric widths: it matches the width every producer of one
+        // already spells. And every target painty builds for gives `usize` at least that many
+        // bits. `cast_possible_truncation` is silent here for precisely the second reason, so the
+        // lint is not what holds this up: move either fact and nothing about this line changes
+        // while it starts narrowing an index into somebody else's list.
+        //
+        // So both are pinned at the cast that spends them, and both are compile-time.
+        //
+        // The width is NOT pinned here for want of anywhere else — `tests/numeric_widths.rs`
+        // already ascribes `Location::new`, `entire` and `source` to `rule::ForeignKey`, and
+        // widening the field is a compile error in that file before it is one in this one. What
+        // this line adds over that is where it fails and when. It fails the LIBRARY build under
+        // `terminal`, not a test target's; and it fails at the statement whose safety the width
+        // buys, so a reader of the `as` below finds the reason without leaving the function.
+        // Round-tripping the largest index rather than ascribing `fn(..) -> u32` a second time,
+        // because a `u32` in TYPE position inside `src/` is the census's own subject; as a value
+        // it makes the same demand on the compiler, since `entire` takes what `source` returns.
+        //
+        // Planted 2026-08-11: widening `source` to `u64` (and repairing `src/tokora.rs`, which the
+        // compiler catches too) leaves these two errors and nothing else in the library.
+        const _: () = assert!(crate::Location::entire(u32::MAX).source() == u32::MAX);
+        // A 16-bit `usize`, which is the one pointer width that makes the cast below a narrowing.
+        // No target painty can build `terminal` for is 16-bit — the feature implies `std` — so
+        // this is a statement the crate keeps rather than a gate any build here runs into. It does
+        // discriminate: compiled for `msp430-none-elf` it fails, for `thumbv6m-none-eabi` it
+        // passes.
+        const _: () = assert!(usize::BITS >= u32::BITS);
         let input = location.source() as usize;
         Some(Drawable {
           at,

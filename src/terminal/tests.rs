@@ -985,6 +985,24 @@ fn a_tab_width_is_bounded_at_both_ends() {
   // Caller-supplied and multiplied into every column, so it is bounded rather than trusted.
   // `u64::MAX` used to panic in `column_at` with an add overflow, and would have made
   // `write_expanded` emit that many spaces.
+
+  // The ceiling AT ITS VALUE, and this is the only line here that reads it as a number. Everything
+  // below is written in terms of `max_tab_width()`, so all of it passes at any ceiling whatever —
+  // an expectation computed from the implementation cannot fail when the implementation moves. The
+  // guarantee is about the size of the number: 256 cells is a wide tab, and a ceiling of a million
+  // is a million writes per tab through a caller's writer. Raising it is a decision, so it fails
+  // here and has to be made again.
+  assert_eq!(
+    LineCells::max_tab_width(),
+    256,
+    "the tab ceiling moved; the clamp it makes is only as good as this number"
+  );
+  assert_eq!(
+    measured("a\tb", u64::MAX).tab_width(),
+    256,
+    "the clamp in `LineCells::new` no longer holds an unbounded width to the ceiling"
+  );
+
   for asked in [
     0,
     1,
@@ -1004,7 +1022,11 @@ fn a_tab_width_is_bounded_at_both_ends() {
     );
     let mut expanded = String::new();
     cells.write_expanded(&mut expanded).expect("writable");
-    assert!(expanded.len() <= LineCells::max_tab_width() as usize + 2);
+    // `try_from` rather than `as`: a test that bounds an expansion by the ceiling has no business
+    // narrowing the ceiling to state the bound, and a ceiling that no longer fits a `usize` is a
+    // failure worth seeing rather than a smaller bound that quietly still passes.
+    let ceiling = usize::try_from(LineCells::max_tab_width()).expect("a tab ceiling of 256");
+    assert!(expanded.len() <= ceiling + 2);
   }
 }
 
@@ -1051,6 +1073,13 @@ fn padding_is_counted_in_rendered_columns_and_not_in_pointer_width() {
   // treated as the large number it is, and a narrowing implementation would think it had 99 left to
   // write, satisfy this writer, and report success.
   let past = u64::from(u32::MAX) + 100;
+  // The truncation IS the subject here: this is the number a 32-bit `usize` would be left holding,
+  // and the assertion below is that it is small enough to tell a narrowing implementation from an
+  // honest one. Written as the cast rather than as a mask, because the cast is the defect.
+  #[expect(
+    clippy::cast_possible_truncation,
+    reason = "the narrowing being reproduced is what this test discriminates on"
+  )]
   let narrowed = past as u32 as u64;
   assert!(
     narrowed < 1_000,
@@ -2624,7 +2653,8 @@ fn a_bracket_costs_the_same_rows_however_many_lines_it_covers() {
   let mut rows = None;
   let mut bytes = None;
   for lines in [8u64, 64, 512] {
-    let text = format!("open\n{}close\n", "x\n".repeat(lines as usize));
+    let repeats = usize::try_from(lines).expect("8, 64 and 512 fit anywhere");
+    let text = format!("open\n{}close\n", "x\n".repeat(repeats));
     let span = Span::new(0, text.len());
     let rendered = render_spans(Style::Rustc, &text, &[span]);
     let counted = rendered.lines().count();

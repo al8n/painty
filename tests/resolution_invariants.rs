@@ -37,7 +37,10 @@ impl Rng {
   }
 
   fn below(&mut self, bound: usize) -> usize {
-    (self.next() % bound as u64) as usize
+    // `try_from` rather than `as`: the remainder is below `bound`, which came in as a `usize`, so
+    // this cannot fail — but a generator that narrowed its own output would silently draw from a
+    // smaller corpus than the suite asked for, and a property suite reports whatever it was given.
+    usize::try_from(self.next() % bound as u64).expect("a remainder below a `usize` bound")
   }
 }
 
@@ -221,7 +224,7 @@ fn check_region(text: &str, requested: Span) {
   let drawn: Vec<_> = region.lines().collect();
   assert_eq!(
     drawn.len(),
-    region.line_count() as usize,
+    usize::try_from(region.line_count()).expect("a generated source is a few dozen bytes"),
     "{context}: line_count"
   );
   assert_eq!(
@@ -373,7 +376,7 @@ fn ordering_is_a_permutation_that_a_forward_walk_can_follow() {
     let count = rng.below(9);
     let mut labels: Vec<Label<'static>> = (0..count)
       .map(|_| {
-        let source = rng.below(3) as u32;
+        let source = u32::try_from(rng.below(3)).expect("one of three inputs");
         let text = TEXTS[rng.below(TEXTS.len())];
         if rng.below(6) == 0 {
           Label::new(Location::entire(source), text)
