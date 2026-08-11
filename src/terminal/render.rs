@@ -17,7 +17,7 @@ use super::{
   width::{Budget, Mark},
 };
 use crate::{
-  Diagnostic, Input, Line, Palette, RegionLine, Role, Span, Theme,
+  Diagnostic, Input, Line, Palette, RegionLine, Role, Span, Theme, elide,
   source::{Opening, Walk},
 };
 
@@ -828,13 +828,6 @@ impl Measure {
   }
 }
 
-/// How many lines after a multi-line span's opening are shown before the rest are elided.
-///
-/// Three, and the number is a layout rule rather than a budget — see [`Terminal`]'s note on what a
-/// span covering a million lines costs. It is what makes a span of six lines or fewer render whole
-/// once the one-line gap below is filled, and what keeps every longer one to the same six rows.
-const CONTEXT: u64 = 3;
-
 /// Everything a render works out before it writes anything.
 ///
 /// Four flat runs and no tree: an excerpt names its slice of the marks, and a block names its slice
@@ -1179,24 +1172,23 @@ impl<'a> Plan<'a> {
     // so the primary leads whether or not it is the leftmost thing there.
     self.marks[marks_from..].sort_by_key(|mark| (mark.payload().line, mark.payload().at));
 
-    let mut reaches: Vec<(u64, u64)> = placements
+    // Whether any BRACKET opens at a line, which is the only thing about the spans that the elision
+    // rule needs — see [`elide::shown_between`] for why the context reach each of them computes is
+    // always dominated by the next anchor and therefore drops out.
+    //
+    // This was a sorted `Vec<(first, reach)>` searched for the maximum reach at a line. The reach
+    // half is gone with the term that made it necessary; what is left is a set of line numbers, and
+    // the search over it is what keeps this renderer's cost `O(k log k)` in the caller's label count
+    // — the bound its own resource audit fixed. The HTML renderer answers the same question by
+    // scanning, because it has nowhere to put a sorted set; that is the price of no allocator and it
+    // is stated where it is paid, rather than charged to this file as well.
+    let mut opens: Vec<u64> = placements
       .iter()
-      .filter_map(|placement| {
-        placement.closing?;
-        let first = placement.first();
-        Some((first, (first + CONTEXT).min(placement.last() - 1)))
-      })
+      .filter(|placement| placement.closing.is_some())
+      .map(Placement::first)
       .collect();
-    reaches.sort_unstable();
-    let reach_of = |line: u64| {
-      let from = reaches.partition_point(|&(first, _)| first < line);
-      let to = reaches.partition_point(|&(first, _)| first <= line);
-      reaches[from..to]
-        .iter()
-        .map(|&(_, reach)| reach)
-        .max()
-        .unwrap_or(line)
-    };
+    opens.sort_unstable();
+    let opens_a_bracket = |line: u64| opens.binary_search(&line).is_ok();
 
     let excerpts_from = self.excerpts.len();
     let mut cursor = marks_from;
@@ -1205,12 +1197,11 @@ impl<'a> Plan<'a> {
       let mut after = None;
       if let Some(previous) = above {
         let number = anchor.number();
-        let mut shown = reach_of(previous.number()).clamp(previous.number(), number - 1);
-        // One line left over reads worse as `...` than as the line itself, and it is the shape a
-        // span of exactly six lines leaves behind.
-        if number - shown == 2 {
-          shown = number - 1;
-        }
+        let shown = elide::shown_between(
+          previous.number(),
+          number,
+          opens_a_bracket(previous.number()),
+        );
         let mut line = previous;
         while line.number() < shown {
           let Some(next) = source.line_after(line) else {

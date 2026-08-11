@@ -14,7 +14,11 @@ mod source;
 mod style;
 
 // Every renderer that reads source text takes the caller's inputs the same way, so the type that
-// carries one sits below all of them rather than inside the first.
+// carries one sits below all of them rather than inside the first. The same goes for deciding which
+// lines are left out: two copies of that rule produced a diagnostic whose two renderings disagreed
+// about which source a reader was shown.
+#[cfg(any(feature = "terminal", feature = "html"))]
+mod elide;
 #[cfg(any(feature = "terminal", feature = "html"))]
 mod input;
 

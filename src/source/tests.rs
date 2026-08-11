@@ -453,3 +453,108 @@ fn the_line_after_one_is_the_line_the_walk_would_have_reached() {
     );
   }
 }
+
+/// The harness is a `std` program whatever the crate under it is, so the owned strings this
+/// property builds come from there rather than from `alloc`, which this crate does not enable.
+#[cfg(feature = "html")]
+use std::{borrow::ToOwned, string::String, vec::Vec};
+
+/// The pieces an awkward source is built from.
+///
+/// The same set `tests/resolution_invariants.rs` generates from, spelled out again because these
+/// two predicates are crate-private and that suite is a consumer: all three line breaks, a break
+/// pair that could be read as one or two, multi-byte and astral characters, a combining mark, and
+/// a tab.
+#[cfg(feature = "html")]
+const PIECES: [&str; 12] = [
+  "a", "bc", "  ", "\t", "\n", "\r\n", "\r", "\n\r", "é", "日本", "🎨", "e\u{301}",
+];
+
+/// Every source those pieces make at up to three of them, plus the two degenerate ones.
+#[cfg(feature = "html")]
+fn awkward() -> impl Iterator<Item = String> {
+  let singles = PIECES.into_iter().map(str::to_owned);
+  let pairs = PIECES
+    .into_iter()
+    .flat_map(|left| PIECES.into_iter().map(move |right| alloc(left, right)));
+  let triples = PIECES.into_iter().flat_map(|left| {
+    PIECES
+      .into_iter()
+      .map(move |middle| alloc(&alloc(left, middle), "a\nb"))
+  });
+  ["".to_owned(), "\n".to_owned()]
+    .into_iter()
+    .chain(singles)
+    .chain(pairs)
+    .chain(triples)
+}
+
+#[cfg(feature = "html")]
+fn alloc(left: &str, right: &str) -> String {
+  let mut out = String::from(left);
+  out.push_str(right);
+  out
+}
+
+/// The predicate the HTML renderer asks of one line and the iterator the terminal takes per region
+/// are one rule, and this is what says so.
+///
+/// [`Region::lines`] walks a region's lines by count from where it starts; [`draws_on`] answers
+/// "is this span here" for a line the caller already holds, which is what a renderer visiting an
+/// input's lines in one forward pass needs. Two derivations of one rule is the shape that put a
+/// walk past its own far end in this file once already, so they are held together over every span
+/// of every awkward source rather than by the argument that they ought to agree.
+#[cfg(feature = "html")]
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "a few hundred thousand resolutions over a corpus of tiny sources, checking an \
+            agreement between two pure predicates — the interpreter answers a different question \
+            and every path here is walked by the tests around it"
+)]
+fn every_line_a_region_draws_is_a_line_it_says_it_draws_on() {
+  for text in awkward() {
+    let source = Source::new(&text);
+    for start in 0..=text.len() {
+      for end in 0..=text.len() {
+        let region = source.resolve(Span::new(start, end));
+        let span = region.span();
+
+        let drawn: Vec<u64> = region.lines().map(|on| on.line().number()).collect();
+        let said: Vec<u64> = source
+          .lines()
+          .filter(|line| super::draws_on(*line, span))
+          .map(|line| line.number())
+          .collect();
+        assert_eq!(
+          drawn, said,
+          "{text:?} {start}..{end} resolves to {span:?}: `Region::lines` and `draws_on` disagree"
+        );
+
+        // And exactly one of them is the line the label is said on: the last.
+        let ended: Vec<u64> = source
+          .lines()
+          .filter(|line| super::ends_on(*line, span))
+          .map(|line| line.number())
+          .collect();
+        let expected: Vec<u64> = drawn.last().copied().into_iter().collect();
+        assert_eq!(
+          ended, expected,
+          "{text:?} {start}..{end} resolves to {span:?}: `ends_on` does not name the last line \
+           drawn"
+        );
+
+        // The part of the line each one covers is `clip`'s, which is what `RegionLines` yields, so
+        // a renderer that walks the lines itself slices the same bytes.
+        for on in region.lines() {
+          assert_eq!(
+            super::clip(on.line(), span),
+            on,
+            "{text:?} {start}..{end}: clipping line {} by hand differs",
+            on.line().number()
+          );
+        }
+      }
+    }
+  }
+}

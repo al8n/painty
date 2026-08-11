@@ -212,6 +212,100 @@ fn a_span_of_six_lines_is_drawn_whole() {
   assert!(!out.contains("painty-elision"), "{out}");
 }
 
+#[test]
+fn a_line_two_labels_fall_on_is_drawn_once() {
+  // It was drawn once per label, because every mark had an excerpt of its own. Sixty-four labels on
+  // one four-hundred-byte line produced forty-five kilobytes where the terminal produced seven.
+  let text = "alpha beta gamma\n";
+  let message = "two of them";
+  let labels = [crate::Label::new(
+    Location::new(0, Span::new(11, 16)),
+    "and gamma",
+  )];
+  let diagnostic = Diagnostic::new(
+    "code",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, 5)),
+  )
+  .with_primary_label("alpha")
+  .with_labels(&labels);
+
+  let out = render(&diagnostic, &[Input::new(Source::new(text))]);
+  assert_eq!(out.matches(r#"class="painty-row""#).count(), 1, "{out}");
+  assert_eq!(out.matches("painty-annotation").count(), 2, "{out}");
+  // In the caller's order under one line: the primary leads whether or not it is leftmost.
+  let primary = out.find("alpha</span>").expect("the primary label is said");
+  let secondary = out.find("and gamma").expect("the secondary label is said");
+  assert!(primary < secondary, "{out}");
+}
+
+#[test]
+fn two_marks_overlapping_on_one_line_are_segments_and_not_siblings() {
+  // Sibling elements cannot overlap, so the line is cut at every mark boundary and each run carries
+  // the roles of whatever covers it. The middle run here is covered by both.
+  let text = "abcdefgh\n";
+  let message = "overlapping";
+  let labels = [crate::Label::new(
+    Location::new(0, Span::new(2, 6)),
+    "second",
+  )];
+  let diagnostic = Diagnostic::new(
+    "code",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, 4)),
+  )
+  .with_primary_label("first")
+  .with_labels(&labels);
+
+  let out = render(&diagnostic, &[Input::new(Source::new(text))]);
+  assert!(
+    out.contains(r#"<span class="painty-covered painty-primary">ab</span>"#),
+    "{out}"
+  );
+  assert!(
+    out.contains(r#"<span class="painty-covered painty-primary painty-secondary">cd</span>"#),
+    "{out}"
+  );
+  assert!(
+    out.contains(r#"<span class="painty-covered painty-secondary">ef</span>"#),
+    "{out}"
+  );
+  assert!(out.ends_with("</div>\n"), "{out}");
+}
+
+#[test]
+fn a_label_inside_a_multi_line_span_is_an_anchor_the_elision_respects() {
+  // The defect this is written against: elision was decided inside each mark, from that span's own
+  // two ends, so a seven-line primary with a secondary on line five drew `1 2 3 4 ⋮ 7` and then
+  // line five on its own — and line six was in neither. The terminal anchors at 1, 5 and 7, and the
+  // one-line remainder between 5 and 7 is drawn rather than elided.
+  let text = "l1\nl2\nl3\nl4\nl5\nl6\nl7\n";
+  let message = "the whole thing";
+  let labels = [crate::Label::new(
+    Location::new(0, Span::new(12, 14)),
+    "and here",
+  )];
+  let diagnostic = Diagnostic::new(
+    "code",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(0, 20)),
+  )
+  .with_primary_label("all of it")
+  .with_labels(&labels);
+
+  let out = render(&diagnostic, &[Input::new(Source::new(text))]);
+  for line in 1..=7 {
+    assert!(
+      out.contains(&std::format!(">l{line}<")),
+      "line {line}: {out}"
+    );
+  }
+  assert!(!out.contains("painty-elision"), "{out}");
+}
+
 /// Sources chosen for the edges of the row writer: every line break, no trailing break, an empty
 /// source, an astral character, a combining mark, a CRLF a span can be pointed into the middle of,
 /// and a tab that a `<pre>` keeps and a terminal expands.

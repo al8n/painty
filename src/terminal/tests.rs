@@ -3483,3 +3483,56 @@ fn a_bracket_end_on_a_source_row_reaches_across_every_column_to_its_right() {
     }
   }
 }
+
+/// Where the elision rule turns over, pinned on this side of it too.
+///
+/// # Why this is here and not only in the HTML renderer's tests
+///
+/// The rule moved into `crate::elide` so that both outputs call one function instead of keeping one
+/// copy each. Removing its one-line remainder — the clause that draws the last line rather than
+/// standing a `...` over it — left **every test in this module green** and reddened only the HTML
+/// renderer's. That is a hole the extraction exposed rather than made: the goldens above pin what a
+/// style draws, and none of them happened to sit on the turn.
+///
+/// Six lines whole and seven elided is the turn. Stated as a scan across it rather than as two
+/// cases, so a rule that moved the boundary by one is caught wherever it moved to.
+#[test]
+fn the_elision_turns_over_between_six_lines_and_seven() {
+  let text: String = (1..=20).map(|number| format!("l{number:02}\n")).collect();
+  let source = Source::new(&text);
+
+  for lines in 1..=12usize {
+    // Line `n` is four bytes with its break, so a span from the top through line `lines` ends at
+    // `4 * lines - 1`.
+    let span = Span::new(0, 4 * lines - 1);
+    let message = "a message";
+    let diagnostic = diagnose(Location::new(0, span), &[], &message);
+    let mut out = String::new();
+    Terminal::plain()
+      .render(&diagnostic, &[Input::new(source)], &mut out)
+      .expect("a String never fails to be written to");
+
+    let elided = out.contains("...");
+    assert_eq!(
+      elided,
+      lines > 6,
+      "a span of {lines} lines: `...` present is {elided}\n{out}"
+    );
+
+    let drawn = out
+      .lines()
+      .filter(|row| {
+        row
+          .split_once('|')
+          .is_some_and(|(field, _)| field.trim().parse::<u64>().is_ok())
+      })
+      .count();
+    // Whole up to the turn; past it the opening, three context lines and the closing, whatever
+    // the span's length — which is the point of the rule and the thing that bounds the row count.
+    let expected = if lines <= 6 { lines } else { 5 };
+    assert_eq!(
+      drawn, expected,
+      "a span of {lines} lines draws {drawn} source rows\n{out}"
+    );
+  }
+}

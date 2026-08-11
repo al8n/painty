@@ -9,13 +9,14 @@ mod region;
 pub use line::{Line, LineBreak, Lines};
 pub use region::{Region, RegionLine, RegionLines};
 
-/// The clipping rule, for the renderer that walks a region's lines itself instead of asking
-/// [`Region::lines`] for them.
+/// What [`Region::lines`] knows, for the renderer that walks an input's lines itself instead of
+/// asking for one region's at a time: which lines a span is drawn on, which of them is its last,
+/// and how much of a line it covers.
 ///
-/// One rule with two consumers rather than two rules, which is the whole reason it is a function —
-/// see its own note.
+/// One rule with two consumers rather than two rules, which is the whole reason these are functions
+/// — see their own notes.
 #[cfg(feature = "html")]
-pub(crate) use region::clip;
+pub(crate) use region::{clip, draws_on, ends_on};
 
 use crate::Span;
 
@@ -409,7 +410,7 @@ impl<'a> Source<'a> {
   /// Shared by [`resolve`](Self::resolve) and [`Walk`] rather than written twice. The order the
   /// three steps run in is the subject of the comment in `resolve`, and a second copy of it is a
   /// second place for that order to be got wrong.
-  fn clamped(&self, span: Span) -> Span {
+  pub(crate) fn clamped(&self, span: Span) -> Span {
     let requested_end = span.end().max(span.start());
     Span::new(self.floor(span.start()), self.ceil(requested_end))
   }
@@ -528,22 +529,61 @@ impl<'a> Walk<'a> {
   /// because the order the three clamping steps run in is subtle enough to have erased a character
   /// once, and a second copy of it is a second place to get it wrong.
   ///
-  /// Gated on the renderer that orders its stops ahead of visiting them. The HTML renderer visits
-  /// each span's two ends as it reaches it, so it never has to know where a stop lands before
-  /// asking for it.
+  /// Both renderers order their stops ahead of visiting them, by different mechanisms and for the
+  /// same reason: a walk asked for an offset behind it starts over.
   #[cfg(feature = "terminal")]
   #[inline]
   pub(crate) fn clamped(&self, span: Span) -> Span {
     self.source.clamped(span)
   }
 
+  /// The line `offset` falls on, forward from wherever the walk has got to.
+  ///
+  /// [`open`](Self::open) without the position, the clip or the multi-line answer. A renderer that
+  /// visits every stop of a whole input in ascending order — which is what a renderer with no queue
+  /// to reorder them in has to do — wants the LINE and settles the rest from the line itself.
+  ///
+  /// `offset` is expected already clamped by [`Source::clamped`](Source::clamped); it is walked to
+  /// as given, which is total for any offset inside the text.
+  #[cfg(feature = "html")]
+  pub(crate) fn opens_on(&mut self, offset: usize) -> Line<'a> {
+    if offset < self.cursor.offset {
+      self.cursor = Cursor::START;
+      self.line = None;
+    }
+    let (_, cursor) = self.source.position_from(self.cursor, offset);
+    self.cursor = cursor;
+    self.standing_on(cursor)
+  }
+
+  /// The last line a span ending at `end` is drawn on.
+  ///
+  /// The half of [`close`](Self::close) that does not need an [`Opening`], so that a renderer
+  /// visiting stops in offset order can ask for a far end it is not holding the near end of. `close`
+  /// is this plus the clip, which is what keeps the two from being two rules.
+  #[cfg(any(feature = "terminal", feature = "html"))]
+  pub(crate) fn closes_on(&mut self, end: usize) -> Line<'a> {
+    if end < self.cursor.offset {
+      self.cursor = Cursor::START;
+      self.line = None;
+    }
+    let cursor = advance_to_drawn_end(self.source.text.as_bytes(), self.cursor, end);
+    self.cursor = cursor;
+    self.standing_on(cursor)
+  }
+
   /// Returns where `span` starts, the first line it is drawn on, and whether it is drawn on
   /// another.
+  ///
+  /// Gated on the renderer that wants all three at once. The HTML renderer visits an input's stops
+  /// in offset order and never holds a span's near end while asking for its far one, so it takes
+  /// [`opens_on`](Self::opens_on) and settles the rest from the line.
   ///
   /// The first two are exactly
   /// `(source.resolve(span).start(), source.resolve(span).lines().next().unwrap())`, and the
   /// `unwrap` is why this returns no `Option`: a region always covers at least the line it starts
   /// on, so the first line is never absent and a caller has no case to handle.
+  #[cfg(feature = "terminal")]
   pub(crate) fn open(&mut self, span: Span) -> Opening<'a> {
     let clamped = self.source.clamped(span);
     if clamped.start() < self.cursor.offset {
@@ -579,16 +619,10 @@ impl<'a> Walk<'a> {
   /// Forward from wherever the walk has got to, so a caller that interleaves this with
   /// [`open`](Self::open) in ascending offset order pays for one pass over the input rather than
   /// two. Total anyway: a span behind the cursor restarts the walk, on the same terms as `open`.
+  #[cfg(feature = "terminal")]
   pub(crate) fn close(&mut self, opening: &Opening<'a>) -> RegionLine<'a> {
     let span = opening.span;
-    if span.end() < self.cursor.offset {
-      self.cursor = Cursor::START;
-      self.line = None;
-    }
-
-    let cursor = advance_to_drawn_end(self.source.text.as_bytes(), self.cursor, span.end());
-    self.cursor = cursor;
-    region::clip(self.standing_on(cursor), span)
+    region::clip(self.closes_on(span.end()), span)
   }
 
   /// The line `cursor` stands on, scanned once and then remembered.
@@ -614,7 +648,7 @@ impl<'a> Walk<'a> {
 /// asked to go on to the far end at all, and a renderer deriving it for itself would be stating
 /// [`Region`]'s rule about a swallowed trailing newline a second time — in the one place where
 /// getting it wrong draws a bracket around a line the span does not cover.
-#[cfg(any(feature = "terminal", feature = "html"))]
+#[cfg(feature = "terminal")]
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Opening<'a> {
   at: Position,
@@ -623,7 +657,7 @@ pub(crate) struct Opening<'a> {
   reaches_another_line: bool,
 }
 
-#[cfg(any(feature = "terminal", feature = "html"))]
+#[cfg(feature = "terminal")]
 impl<'a> Opening<'a> {
   /// Returns where the span begins.
   #[inline]
