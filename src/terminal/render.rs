@@ -249,9 +249,17 @@ impl Placement<'_> {
 /// Per input: **one forward pass** over its text, whatever the label count — layer 2 walks
 /// forwards, and a span's two ends are visited in one merged ascending order off a carried cursor.
 /// Per drawn line: **one** scan for where the line ends, **one** bounded walk over its geometry,
-/// and **one** source row. Per label: one marker row, and the label's own text once.
+/// and **one** source row. Per label: one marker row, and the label's own text once — and, for a
+/// label whose span reaches another line, **one** further bounded walk over the line it opens on.
 ///
-/// That last one is the honest floor rather than a gap. Two labels on a line are two things to
+/// That last walk is counted here rather than folded into the row's, because it happens before any
+/// row exists: whether an opening needs a marker row of its own depends on whether the row will
+/// DRAW the cell it opens at, and the plan settles that ahead of writing anything. It is bounded by
+/// the same [`max_source_bytes`](Self::max_source_bytes), and it is at most one per multi-line
+/// label — so it is the same k the marker rows already are, on lines the render was going to walk
+/// regardless.
+///
+/// The marker row is the honest floor rather than a gap. Two labels on a line are two things to
 /// point at and two things to say, and no arrangement of rows makes them one. Everything that is
 /// painty's — the resolve, the line scan, the geometry, the excerpt — is once per line.
 ///
@@ -358,9 +366,11 @@ impl<P: Palette> Terminal<P> {
   /// A span reaching past the drawn text is marked over the `…`, which is where a reader should
   /// look for the rest of it.
   pub fn underline(&self, drawn: RegionLine<'_>) -> core::ops::Range<u64> {
-    let cells = LineCells::new(drawn.line(), self.tab_width);
+    let measure = self.measure();
     let mut marks = [Mark::new(drawn.covered(), ())];
-    cells.place_marks(&mut marks, Self::budget());
+    measure
+      .cells(drawn.line())
+      .place_marks(&mut marks, measure.budget);
     never_empty(marks[0].columns())
   }
 
@@ -467,11 +477,14 @@ impl<P: Palette> Terminal<P> {
     65_536
   }
 
-  /// What one excerpt of this renderer may spend.
-  fn budget() -> Budget {
-    Budget {
-      cells: Self::max_rendered_width(),
-      bytes: Self::max_source_bytes(),
+  /// How this renderer measures a line, and what measuring one may spend.
+  fn measure(&self) -> Measure {
+    Measure {
+      tab_width: self.tab_width,
+      budget: Budget {
+        cells: Self::max_rendered_width(),
+        bytes: Self::max_source_bytes(),
+      },
     }
   }
 
@@ -539,6 +552,11 @@ impl<P: Palette> Terminal<P> {
     // One block per input, worked out completely before anything is written: the gutter is as wide
     // as the widest line number the whole render will show, and the first row does not know what is
     // coming.
+    //
+    // Measured against the same stops and the same budget the rows below are, and by one value
+    // rather than two, because the plan decides one thing about a row it does not draw — see
+    // [`Measure`].
+    let measure = self.measure();
     let mut plan = Plan::default();
     let mut run = 0;
     while run < drawable.len() {
@@ -547,7 +565,7 @@ impl<P: Palette> Terminal<P> {
       while end < drawable.len() && drawable[end].input == input {
         end += 1;
       }
-      plan.block(&drawable[run..end], Self::budget());
+      plan.block(&drawable[run..end], measure);
       run = end;
     }
 
@@ -619,9 +637,9 @@ impl<P: Palette> Terminal<P> {
       for index in block.excerpts.clone() {
         let excerpt = &excerpts[index];
         let number = excerpt.line.number();
-        let cells = LineCells::new(excerpt.line, self.tab_width);
+        let cells = measure.cells(excerpt.line);
         let placed = &mut marks[excerpt.marks.clone()];
-        let row = cells.place_marks(placed, Self::budget());
+        let row = cells.place_marks(placed, measure.budget);
 
         // Lines were left out above this one, so a `...` stands where they would have been — with
         // the connectors of every span that runs THROUGH them, since a bracket that vanished over a
@@ -927,6 +945,46 @@ impl<P: Palette> Terminal<P> {
   }
 }
 
+/// How a line is measured, and what measuring it may spend.
+///
+/// One value rather than two parameters, and it exists because the PLAN takes a decision about a
+/// row it does not draw. Whether a span's opening needs a marker row of its own is settled before
+/// anything is written, and it is settled by asking what the drawn row will look like — so the two
+/// have to measure the line identically, and a caller pairing a tab width with somebody else's
+/// budget is a caret placed against a row nobody drew.
+#[derive(Debug, Clone, Copy)]
+struct Measure {
+  tab_width: u64,
+  budget: Budget,
+}
+
+impl Measure {
+  /// One line, as this render measures it.
+  const fn cells<'a>(&self, line: Line<'a>) -> LineCells<'a> {
+    LineCells::new(line, self.tab_width)
+  }
+
+  /// Whether the row `line` is drawn as will show the cell `covered` STARTS on.
+  ///
+  /// Asked of the bounded walk that places every mark, rather than of a second notion of what is
+  /// visible. The two budgets are denominated differently on purpose —
+  /// [`max_source_bytes`](Terminal::max_source_bytes) bounds the input and
+  /// [`max_rendered_width`](Terminal::max_rendered_width) bounds the cells — so a question about
+  /// what a reader can SEE has to be put to the one that cuts the row. A guard denominated in bytes
+  /// passes happily on a line of five thousand spaces whose row stops at four thousand and
+  /// ninety-six cells.
+  ///
+  /// It bounds the prefix scan at the one call site as a side effect, which is the whole of what
+  /// the byte test that used to sit there was doing: an opening the row DREW is fewer than
+  /// [`Row::drawn_end`] bytes into the line, and that is at most [`Budget::bytes`]; an opening on a
+  /// row that was not cut is at most the length of a line that fitted the byte budget entire.
+  fn draws_the_start_of(&self, line: Line<'_>, covered: Span) -> bool {
+    let mut marks = [Mark::new(covered, ())];
+    self.cells(line).place_marks(&mut marks, self.budget);
+    marks[0].starts_in_window()
+  }
+}
+
 /// How many lines after a multi-line span's opening are shown before the rest are elided.
 ///
 /// Three, and the number is a layout rule rather than a budget — see [`Terminal`]'s note on what a
@@ -951,7 +1009,7 @@ struct Plan<'a> {
 impl<'a> Plan<'a> {
   /// Works out one input's block: where each of its spans is drawn, which lines that puts on the
   /// page, and which column each multi-line connector runs down.
-  fn block(&mut self, drawable: &[Drawable<'a>], budget: Budget) {
+  fn block(&mut self, drawable: &[Drawable<'a>], measure: Measure) {
     let Some(leading) = drawable.first() else {
       return;
     };
@@ -1065,13 +1123,22 @@ impl<'a> Plan<'a> {
     }
     anchors.sort_unstable_by_key(Line::number);
 
-    // A span opens with a `/` in its column when nothing else is drawn under that line and nothing
-    // but blanks precedes it there, so it needs no corner row and its start cell carries no marker.
+    // A span opens with a `/` in its column when the row it opens on DRAWS the cell it opens at,
+    // nothing else is drawn under that line, and nothing but blanks precedes it there — so it needs
+    // no corner row and its start cell carries no marker.
     //
-    // The prefix is only READ when the byte budget already allows the line to be read at all,
-    // because "is this indentation" is a question over as many bytes as a caller cares to indent
-    // with — and an unbounded scan taken to choose between two glyphs is the class this crate keeps
-    // finding one door along.
+    // That first condition is the one a reader would not think to ask for, and it is the one whose
+    // absence made this wrong. Suppressing the marker is only a saving if the cell the marker would
+    // have gone on is on the page: a row is cut at `max_rendered_width` CELLS, so an opening five
+    // thousand spaces into a line is out past the `…` and the compact form leaves the span with a
+    // `/` in the margin and nothing at all pointing into the row. It is asked of
+    // `Measure::draws_the_start_of`, which is the same bounded walk that will place the mark, and
+    // not of a second reckoning of what is visible.
+    //
+    // It also bounds the prefix scan, which is why no byte test appears here: "is this
+    // indentation" is a question over as many bytes as a caller cares to indent with, and an
+    // unbounded scan taken to choose between two glyphs is the class this crate keeps finding one
+    // door along. An opening the row drew is inside the walk's own byte budget by construction.
     for placement in &mut placements {
       if placement.closing.is_none() {
         continue;
@@ -1081,9 +1148,10 @@ impl<'a> Plan<'a> {
         - anchors.partition_point(|line| line.number() < first)
         == 1;
       let line = placement.opening.line().line();
-      let before = placement.opening.line().covered().start() - line.span().start();
+      let covered = placement.opening.line().covered();
+      let before = covered.start() - line.span().start();
       placement.compact = alone
-        && before <= slot(budget.bytes)
+        && measure.draws_the_start_of(line, covered)
         && line.text()[..before].chars().all(char::is_whitespace);
     }
     anchors.dedup_by_key(|line| line.number());

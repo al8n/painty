@@ -1986,8 +1986,15 @@ fn marked(rendered: &str, source: Source<'_>) -> Vec<(u64, u64)> {
 /// The renderer's rule restated from the spec rather than read back off the renderer: a multi-line
 /// span whose opening line carries no other mark and holds nothing but blanks before it opens with
 /// a `/` and no corner row, so its start cell is not marked. What that costs a reader is which
-/// column INSIDE THE INDENTATION the span begins at, and what it buys is a row — see
-/// `the_compact_opening_is_the_only_place_a_cell_goes_unmarked`.
+/// column INSIDE THE INDENTATION the span begins at, and what it buys is a row.
+///
+/// The renderer has a THIRD condition that this deliberately does not restate: the row must draw
+/// the cell the span opens at, or the `/` would stand in for a marker that was never on the page.
+/// It is left out because the corpus cannot reach it — every case here is asserted to render
+/// without a `…`, so every opening in it is drawn, and a condition that is constantly true would
+/// only be an untested branch of the oracle. The cases that DO reach it are
+/// `an_opening_the_row_does_not_draw_is_marked_rather_than_compacted` and its pair, which read the
+/// rows by index for exactly that reason.
 fn opens_compactly(source: Source<'_>, spans: &[Span], span: Span) -> bool {
   let region = source.resolve(span);
   if !region.is_multiline() {
@@ -2106,6 +2113,153 @@ fn compact_rows(rendered: &str, source: Source<'_>) -> Vec<u64> {
   }
   found.sort_unstable();
   found
+}
+
+// ── An opening the row does not draw ────────────────────────────────────────────────────────────
+//
+// The corpus above is read back with `source_row`, which finds a row's geometry by matching the
+// whole expanded line as the row's suffix — so it can only describe a row that shows all of its
+// line, and `which_cells_are_marked_does_not_depend_on_how_the_rows_were_assigned` asserts outright
+// that no case elided. That is the right premise for what it pins and it is why the corpus cannot
+// reach these cases: the whole subject here is a row the CELL budget cut.
+//
+// Read by index into the row instead. Every row of a block shares one prefix, so a character index
+// is the alignment a reader checks — a caret is under the thing it points at exactly when the two
+// indices agree.
+
+/// What every row of the fixtures below carries before its source text: line 1, the gutter's bar,
+/// one blank connector column, and the blank that separates it from the source. Its length is
+/// therefore the character index of display column 1.
+///
+/// A literal rather than a measurement, because measuring it is what these fixtures deny: the row
+/// does not show its line, so nothing here can be located by matching what the row was meant to
+/// show. Each case asserts the row begins with it, which is what stops a change in the geometry
+/// quietly re-basing every index below.
+const FIELD: &str = "1 |   ";
+
+/// A prefix long enough that the row drawn for it stops before it ends, and what it is made of.
+///
+/// Both overrun [`Terminal::max_rendered_width`] in CELLS while staying well inside
+/// [`Terminal::max_source_bytes`], which is the gap the defect lived in: the compact decision asked
+/// the byte budget whether the opening could be read and drew its conclusion about a row that the
+/// cell budget had already cut.
+fn overrunning_prefixes() -> Vec<(String, &'static str)> {
+  vec![
+    (
+      " ".repeat(5_000),
+      "five thousand spaces, which is five thousand cells and five thousand bytes",
+    ),
+    (
+      "\t".repeat(2_000),
+      "two thousand tabs, which is eight thousand cells for two thousand bytes — the amplification \
+       a byte budget cannot see",
+    ),
+  ]
+}
+
+/// The row that shows line 1, and the character index of every marker drawn under it.
+fn opening_row(rendered: &str) -> (String, Vec<usize>) {
+  let mut rows = rendered.lines();
+  let source = rows
+    .by_ref()
+    .find(|row| row.starts_with("1 | "))
+    .expect("line 1 was drawn")
+    .to_owned();
+  let mut markers = Vec::new();
+  for row in rows {
+    // An under-row carries the gutter's bar and a blank after it. The next source row, the closing
+    // bar and the `= help` line all fail that, and each of them ends what is under line 1.
+    if !row.starts_with("  | ") {
+      break;
+    }
+    if let Some(at) = row.chars().position(|c| c == '^' || c == '-') {
+      markers.push(at);
+    }
+  }
+  markers.sort_unstable();
+  (source, markers)
+}
+
+#[test]
+fn an_opening_the_row_does_not_draw_is_marked_rather_than_compacted() {
+  // The compact opening trades a span's start MARKER for a `/` in the margin, and that trade is
+  // only a saving when the cell the marker would have gone on is on the page. Behind a prefix wider
+  // than the row, it is not: the reader is left with a `/` and nothing at all pointing into the
+  // row, for a span whose opening the renderer never drew.
+  //
+  // Both halves of the defect are pinned, and the second is why each prefix is rendered twice. The
+  // suppression was decided by `alone` — one anchor on the line — so an unrelated label on that
+  // same line turned it off and the span suddenly acquired a start marker at the elision cell. The
+  // marked set moved for a reason that is not about either span's endpoints. Here the pair must
+  // agree: the unrelated label adds its own cell and moves nothing.
+  for (prefix, why) in overrunning_prefixes() {
+    let text = format!("{prefix}open\nclose\n");
+    let opens = Span::new(
+      prefix.len(),
+      text.find("close").expect("closes") + "close".len(),
+    );
+    // Inside the indentation, so it is a mark on line 1 and nothing else: what it exists to do is
+    // make `alone` false.
+    let unrelated = Span::new(0, 1);
+
+    let mut rows = Vec::new();
+    for spans in [vec![opens], vec![opens, unrelated]] {
+      let shared = spans.len() > 1;
+      let rendered = render_spans(&text, &spans);
+      let (source, markers) = opening_row(&rendered);
+      let ellipsis = source
+        .chars()
+        .position(|c| c == '\u{2026}')
+        .unwrap_or_else(|| panic!("the premise: the row for {why} was not cut"));
+      assert!(
+        source.starts_with(FIELD),
+        "the opening was compacted onto a row that stops at {ellipsis}, or the geometry moved: \
+         {why}"
+      );
+      // The marker is under the `…`, which is where the rest of the line went and so is where a
+      // reader is told to look for the opening.
+      assert_eq!(
+        markers,
+        if shared {
+          vec![FIELD.len(), ellipsis]
+        } else {
+          vec![ellipsis]
+        },
+        "{why}, {}an unrelated label",
+        if shared { "with " } else { "without " }
+      );
+      rows.push((source.len(), ellipsis));
+    }
+    // Not the assertion above restated: that one holds each render to the cell the span resolves
+    // to, this one holds the ROW steady, so the pair cannot agree by both having moved.
+    assert_eq!(rows[0], rows[1], "the row itself moved: {why}");
+  }
+}
+
+#[test]
+fn an_opening_the_row_does_draw_still_opens_compactly_on_a_cut_row() {
+  // The other direction, and what makes the gate above a discrimination rather than a switch that
+  // turns the compact form off whenever a row is cut. This row IS cut — the line runs far past the
+  // ceiling — but the span opens two cells in, where the row draws it, so nothing about the opening
+  // is out past the `…` and the `/` still says everything a corner row would.
+  let text = format!("  {}\nclose\n", "x".repeat(10_000));
+  let opens = Span::new(2, text.find("close").expect("closes") + "close".len());
+
+  let rendered = render_spans(&text, &[opens]);
+  let (source, markers) = opening_row(&rendered);
+  assert!(
+    source.contains('\u{2026}'),
+    "the premise: the row was not cut"
+  );
+  assert!(
+    source.starts_with("1 | / "),
+    "the opening is drawn on this row, so it still needs no row of its own"
+  );
+  assert_eq!(
+    markers,
+    Vec::<usize>::new(),
+    "a compact opening carries no marker, and the closing is on another line"
+  );
 }
 
 #[test]
