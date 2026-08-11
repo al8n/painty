@@ -1,12 +1,12 @@
-//! What each presentation looks like, over one diagnostic set that both of them draw.
+//! What each presentation looks like, over one diagnostic set that all of them draw.
 //!
-//! # Why one table and not two files
+//! # Why one table and not a file per style
 //!
-//! The design's gate for this phase is "the two styles render the same diagnostic set, goldens per
-//! style". Two files of goldens would make that a claim somebody has to keep true by hand — a case
-//! added to one and not the other is invisible, and the style that is missing coverage is the one
-//! nobody is looking at. Here the set is a list and each entry carries both renders, so a case
-//! cannot exist for one style only.
+//! The design's gate for this phase is "the styles render the same diagnostic set, goldens per
+//! style". A file of goldens each would make that a claim somebody has to keep true by hand — a
+//! case added to one and not the others is invisible, and the style that is missing coverage is
+//! the one nobody is looking at. Here the set is a list and each entry carries every render, so a
+//! case cannot exist for one style only, and a style cannot exist without one.
 //!
 //! # These come after the invariants
 //!
@@ -49,6 +49,7 @@ struct Case {
   help: Option<&'static str>,
   rustc: &'static str,
   miette: &'static str,
+  ariadne: &'static str,
 }
 
 /// The span of `needle`'s first occurrence in `text`.
@@ -114,6 +115,17 @@ mylang::schema::duplicate-field
    ╰────
   help: rename one of the two definitions
 ",
+      ariadne: "\
+[mylang::schema::duplicate-field] Error: `width` is defined twice
+   ╭─[ widget.graphql:3:3 ]
+   │
+ 3 │   width: Int
+   │   ──┬──
+   │     ╰── redefined here
+   │
+   │ Help: rename one of the two definitions
+───╯
+",
     },
     Case {
       why: "a primary and a secondary, which each style distinguishes its own way",
@@ -149,6 +161,18 @@ mylang::schema::duplicate-field
    ·     ┗━━ redefined here
    ╰────
 ",
+      ariadne: "\
+[mylang::schema::duplicate-field] Error: `width` is defined twice
+   ╭─[ 3:3 ]
+   │
+ 2 │   width: Int
+   │   ──┬──
+   │     ╰── first defined here
+ 3 │   width: Int
+   │   ──┬──
+   │     ╰── redefined here
+───╯
+",
     },
     Case {
       why: "two labels on one line, in the caller's order and not by column",
@@ -181,6 +205,17 @@ mylang::schema::duplicate-field
    ·               ──┬──
    ·                 ╰── first defined here
    ╰────
+",
+      ariadne: "\
+[mylang::schema::duplicate-field] Error: `width` is defined twice
+   ╭─[ widget.graphql:1:27 ]
+   │
+ 1 │ type Widget { width: Int, width: Float }
+   │                           ──┬──
+   │                             ╰── redefined here
+   │               ──┬──
+   │                 ╰── first defined here
+───╯
 ",
     },
     Case {
@@ -216,6 +251,18 @@ mylang::query::too-deep
  5 │ ┣   }
    · ┗━━━━ this selection set
    ╰────
+",
+      ariadne: "\
+[mylang::query::too-deep] Error: this selection set is nested too deeply
+   ╭─[ hero.graphql:2:3 ]
+   │
+ 2 │ ╭─▶   hero {
+ 3 │ │       name
+ 4 │ │       friends
+ 5 │ ├─▶   }
+   │ │
+   │ ╰──── this selection set
+───╯
 ",
     },
     Case {
@@ -255,6 +302,19 @@ mylang::type::branches
    · ┗━━━━ this expression
    ╰────
 ",
+      ariadne: "\
+[mylang::type::branches] Error: the branches disagree
+   ╭─[ 1:9 ]
+   │
+ 1 │ ╭─▶ let x = if a {
+ 2 │ │     1
+ 3 │ │   } else {
+ 4 │ │     2
+ 5 │ ├─▶ };
+   │ │
+   │ ╰──── this expression
+───╯
+",
     },
     Case {
       why: "long enough that the middle is elided",
@@ -293,6 +353,20 @@ mylang::query::unused-fragment
  9 │ ┣ }
    · ┗━━━━ declared here
    ╰────
+",
+      ariadne: "\
+[mylang::query::unused-fragment] Warning: this fragment is never used
+   ╭─[ 1:1 ]
+   │
+ 1 │ ╭─▶ fragment F on Query {
+ 2 │ │     a
+ 3 │ │     b
+ 4 │ │     c
+   ┆ ┆
+ 9 │ ├─▶ }
+   │ │
+   │ ╰──── declared here
+───╯
 ",
     },
     Case {
@@ -334,6 +408,21 @@ mylang::type::nested
    · ┗━━━━━ this one
    ╰────
 ",
+      ariadne: "\
+[mylang::type::nested] Error: two of these disagree
+   ╭─[ 1:7 ]
+   │
+ 1 │ ╭──▶ outer (
+ 2 │ │╭─▶   inner (
+ 3 │ ││       x
+ 4 │ │├─▶   )
+   │ ││
+   │ │╰──── and this one
+ 5 │ ├──▶ )
+   │ │
+   │ ╰───── this one
+───╯
+",
     },
     Case {
       why: "a tab and two-cell ideographs, where a cell is not a character",
@@ -364,6 +453,15 @@ mylang::test::wide
    ·               ┗━━ two cells each
    ╰────
 ",
+      ariadne: "\
+[mylang::test::wide] Advice: a wide name behind a tab
+   ╭─[ 1:10 ]
+   │
+ 1 │     let x = 日本;
+   │             ──┬─
+   │               ╰── two cells each
+───╯
+",
     },
     Case {
       why: "nothing to point at, so neither style opens a block",
@@ -383,6 +481,9 @@ warning[mylang::input::synthesized]: this document was generated, so it has no p
 mylang::input::synthesized
 
   ⚠ this document was generated, so it has no positions
+",
+      ariadne: "\
+[mylang::input::synthesized] Warning: this document was generated, so it has no positions
 ",
     },
     // What closing the compact form's residual looks like. The `/` in the margin used to be a
@@ -424,6 +525,19 @@ mylang::type::arity
    · ┗━━━━ this call
    ╰────
 ",
+      ariadne: "\
+[mylang::type::arity] Error: this call takes one argument
+   ╭─[ 1:3 ]
+   │
+ 1 │ ╭─▶   identifier(
+   │ │     ─────┬────
+   │ │          ╰── declared with none
+ 2 │ │       body
+ 3 │ ├─▶   )
+   │ │
+   │ ╰──── this call
+───╯
+",
     },
   ]
 }
@@ -458,21 +572,49 @@ fn render(case: &Case, terminal: Terminal<Theme>) -> String {
   out
 }
 
+/// Every style, paired with the column of the table it is pinned by.
+///
+/// One list rather than an assertion per style, so that adding a style is adding a row here and a
+/// column there — and a style added to only one of the two does not compile.
+fn styles(case: &Case) -> Vec<(&'static str, Terminal<Theme>, &'static str)> {
+  vec![
+    ("rustc", Terminal::plain().like_rustc(), case.rustc),
+    ("miette", Terminal::plain().like_miette(), case.miette),
+    ("ariadne", Terminal::plain().like_ariadne(), case.ariadne),
+  ]
+}
+
 #[test]
 fn each_style_draws_the_whole_set() {
   for case in cases() {
-    assert_eq!(
-      render(&case, Terminal::plain().like_rustc()),
-      case.rustc,
-      "the rustc style: {}",
-      case.why
-    );
-    assert_eq!(
-      render(&case, Terminal::plain().like_miette()),
-      case.miette,
-      "the miette style: {}",
-      case.why
-    );
+    for (name, terminal, expected) in styles(&case) {
+      assert_eq!(
+        render(&case, terminal),
+        expected,
+        "the {name} style: {}",
+        case.why
+      );
+    }
+  }
+}
+
+#[test]
+fn no_two_styles_draw_the_same_bytes() {
+  // A style that renders identically to one already here is not a style, it is a second name for
+  // one — and the rule this phase works to is that what has no divergence behind it does not get
+  // a file. Asserted over the whole set rather than over one case, because two styles can agree
+  // on a diagnostic that exercises neither of the things they differ in.
+  for case in cases() {
+    let drawn = styles(&case);
+    for (index, (name, _, expected)) in drawn.iter().enumerate() {
+      for (other, _, against) in &drawn[index + 1..] {
+        assert_ne!(
+          expected, against,
+          "{name} and {other} drew the same bytes: {}",
+          case.why
+        );
+      }
+    }
   }
 }
 
@@ -504,5 +646,13 @@ fn a_style_is_the_last_one_asked_for() {
   assert_eq!(
     render(case, Terminal::plain().like_rustc().like_miette()),
     case.miette
+  );
+  assert_eq!(
+    render(case, Terminal::plain().like_miette().like_ariadne()),
+    case.ariadne
+  );
+  assert_eq!(
+    render(case, Terminal::plain().like_ariadne().like_rustc()),
+    case.rustc
   );
 }

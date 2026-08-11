@@ -8,9 +8,10 @@ use std::collections::BinaryHeap;
 
 use super::{
   ColorCapability, LineCells,
+  ariadne::Ariadne,
   miette::Miette,
   paint::Painter,
-  present::{Frame, Onset, Part, Presentation},
+  present::{Drawn, Frame, Onset, Part, Presentation},
   rustc::Rustc,
   width::{Budget, Mark},
 };
@@ -408,6 +409,23 @@ impl<P: Palette> Terminal<P> {
     self
   }
 
+  /// Draws in the shape `ariadne` does.
+  ///
+  /// One frame around the whole report rather than one per input, an arrow drawn into the source
+  /// row where a multi-line span opens and closes, and a label hanging from a corner below.
+  ///
+  /// It distinguishes the position a diagnostic is ABOUT by **colour alone** — ariadne gives every
+  /// label a colour of its own — so at [`ColorCapability::None`] a primary and a secondary label
+  /// are drawn with the same glyphs. The other two styles reach for a second character or a
+  /// heavier one instead; a caller who needs the distinction without colour wants one of those.
+  ///
+  /// Named for the renderer whose shape it follows, and not byte-compatible with it.
+  #[must_use]
+  pub fn like_ariadne(mut self) -> Self {
+    self.presentation = &Ariadne;
+    self
+  }
+
   /// Sets how much colour the output can carry — see [`ColorChoice::resolve`](super::ColorChoice).
   #[must_use]
   pub fn with_capability(mut self, capability: ColorCapability) -> Self {
@@ -606,7 +624,7 @@ impl<P: Palette> Terminal<P> {
     // One slot per connector column, resized per block and refilled per row.
     let mut margin: Vec<Option<(char, Role)>> = Vec::new();
 
-    for block in blocks.iter() {
+    for (index, block) in blocks.iter().enumerate() {
       // A header per input, and the key is the input INDEX rather than the origin string. Resolving
       // each span against its own input was half the multi-input fix; the other half is saying which
       // input a row came from, because a secondary label in another file was otherwise drawn under
@@ -637,9 +655,13 @@ impl<P: Palette> Terminal<P> {
       // drawn. A multi-line span opening twenty lines above the primary would otherwise send an
       // editor to a line the diagnostic is not about.
       //
-      // The style writes it, because how a location is announced is one of the things the two
+      // The style writes it, because how a location is announced is one of the things the styles
       // differ in; WHICH location it announces is decided here, and is not a style's to move.
-      style.open_block(&mut paint, gutter, block)?;
+      //
+      // Whether this is the render's FIRST block is the style's business too, and only because a
+      // third style made it one: two of them frame each block, and one frames the whole render, so
+      // a later input is introduced inside a frame that is already open.
+      style.open_block(&mut paint, gutter, block, index == 0)?;
 
       let running = &connectors[block.connectors.clone()];
       margin.clear();
@@ -659,7 +681,7 @@ impl<P: Palette> Terminal<P> {
           fill(&mut margin, running, |connector| {
             connector
               .spans_the_gap(above, number)
-              .then(|| style.bracket(Part::Runs, connector.role, connector.compact))
+              .then(|| style.bracket(Part::Gap, connector.role, connector.compact))
               .flatten()
           });
           style.elision_row(&mut paint, Frame::new(gutter, block.depth, &margin))?;
@@ -671,6 +693,17 @@ impl<P: Palette> Terminal<P> {
           let part = connector.part_on(number)?;
           style.bracket(part, connector.role, connector.compact)
         });
+
+        // The connector column a bracket TURNS in on this row, and the rightmost where two of them
+        // do. A style that draws an end of a multi-line span on the source row itself needs to know
+        // where the run starts, and it cannot work it out from the glyphs: the column holding a
+        // corner is the style's own answer to `bracket`, and a style is free to give the same one
+        // for every part.
+        let turns = running
+          .iter()
+          .filter(|connector| matches!(connector.part_on(number), Some(Part::Opens | Part::Closes)))
+          .map(|connector| connector.depth)
+          .max();
 
         // The field is the style's, the margin and the text are not. Straight to the writer, not
         // through a `String` first: materialising the row commits the allocation before the writer
@@ -687,7 +720,7 @@ impl<P: Palette> Terminal<P> {
         // walk found. `underline` would answer the same columns — it is `never_empty` over that same
         // call — but asking again would walk the window again.
         style.line_field(&mut paint, gutter, number)?;
-        Frame::new(gutter, block.depth, &margin).margin(&mut paint)?;
+        style.margin(&mut paint, Frame::new(gutter, block.depth, &margin), turns)?;
         paint.styled_with(Role::SourceText, |shown| {
           cells.write_expanded_upto(shown, row.drawn_end)?;
           if row.elided {
@@ -728,9 +761,21 @@ impl<P: Palette> Terminal<P> {
       style.close_block(&mut paint, gutter)?;
     }
 
+    // Whether anything was drawn at all reaches BOTH of the hooks below, as one value. A style
+    // whose frame belongs to the whole render needs it twice — its help is a row inside the frame,
+    // and its closing rule is the frame's bottom — and a renderer that answered one of them by
+    // declining to make the call would be sending the same fact two ways.
+    let drawn = if blocks.is_empty() {
+      Drawn::Nothing
+    } else {
+      Drawn::Blocks
+    };
     if let Some(help) = diagnostic.help() {
-      style.help(&mut paint, gutter, help)?;
+      style.help(&mut paint, gutter, help, drawn)?;
     }
+    // After the help, because a style whose frame belongs to the whole render says the help INSIDE
+    // it.
+    style.close_render(&mut paint, gutter, drawn)?;
     Ok(())
   }
 }

@@ -599,13 +599,15 @@ fn a_refused_write_is_reported_and_leaves_no_style_open() {
     )
     .with_primary_label("here");
     let inputs = [Input::new(Source::new(&case.text))];
-    // Both presentations. The reset discipline is the PAINTER's and the two styles share it, which
-    // is exactly why it is worth asking twice: a style writes rows of its own and one of them —
-    // the boxed underline and the label hanging off it — opens two styled runs where the other
-    // opens one, so "the body did not reach the reset" has a second shape to happen in.
+    // Every presentation. The reset discipline is the PAINTER's and the styles share it, which is
+    // exactly why it is worth asking once per style: a style writes rows of its own and some of
+    // them — the boxed underline and the label hanging off it, the arrow that crosses a margin —
+    // open two styled runs where another opens one, so "the body did not reach the reset" has a
+    // further shape to happen in for each.
     for styled in [
       terminal.with_tab_width(case.tab_width).like_rustc(),
       terminal.with_tab_width(case.tab_width).like_miette(),
+      terminal.with_tab_width(case.tab_width).like_ariadne(),
     ] {
       let mut full = String::new();
       styled

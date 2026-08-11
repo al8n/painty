@@ -87,6 +87,40 @@ pub(super) enum Part {
   Runs,
   /// The source row it closes on.
   Closes,
+  /// The row standing for lines left out, which the bracket runs through without being able to
+  /// show them.
+  ///
+  /// Added by [`Ariadne`](super::ariadne::Ariadne), which is the first style to answer it
+  /// differently from [`Runs`](Self::Runs): its elision row breaks the WALL into a dotted bar and
+  /// breaks every connector beside it the same way, so a reader sees at a glance that the rows
+  /// under the gap are not adjacent. The two styles that came before draw their running bar and
+  /// cannot tell the two rows apart — which is why the renderer used to ask for `Runs` here and
+  /// why the distinction had to be made before a third style could state it.
+  Gap,
+}
+
+/// Whether the render drew a block at all.
+///
+/// A diagnostic can name no position this renderer is able to draw — [`Location::entire`], or an
+/// input index the caller did not supply — and then there is no block, no excerpt and no source.
+///
+/// Two of the styles never read it: their frame is a block's, so a render with no block has
+/// nothing of theirs open in it either way. [`Ariadne`](super::ariadne::Ariadne)'s frame is the
+/// RENDER's, and both of the hooks that come after the last block have to know whether that frame
+/// exists — its help is a row inside the frame and its closing rule is the frame's bottom. Told
+/// only at the second of them, it draws the help against a wall nothing opened; told at neither,
+/// it draws the wall and no bottom.
+///
+/// One value handed to both, rather than the renderer declining to CALL the closing hook: the same
+/// fact reaching two hooks by two different mechanisms is the shape that lets them disagree.
+///
+/// [`Location::entire`]: crate::Location::entire
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Drawn {
+  /// At least one block was drawn.
+  Blocks,
+  /// Nothing but the header, and whatever a style says after it.
+  Nothing,
 }
 
 /// What a style is told about the line a multi-line span opens on.
@@ -189,6 +223,22 @@ impl<'m> Frame<'m> {
     self.depth
   }
 
+  /// What the plan put in each connector column of this row, before any style has drawn it.
+  ///
+  /// The slots are the plan's — one per multi-line span, assigned so a later span runs to the
+  /// right of an earlier one — and what stands in them came from
+  /// [`bracket`](Presentation::bracket), so a style reading this back is reading its own answers
+  /// in the plan's order. It is here for the styles that draw something ACROSS the margin rather
+  /// than in one column of it: a run that crosses the columns to its right has to know which of
+  /// them are occupied, and [`margin`](Self::margin) and [`margin_left_of`](Self::margin_left_of)
+  /// can only write a prefix of them.
+  ///
+  /// Read-only, which is what keeps the split intact: a style still cannot move a bracket into
+  /// another span's column.
+  pub(super) const fn columns(&self) -> &'m [Option<(char, Role)>] {
+    self.margin
+  }
+
   /// Every connector column of this row, and the blank that separates them from the source.
   ///
   /// Nothing at all when the input has no bracket, which is what keeps such an input flush against
@@ -254,20 +304,50 @@ pub(super) trait Presentation: fmt::Debug + Sync + RefUnwindSafe {
   ///
   /// **Diverges:** two rows against one. `-->` names the location and a bar then opens the
   /// excerpt; a boxed style has a box top, and where the excerpt came from is what the top says.
-  fn open_block(&self, paint: &mut Painter<'_>, gutter: u64, block: &Block<'_>) -> fmt::Result;
+  ///
+  /// `first` says whether this block opens the render. **Diverges, and it is the third style that
+  /// forced it:** two of them frame each BLOCK, so every block opens the same way and the flag is
+  /// nothing to them; [`Ariadne`](super::ariadne::Ariadne) frames the whole RENDER, and a second
+  /// input is introduced *inside* the frame with a tee rather than opening a frame of its own. A
+  /// style that could not tell would draw two tops and one bottom.
+  fn open_block(
+    &self,
+    paint: &mut Painter<'_>,
+    gutter: u64,
+    block: &Block<'_>,
+    first: bool,
+  ) -> fmt::Result;
 
   /// Whatever closes an input's block.
   ///
-  /// **Diverges:** a bare bar against the bottom of the box.
+  /// **Diverges:** a bare bar, the bottom of the box, and nothing at all — the style whose frame
+  /// belongs to the render closes it in [`close_render`](Self::close_render) instead, because by
+  /// then the help has to have been said inside it.
   fn close_block(&self, paint: &mut Painter<'_>, gutter: u64) -> fmt::Result;
 
   /// What stands before a source row's text: the number, and the wall beside it.
   ///
-  /// The renderer writes the margin and the text; only the field is a style's, and the two styles
-  /// differ in it by one cell of inset and by which character the wall is.
+  /// The renderer writes the text; the field and the margin beside it are a style's, and the
+  /// styles differ in the field by one cell of inset and by which character the wall is.
   ///
   /// **Diverges:** `NN | ` against ` NN │ `.
   fn line_field(&self, paint: &mut Painter<'_>, gutter: u64, number: u64) -> fmt::Result;
+
+  /// Everything between the line-number field and a source row's own text.
+  ///
+  /// `turns` is the connector column a bracket has an END in on this row — the rightmost, where
+  /// two of them do — and `None` where every bracket the row shows is only passing through. What
+  /// stands in each column is already the style's own answer from [`bracket`](Self::bracket); this
+  /// is the row-wide question that a per-column answer cannot reach.
+  ///
+  /// **Diverges, and this is the one a trait derived from two styles did not have.** Both of the
+  /// first two say where a multi-line span opens either in the span's own column or on a row of
+  /// its own, so the region between the margin and the text is a constant blank and belonged to
+  /// the renderer. [`Ariadne`](super::ariadne::Ariadne) says it *on the source row itself*, with a
+  /// run that leaves the bracket's column, crosses every column to its right, and ends in an arrow
+  /// pointing at the line — so the width of that region and what stands in it are a style's, and
+  /// the renderer cannot write it.
+  fn margin(&self, paint: &mut Painter<'_>, frame: Frame<'_>, turns: Option<u64>) -> fmt::Result;
 
   /// The row standing for the lines left out between two excerpts.
   ///
@@ -342,6 +422,17 @@ pub(super) trait Presentation: fmt::Debug + Sync + RefUnwindSafe {
   /// What the reader can do about it.
   ///
   /// **Diverges:** `= help:` aligned under the gutter, against `help:` at a fixed indent — the box
-  /// has closed by then, so there is no gutter left to align to.
-  fn help(&self, paint: &mut Painter<'_>, gutter: u64, help: &str) -> fmt::Result;
+  /// has closed by then, so there is no gutter left to align to — against a row *inside* a frame
+  /// that has not closed yet, which is the one that has to read [`Drawn`].
+  fn help(&self, paint: &mut Painter<'_>, gutter: u64, help: &str, drawn: Drawn) -> fmt::Result;
+
+  /// Whatever closes the whole render, after the help.
+  ///
+  /// **Diverges:** nothing at all, against a rule that runs back under the gutter. This exists
+  /// because it is not the same hook as [`close_block`](Self::close_block): a style that frames
+  /// each block closes it before the help, and a style that frames the render has to close it
+  /// *after*, since the help is one of the rows inside. One method could not be both, and
+  /// reordering the renderer to suit either one moves the other style's help to the wrong side of
+  /// its own frame.
+  fn close_render(&self, paint: &mut Painter<'_>, gutter: u64, drawn: Drawn) -> fmt::Result;
 }

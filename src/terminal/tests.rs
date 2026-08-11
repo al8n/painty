@@ -1920,19 +1920,21 @@ const BRACKETED_TAB: u64 = 4;
 
 /// A presentation, and how its own output is read back.
 ///
-/// Both styles are put through everything below, which is the design's gate for this phase: one
-/// property asserted across both. What each of them DRAWS is its own, so reading the output back
-/// needs a reader per style — and the reader is written from what the style promises rather than
-/// from what its code does, for the reason the placement table is written by hand.
+/// Every style is put through everything below, which is the design's gate for this phase: one
+/// property asserted across all of them. What each of them DRAWS is its own, so reading the output
+/// back needs a reader per style — and the reader is written from what the style promises rather
+/// than from what its code does, for the reason the placement table is written by hand.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Style {
   /// An arrow, an indented gutter, carets under the cells.
   Rustc,
   /// A boxed location line, a box-drawing wall, brackets down the margin.
   Miette,
+  /// One frame around the whole report, and arrows drawn into the source rows.
+  Ariadne,
 }
 
-const STYLES: [Style; 2] = [Style::Rustc, Style::Miette];
+const STYLES: [Style; 3] = [Style::Rustc, Style::Miette, Style::Ariadne];
 
 impl Style {
   fn terminal(self) -> Terminal<Theme> {
@@ -1940,6 +1942,7 @@ impl Style {
     match self {
       Style::Rustc => terminal.like_rustc(),
       Style::Miette => terminal.like_miette(),
+      Style::Ariadne => terminal.like_ariadne(),
     }
   }
 
@@ -1947,7 +1950,7 @@ impl Style {
   const fn wall(self) -> char {
     match self {
       Style::Rustc => '|',
-      Style::Miette => '\u{2502}',
+      Style::Miette | Style::Ariadne => '\u{2502}',
     }
   }
 
@@ -1956,6 +1959,9 @@ impl Style {
     match self {
       Style::Rustc => '|',
       Style::Miette => '\u{b7}',
+      // Unchanged from the source rows: this style's frame runs unbroken, and what says a row is
+      // not a line of the file is that it carries no number.
+      Style::Ariadne => '\u{2502}',
     }
   }
 
@@ -1964,28 +1970,35 @@ impl Style {
     match self {
       Style::Rustc => &['^', '-'],
       Style::Miette => &['\u{2501}', '\u{2533}', '\u{2500}', '\u{252c}'],
+      // No heavy pair, because this style tells a primary from a secondary by colour alone.
+      Style::Ariadne => &['\u{2500}', '\u{252c}'],
     }
   }
 
   /// Glyphs whose presence makes a row a connector rather than an underline.
   ///
-  /// One style's label row starts with a corner and runs rightwards in the same character its
-  /// underlines are drawn in, so a reader counting runs would take a bracket's reach for a mark.
-  /// The other's connector rows are underscores, which are not marks in the first place, and its
-  /// closing corner row carries a real end mark that must be counted.
+  /// Two of the styles draw a label row that starts with a corner and runs rightwards in the same
+  /// character their underlines are drawn in, so a reader counting runs would take a bracket's
+  /// reach for a mark. The indented style's connector rows are underscores, which are not marks in
+  /// the first place, and its closing corner row carries a real end mark that must be counted.
   const fn connectors(self) -> &'static [char] {
     match self {
       Style::Rustc => &[],
       Style::Miette => &['\u{2570}', '\u{2517}'],
+      Style::Ariadne => &['\u{2570}'],
     }
   }
 
   /// Whether this style marks the ends of a multi-line span on CELLS at all.
   ///
-  /// The one place the two genuinely disagree about what is pointed at, rather than about how it
-  /// looks: a bracket drawn wholly in the margin says which LINES a span covers and never which
-  /// column it ends in. Stated here, once, so that every assertion below can name the exception
-  /// instead of being written around it.
+  /// The one place the styles genuinely disagree about what is pointed at, rather than about how
+  /// it looks: a bracket that stays in the margin, or ends in an arrow at the whole line, says
+  /// which LINES a span covers and never which column it ends in. Stated here, once, so that every
+  /// assertion below can name the exception instead of being written around it.
+  ///
+  /// Two of three answer `false`, and they arrive there differently — one keeps its bracket in the
+  /// margin, the other points an arrow at the line — which is what makes this an axis rather than
+  /// one style's quirk.
   const fn marks_multiline_ends(self) -> bool {
     matches!(self, Style::Rustc)
   }
@@ -2305,40 +2318,49 @@ fn a_style_changes_appearance_and_not_which_source_is_marked() {
   // The design's gate for this phase, and the exception is in the assertion rather than in a
   // comment beside it.
   //
-  // The full form — "style never changes which spans are marked" — is not true of these two, and
+  // The full form — "style never changes which spans are marked" — is not true of these, and
   // writing it would have produced either a red gate or a gate quietly weakened until it passed.
-  // A bracket drawn wholly in the MARGIN says which lines a span covers and never which column it
-  // ends in, so the boxed style marks no cell for a multi-line span at all. That is not a defect
-  // to fix: it is the form the design chose this pair for, because it is the furthest thing from
-  // reaching back into the source.
+  // A bracket that never leaves the MARGIN, and an arrow that points at a whole line, both say
+  // which lines a span covers and never which column it ends in, so neither marks a cell for a
+  // multi-line span at all. That is not a defect to fix: it is the form the design chose this set
+  // for, because those are the furthest things from reaching back into the source.
   //
-  // What IS true, and is what a style abstraction actually needs: neither style invents a
-  // position, neither drops a line, and every cell either of them marks is the same cell. So the
-  // difference between the two markings is asserted to be EXACTLY the ends of the multi-line
-  // spans — no more, which would mean the boxed style lost a single-line label, and no less,
-  // which would mean it marked a cell its bracket had already spoken for.
+  // What IS true, and is what a style abstraction actually needs: no style invents a position,
+  // none drops a line, and every cell any of them marks is the same cell. So the difference from
+  // the style that marks everything is asserted to be EXACTLY the ends of the multi-line spans —
+  // no more, which would mean a style lost a single-line label, and no less, which would mean it
+  // marked a cell its bracket had already spoken for.
+  //
+  // The exception is read off `marks_multiline_ends`, so a style added with the wrong answer
+  // reddens here rather than widening the exception to fit itself.
   for case in bracketed() {
     let source = Source::new(case.text);
     for order in orderings(case.spans.len()) {
       let spans: Vec<Span> = order.iter().map(|index| case.spans[*index]).collect();
-      let indented = render_spans(Style::Rustc, case.text, &spans);
-      let boxed = render_spans(Style::Miette, case.text, &spans);
+      let drawn: Vec<String> = STYLES
+        .iter()
+        .map(|style| render_spans(*style, case.text, &spans))
+        .collect();
 
-      assert_ne!(
-        indented, boxed,
-        "{:?}: the two styles drew the same bytes, so one of them is not a style",
-        case.text
-      );
-      assert_eq!(
-        shown(Style::Rustc, &indented, source),
-        shown(Style::Miette, &boxed, source),
-        "{:?} in caller order {order:?}: the styles disagree about which lines to show, which is \
-         the plan's to decide and not theirs\n{indented}\n{boxed}",
-        case.text
-      );
+      for (index, style) in STYLES.iter().enumerate() {
+        for (other, against) in STYLES.iter().zip(&drawn).skip(index + 1) {
+          assert_ne!(
+            drawn[index], *against,
+            "{:?}: {style:?} and {other:?} drew the same bytes, so one of them is not a style",
+            case.text
+          );
+        }
+      }
 
+      // The style that marks every end is the reference, because it is the only one that has an
+      // answer for every span in the corpus.
+      let reference = &drawn[0];
+      assert!(
+        STYLES[0].marks_multiline_ends(),
+        "the reference style has to be the one that marks the multi-line ends"
+      );
       let bracketed_ends = asked_for(
-        Style::Rustc,
+        STYLES[0],
         source,
         &spans
           .iter()
@@ -2346,13 +2368,28 @@ fn a_style_changes_appearance_and_not_which_source_is_marked() {
           .filter(|span| drawn_rows(source, *span) > 1)
           .collect::<Vec<_>>(),
       );
-      assert_eq!(
-        without(&marked(Style::Rustc, &indented, source), &bracketed_ends),
-        marked(Style::Miette, &boxed, source),
-        "{:?} in caller order {order:?}: the two styles mark different source, and the difference \
-         is not the multi-line ends the boxed style says in its margin\n{indented}\n{boxed}",
-        case.text
-      );
+
+      for (style, rendered) in STYLES.iter().zip(&drawn) {
+        assert_eq!(
+          shown(*style, rendered, source),
+          shown(STYLES[0], reference, source),
+          "{:?} in caller order {order:?}: {style:?} disagrees about which lines to show, which is \
+           the plan's to decide and not a style's\n{reference}\n{rendered}",
+          case.text
+        );
+        let expected = if style.marks_multiline_ends() {
+          marked(STYLES[0], reference, source)
+        } else {
+          without(&marked(STYLES[0], reference, source), &bracketed_ends)
+        };
+        assert_eq!(
+          marked(*style, rendered, source),
+          expected,
+          "{:?} in caller order {order:?}: {style:?} marks different source, and the difference is \
+           not the multi-line ends it says in its margin\n{reference}\n{rendered}",
+          case.text
+        );
+      }
     }
   }
 }

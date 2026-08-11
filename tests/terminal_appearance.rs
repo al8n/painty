@@ -37,14 +37,19 @@ fn render(diagnostic: &Diagnostic<'_>, text: &str, origin: Option<&str>) -> Stri
 
 const SCHEMA: &str = "type Widget {\n  width: Int\n  width: Int\n}\n";
 
-/// The same renderer in both presentations.
+/// The same renderer in every presentation.
 ///
 /// Most of this file pins one style's appearance and is right to. The two guarantees below are not
 /// appearance: what escapes may be emitted, and that no caller string can steer the terminal, are
 /// the RENDERER's promises, and a style is the newest thing able to break one — it writes rows of
-/// its own choosing through the same painter. So those two are asked of both.
-fn both(terminal: Terminal<Theme>) -> [Terminal<Theme>; 2] {
-  [terminal.like_rustc(), terminal.like_miette()]
+/// its own choosing through the same painter. So those two are asked of every style, and a style
+/// added without a row here is a style that was never asked.
+fn every_style(terminal: Terminal<Theme>) -> [Terminal<Theme>; 3] {
+  [
+    terminal.like_rustc(),
+    terminal.like_miette(),
+    terminal.like_ariadne(),
+  ]
 }
 
 #[test]
@@ -1217,7 +1222,7 @@ fn no_capability_lets_caller_text_steer_the_terminal() {
     ColorCapability::Ansi256,
     ColorCapability::TrueColor,
   ] {
-    for terminal in both(Terminal::with_palette(Theme::new()).with_capability(capability)) {
+    for terminal in every_style(Terminal::with_palette(Theme::new()).with_capability(capability)) {
       let mut out = String::new();
       terminal
         .render(
@@ -1516,7 +1521,7 @@ fn no_control_character_at_all_survives_a_caller_string() {
     .with_labels(&labels)
     .with_help(&help);
 
-    for terminal in both(Terminal::plain()) {
+    for terminal in every_style(Terminal::plain()) {
       let mut out = String::new();
       terminal
         .render(
