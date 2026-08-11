@@ -143,3 +143,37 @@ unexpected_cfgs = { level = "warn", check-cfg = [
   # Set by rustdoc on docs.rs via the `rustdoc-args` above, and by nothing else.
   'cfg(docsrs)',
 ] }
+
+# One lint, and it is on because nothing this repository RUNS can catch what it catches.
+#
+# The narrowing this lint exists for is `u64 → usize`: a display column, which is a `u64` by rule 1
+# of the numeric widths in README.md, spent against something the machine sizes. Each is exact on a
+# 64-bit target and each is a truncation on a 32-bit one. That difference is not reachable by
+# execution here, and barely reachable anywhere: the suite does run on 32-bit —
+# `i686-unknown-linux-gnu` under both Miri borrow models, most of the `cross` cells, `thumbv6m` —
+# but truncating needs a value at or past 2^32, every such value is a display column, and a column
+# that large needs a line of roughly 16.7 MB, which a 32-bit target cannot address. The hazard
+# nearly cancels itself out, which is exactly what makes it worth a lint instead of a test: no
+# target painty runs on would redden.
+#
+# `cast_possible_truncation` is the check that does not need the value, because it reads the types.
+# It also fires on this host: clippy lints a cast to `usize` from a fixed 64-bit type whatever the
+# pointer width of the machine compiling it, so a 64-bit developer sees the 32-bit hazard.
+#
+# `warn` here, `-D warnings` on the clippy job of both CI workflows. It cost THIRTEEN sites, not the
+# one the census measured, and the difference is the census's scope rather than a miscount: it read
+# the library, and `--all-targets` lints the tests as well. One site is in the library and twelve
+# are in test code.
+#
+# Eleven of the thirteen are repaired rather than silenced — a `try_from`, or a loop that strides
+# over the byte it had been narrowing to. Two are silenced, each with the argument on it:
+# `terminal::paint::pad`, whose remainder the loop above it has already put below the chunk length,
+# and the padding test whose SUBJECT is the narrowing it reproduces. `#[expect]` rather than
+# `#[allow]` in both, so a silenced site that stops casting says so instead of sitting there.
+#
+# What it does NOT cover, so that its passing is not read as more than it is: a `u32 → usize` cast
+# is not a truncation on any target with a pointer 32 bits or wider, so the lint is silent on the
+# one in `Plan::of` — that cast is pinned at its site instead, by the width of `Location::source`
+# and by a const assertion on `usize::BITS`.
+[lints.clippy]
+cast_possible_truncation = "warn"

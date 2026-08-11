@@ -94,6 +94,23 @@ impl<'a> LineCells<'a> {
   #[inline]
   #[must_use]
   pub const fn new(line: Line<'a>, tab_width: u64) -> Self {
+    // What the clamp buys is a property of the NUMBER, and nothing else here says what the number
+    // has to be. Every other statement about the ceiling — this crate's and its tests' alike — is
+    // written in terms of the function that returns it, and `tab_width() <= max_tab_width()` is as
+    // true at `u64::MAX` as it is at 256: raise the ceiling and every one of them still holds while
+    // everything they were describing is gone. So the requirement is stated here, against a
+    // literal, where a wider ceiling has to argue with it rather than walk past it.
+    //
+    // Three things want the number small. One tab expands to `tab_width` writes in
+    // `write_expanded`, so a large ceiling is a hang rather than a wide tab. The column arithmetic
+    // adds it to a column, and `u64::MAX` panicked in `column_at` before this clamp existed. And
+    // it is converted to a `usize` where an expansion is measured, which is exact for anything
+    // under `u16::MAX` on every target, 16-bit included.
+    //
+    // The value itself is pinned in `tests::a_tab_width_is_bounded_at_both_ends`, which is where a
+    // deliberate change has to be made a second time.
+    const _: () = assert!(LineCells::max_tab_width() <= u16::MAX as u64);
+
     Self {
       line,
       tab_width: if tab_width == 0 {

@@ -220,8 +220,24 @@ jobs:
   # `--feature-powerset` rather than `--each-feature`, and no `--exclude-no-default-features`.
   # `default = []` here, so the no-features build is not an edge case to be skipped — it is the
   # PRIMARY configuration, the `no_std` dependency-free core every other build is an addition to.
-  # Four optional features is sixteen legs, which is cheap and stays cheap because the feature set
-  # is pinned by the `manifest` job.
+  # Five optional features plus `default` is 48 legs — 64 subsets less the 16 that name `std`
+  # alongside the `terminal` that already implies it, which `cargo hack` resolves to the same set
+  # and runs once. Cheap, and it stays cheap because the feature set is pinned by the `manifest`
+  # job.
+  #
+  # `-- -D warnings` is deliberately redundant with the workflow-level `RUSTFLAGS: -Dwarnings`.
+  # That env var DOES already reach clippy's own lints — cargo hands its flags to `clippy-driver`,
+  # and `-D warnings` caps every lint it registers — so this line is not repairing an absence.
+  # Measured rather than assumed: `RUSTFLAGS=-Dwarnings cargo clippy --all-features --all-targets`,
+  # with no trailing args at all, exits 101 on the `cast_possible_truncation` sites.
+  #
+  # It is here because a `warn` is only a gate while something turns it into a failure, and the
+  # thing turning it into one should be in the job that depends on it. `[lints.clippy]` in
+  # `Cargo.toml` sets `cast_possible_truncation` to `warn`; a future edit narrowing the shared
+  # `env:` block above would disarm it here with nothing in this job to say so. Scope is the lesser
+  # second reason: trailing args reach only the packages being linted, where `RUSTFLAGS` is set for
+  # everything compiled for the target. Registry dependencies are `--cap-lints allow`'d and painty
+  # has no path dependencies, so today that difference is latent rather than active.
   clippy:
     name: clippy
     strategy:
@@ -238,8 +254,8 @@ jobs:
         run: rustup update stable --no-self-update && rustup default stable && rustup component add clippy
       - name: Install cargo-hack
         run: cargo install cargo-hack
-      - name: cargo hack clippy -p painty --feature-powerset --all-targets
-        run: cargo hack clippy -p painty --feature-powerset --all-targets
+      - name: cargo hack clippy -p painty --feature-powerset --all-targets -- -D warnings
+        run: cargo hack clippy -p painty --feature-powerset --all-targets -- -D warnings
 
   build:
     name: build

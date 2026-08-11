@@ -81,6 +81,11 @@ jobs:
   # `clippy (macos-latest)` and friends, the same check names they would have had as a row of
   # `CI`'s matrices, so a branch protection rule or a reader's habit does not have to change if
   # they ever move back.
+  #
+  # The `-- -D warnings` on the step below is the same one `CI`'s clippy job carries, and it is
+  # here for the same reason it is there — see that job's comment. It is repeated rather than
+  # shared because these two files have no way to share it, and a lint gate that holds in one of
+  # them and not the other is the drift this split invites.
   clippy:
     name: clippy
     strategy:
@@ -95,8 +100,8 @@ jobs:
         run: rustup update stable --no-self-update && rustup default stable && rustup component add clippy
       - name: Install cargo-hack
         run: cargo install cargo-hack
-      - name: cargo hack clippy -p painty --feature-powerset --all-targets
-        run: cargo hack clippy -p painty --feature-powerset --all-targets
+      - name: cargo hack clippy -p painty --feature-powerset --all-targets -- -D warnings
+        run: cargo hack clippy -p painty --feature-powerset --all-targets -- -D warnings
 
   build:
     name: build

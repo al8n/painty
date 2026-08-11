@@ -276,6 +276,11 @@ impl Case {
 
 fn cases() -> Vec<Case> {
   let ceiling = Terminal::<Theme>::max_rendered_width();
+  // The one case that is built AT the ceiling needs it as a length. `try_from` rather than `as`,
+  // for the reason `what_the_renderer_emits_is_bounded_by_policy_and_not_by_the_input` gives below:
+  // a suite about narrowing has no business narrowing, and a ceiling that did not fit would build a
+  // much shorter line instead and quietly stop testing the boundary.
+  let ceiling_bytes = usize::try_from(ceiling).expect("a ceiling the machine can allocate");
   vec![
     Case {
       what: "an ordinary diagnostic, which must not be elided at all",
@@ -319,7 +324,7 @@ fn cases() -> Vec<Case> {
     },
     Case {
       what: "a line that stops just under the ceiling and must not be cut",
-      text: format!("{}\n", "a".repeat(ceiling as usize)),
+      text: format!("{}\n", "a".repeat(ceiling_bytes)),
       tab_width: 4,
       span: Span::new(0, 5),
       cells: ceiling,
