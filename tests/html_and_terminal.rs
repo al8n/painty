@@ -21,18 +21,33 @@
 //! A seven-line span *with a second mark inside it* needs a value on both axes at once, and neither
 //! property ever took one: HTML elided lines five and six, drew line five in another mark's excerpt,
 //! and **line six appeared in no output at all** while the terminal drew every line with no gap.
-//! That is the third time on this branch that a derived case set was complete along one axis and
-//! blind to another, so the fix is the axes and not another case:
+//!
+//! The round after that one found a third: **a span of zero bytes** at the first byte of a line.
+//! Neither of the two axes then present had a zero value — a span covered one line or more, and a
+//! second mark was placed but never sized — and a caret at a line start is where the walk's two
+//! kinds of stop collide. So the table grew rather than gaining a case, and it is the table that is
+//! the claim:
 //!
 //! | axis | values |
 //! |---|---|
-//! | how many lines the first span covers | 1 ..= 12 — both sides of the six/seven turn |
-//! | where a second mark sits | absent, or opening on each of lines 1 ..= 12 |
-//! | how long the second mark is | one line, or reaching three lines further |
-//! | how many marks | one, two, or three |
+//! | what the primary is | a caret at a line start, or a span covering 1 ..= 12 lines — both sides of the six/seven turn |
+//! | where a second mark sits | absent, on each of lines 1 ..= 12, or at the position after the trailing break |
+//! | how big that second mark is | zero bytes, one line, or reaching three lines further |
+//! | how many marks | two, or three |
+//! | what ends a line | `\n`, `\r\n`, `\r` |
 //!
-//! [`the_two_renderers_draw_the_same_rows`] takes the product. Anything added here should extend a
-//! row of that table rather than append a case below it.
+//! [`the_two_renderers_draw_the_same_rows`] takes the product — 3,120 points. Anything added here
+//! should extend a row of that table rather than append a case below it.
+//!
+//! # And one place layer 2 is the oracle rather than the other renderer
+//!
+//! A cross-renderer property is **structurally blind to anything the two renderers share**: they
+//! both call `crate::elide` now, so a change to that rule moves them together and this file stays
+//! green. Proved by planting each of its clauses. The corollary is the one that matters here — for
+//! a shape where a *third*, independent answer exists, the third answer is the oracle, and
+//! [`a_caret_is_drawn_on_the_line_layer_two_puts_it_on`] uses `Region::lines` for exactly that.
+//! It is also the only check on this file's terminal side that does not go through the HTML
+//! renderer's agreement with it.
 //!
 //! # What they are free to disagree about
 //!
@@ -116,62 +131,138 @@ fn terminal_rows(rendered: &str) -> Vec<String> {
     .collect()
 }
 
-/// One point of the grid: a source, a primary span and up to two labels over it.
-fn source_of(lines: usize) -> String {
-  // Two bytes of content and a break, so line `n` starts at `3 * (n - 1)`.
-  (1..=lines).map(|n| format!("{:02}\n", n % 100)).collect()
+/// The three things that can end a line, so that every offset the walk treats specially is reached
+/// with each of them.
+const BREAKS: [&str; 3] = ["\n", "\r\n", "\r"];
+
+/// A source of `lines` numbered lines, each two bytes of content and one break.
+fn source_of(lines: usize, ending: &str) -> String {
+  (1..=lines)
+    .map(|number| format!("{:02}{ending}", number % 100))
+    .collect()
 }
 
-fn start_of(line: usize) -> usize {
-  3 * (line - 1)
+/// Where line `number`'s content begins.
+fn start_of(number: usize, ending: &str) -> usize {
+  (2 + ending.len()) * (number - 1)
 }
 
-fn end_of(line: usize) -> usize {
-  start_of(line) + 2
+/// One past line `number`'s content.
+fn end_of(number: usize, ending: &str) -> usize {
+  start_of(number, ending) + 2
 }
 
+/// What the primary position is: the axis a zero-byte span is a value on.
+#[derive(Debug, Clone, Copy)]
+enum Primary {
+  /// A caret at the first byte of line two — the offset immediately after a line break, which is
+  /// where the walk's close semantics and its open semantics disagree on purpose.
+  Caret,
+  /// A span from the top of the input through line `n`.
+  Lines(usize),
+}
+
+/// What a second mark is: where it opens, and how big it is.
+#[derive(Debug, Clone, Copy)]
+enum Extent {
+  /// Zero bytes — a caret at that line's first byte.
+  Caret,
+  /// That line's content.
+  Line,
+  /// That line and three more.
+  Reaching,
+}
+
+/// Where a second mark opens.
+#[derive(Debug, Clone, Copy)]
+enum Where {
+  Line(usize),
+  /// The position after the trailing break, which is the empty last line.
+  AfterTheLastBreak,
+}
+
+/// Every second mark the grid takes, `None` first.
+fn second_marks(lines: usize) -> Vec<Option<(Where, Extent)>> {
+  let mut out = vec![None];
+  let places = (1..=12usize)
+    .map(Where::Line)
+    .chain(core::iter::once(Where::AfterTheLastBreak));
+  for place in places {
+    for extent in [Extent::Caret, Extent::Line, Extent::Reaching] {
+      out.push(Some((place, extent)));
+    }
+  }
+  let _ = lines;
+  out
+}
+
+fn span_of(place: Where, extent: Extent, lines: usize, ending: &str) -> Span {
+  let at = match place {
+    Where::Line(number) => start_of(number, ending),
+    Where::AfterTheLastBreak => (2 + ending.len()) * lines,
+  };
+  match extent {
+    Extent::Caret => Span::empty(at),
+    Extent::Line => Span::new(at, at + 2),
+    Extent::Reaching => {
+      let last = match place {
+        Where::Line(number) => (number + 3).min(lines),
+        Where::AfterTheLastBreak => lines,
+      };
+      Span::new(at, end_of(last, ending).max(at))
+    }
+  }
+}
+
+/// Every point of the table in this file's header.
+///
+/// The rows drawn have to be the same sequence, gaps included, and no line may be drawn twice.
+/// Every point is checked and every failure reported rather than stopping at the first: "the first
+/// two-mark case is wrong" and "every case with a caret at a line start is wrong" are different
+/// diagnoses, and a stopping assertion cannot tell them apart. Both rounds this file has caught a
+/// defect in, it was the shape of the failing REGION that named the cause.
 #[test]
 #[cfg_attr(
   miri,
-  ignore = "six hundred and twenty-four points, half of them a terminal render, measured at 402s a \
-            cell — and the question is whether two outputs agree about a line number, which the \
-            interpreter is not an instrument for. The renderers' own paths are interpreted by the \
-            two tests below and by the whole of `src/`'s unit suite."
+  ignore = "three thousand points, half of them a terminal render, measured at 402s a cell when \
+            the grid was a fifth this size — and the question is whether two outputs agree about a \
+            line number, which the interpreter is not an instrument for. The renderers' own paths \
+            are interpreted by the tests below and by the whole of `src`'s unit suite."
 )]
 fn the_two_renderers_draw_the_same_rows() {
   const LINES: usize = 20;
-  let text = source_of(LINES);
-  let message = "the same rows either way";
 
-  // Every point is checked and every failure is reported, rather than stopping at the first. A
-  // grid exists to say WHICH region of it is wrong — "the first two-mark case" and "every case with
-  // a mark inside a multi-line span" are different diagnoses, and an assertion that stops cannot
-  // tell them apart.
   let mut checked = 0usize;
   let mut failed: Vec<String> = Vec::new();
-  for covers in 1..=12usize {
-    let primary = Span::new(0, end_of(covers));
+  for ending in BREAKS {
+    let text = source_of(LINES, ending);
+    let message = "the same rows either way";
 
-    for second in std::iter::once(None).chain((1..=12usize).map(Some)) {
-      for reaches in [0usize, 3] {
+    let primaries = core::iter::once(Primary::Caret).chain((1..=12usize).map(Primary::Lines));
+    for primary in primaries {
+      let span = match primary {
+        Primary::Caret => Span::empty(start_of(2, ending)),
+        Primary::Lines(covers) => Span::new(0, end_of(covers, ending)),
+      };
+
+      for second in second_marks(LINES) {
         for third in [None, Some(2usize)] {
           let mut labels: Vec<Label<'_>> = Vec::new();
-          if let Some(second) = second {
-            let last = (second + reaches).min(LINES);
+          if let Some((place, extent)) = second {
             labels.push(Label::new(
-              Location::new(0, Span::new(start_of(second), end_of(last))),
+              Location::new(0, span_of(place, extent, LINES, ending)),
               "second",
             ));
           }
           if let Some(third) = third {
             labels.push(Label::new(
-              Location::new(0, Span::new(start_of(third), end_of(third))),
+              Location::new(0, Span::new(start_of(third, ending), end_of(third, ending))),
               "third",
             ));
           }
 
           let diagnostic =
-            Diagnostic::new("code", Severity::Error, &message, Location::new(0, primary))
+            Diagnostic::new("code", Severity::Error, &message, Location::new(0, span))
               .with_primary_label("first")
               .with_labels(&labels);
 
@@ -180,6 +271,10 @@ fn the_two_renderers_draw_the_same_rows() {
           checked += 1;
 
           let (drawn, expected) = (html_rows(&html), terminal_rows(&terminal));
+          let at = format!(
+            "break={:?} primary={primary:?} second={second:?} third={third:?}",
+            ending
+          );
 
           // No line twice. This is the anti-amplification claim stated rather than inferred: it is
           // what keeps the emitted source bytes at one copy of the lines drawn, and it is what
@@ -194,16 +289,12 @@ fn the_two_renderers_draw_the_same_rows() {
           lines.sort();
           lines.dedup();
           if lines.len() != total {
-            failed.push(format!(
-              "covers={covers} second={second:?} reaches={reaches} third={third:?}: html drew a \
-               line twice, {drawn:?}"
-            ));
+            failed.push(format!("{at}: html drew a line twice, {drawn:?}"));
           }
 
           if drawn != expected {
             failed.push(format!(
-              "covers={covers} second={second:?} reaches={reaches} third={third:?}: html {drawn:?} \
-               against terminal {expected:?}"
+              "{at}: html {drawn:?} against terminal {expected:?}"
             ));
           }
         }
@@ -214,7 +305,7 @@ fn the_two_renderers_draw_the_same_rows() {
   // The grid is the claim, so an empty or shrunken one has to fail rather than pass silently.
   assert_eq!(
     checked,
-    12 * 13 * 2 * 2,
+    BREAKS.len() * 13 * (1 + 13 * 3) * 2,
     "the grid did not take every value"
   );
   assert!(
@@ -222,6 +313,103 @@ fn the_two_renderers_draw_the_same_rows() {
     "{} of {checked} points draw different rows:\n{}",
     failed.len(),
     failed.join("\n")
+  );
+}
+
+/// A caret is drawn on the line layer 2 puts it on — in both outputs, at every offset of every
+/// awkward source.
+///
+/// # Layer 2 is the oracle here, and it has to be
+///
+/// Everywhere else in this file one renderer's output is checked against the other's, and that is
+/// structurally blind to anything the two share. It is also blind in one more direction nobody had
+/// named until the round this test was written in: **it says nothing about the terminal on its
+/// own.** A zero-width-span defect on that side would have been as silent as the one on this side
+/// was.
+///
+/// A caret is the one shape where a third, independent answer exists and is exact.
+/// [`Region::lines`] yields precisely the lines a span is drawn on, and for a span of no bytes that
+/// is one line — so the row a reader is shown is decidable without asking either renderer. Both are
+/// held to it.
+///
+/// The sources are chosen so that every offset the walk treats specially is reached: the first byte
+/// after each of the three line breaks, the position after a trailing break, the end of a line's
+/// content, an offset inside a CRLF, one inside a multi-byte character, and the end of a source
+/// that has no trailing break at all.
+#[test]
+fn a_caret_is_drawn_on_the_line_layer_two_puts_it_on() {
+  const AWKWARD: [&str; 10] = [
+    "",
+    "\n",
+    "l1\nl2\nl3\n",
+    "l1\r\nl2\r\nl3\r\n",
+    "l1\rl2\rl3\r",
+    "l1\nl2\r\nl3\rl4",
+    "no trailing break",
+    "\u{1f3a8}\n\u{1f3a8}\n",
+    "e\u{301}\ne\u{301}\n",
+    "\t\n\t\n",
+  ];
+
+  let mut checked = 0usize;
+  for text in AWKWARD {
+    let source = Source::new(text);
+    for at in 0..=text.len() {
+      let message = "a caret";
+      let diagnostic = Diagnostic::new(
+        "code",
+        Severity::Error,
+        &message,
+        Location::new(0, Span::empty(at)),
+      )
+      .with_primary_label("here");
+
+      // What layer 2 says, which is neither renderer's answer.
+      let expected: Vec<String> = source
+        .resolve(Span::empty(at))
+        .lines()
+        .map(|on| on.line().number().to_string())
+        .collect();
+      assert_eq!(expected.len(), 1, "a caret is drawn on exactly one line");
+
+      let html = as_html(&diagnostic, text);
+      let terminal = as_terminal(&diagnostic, text);
+      checked += 1;
+
+      assert_eq!(
+        html_rows(&html),
+        expected,
+        "{text:?} at {at}: HTML draws rows layer 2 does not\n{html}"
+      );
+      assert_eq!(
+        terminal_rows(&terminal),
+        expected,
+        "{text:?} at {at}: the terminal draws rows layer 2 does not\n{terminal}"
+      );
+
+      // And the position each one announces, which is the other place a stop resolved with the
+      // wrong semantics would show: `Source::position` is ordinary and `closes_on` is not.
+      let position = source.position(at);
+      let announced = format!("{}:{}", position.line(), position.column());
+      assert!(
+        html.contains(&format!(
+          r#"<span class="painty-position">{announced}</span>"#
+        )),
+        "{text:?} at {at}: HTML announces something other than {announced}\n{html}"
+      );
+      // Both renderers are given the same origin name, and the terminal writes it into the
+      // machine-parsed triple.
+      assert!(
+        terminal.contains(&format!(" --> input:{announced}\n")),
+        "{text:?} at {at}: the terminal announces something other than {announced}\n{terminal}"
+      );
+    }
+  }
+
+  assert_eq!(
+    checked,
+    AWKWARD.iter().map(|text| text.len() + 1).sum::<usize>(),
+    "the sweep did not reach every offset"
   );
 }
 
@@ -274,15 +462,16 @@ fn which_source_is_marked_is_the_same_in_both_outputs() {
 fn the_two_renderers_say_the_same_labels_in_the_same_order() {
   // A label is said where its span closes, and the labels under one line are in the caller's order.
   // Both are the terminal's rules; nothing but this holds HTML to them.
-  let text = source_of(9);
+  let ending = "\n";
+  let text = source_of(9, ending);
   let message = "three of them";
   let labels = [
     Label::new(
-      Location::new(0, Span::new(start_of(3), end_of(3))),
+      Location::new(0, Span::new(start_of(3, ending), end_of(3, ending))),
       "on three",
     ),
     Label::new(
-      Location::new(0, Span::new(start_of(1), end_of(3))),
+      Location::new(0, Span::new(start_of(1, ending), end_of(3, ending))),
       "one to three",
     ),
   ];
@@ -290,7 +479,7 @@ fn the_two_renderers_say_the_same_labels_in_the_same_order() {
     "code",
     Severity::Error,
     &message,
-    Location::new(0, Span::new(start_of(3), end_of(3))),
+    Location::new(0, Span::new(start_of(3, ending), end_of(3, ending))),
   )
   .with_primary_label("primary on three")
   .with_labels(&labels);

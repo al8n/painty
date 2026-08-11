@@ -437,6 +437,27 @@ impl Page<'_> {
   /// no memory, and it means the walk never turns round. A block therefore costs two passes over its
   /// input — one to locate the position the origin reports, one for the stops — whatever the label
   /// count, where rendering mark by mark cost one restart per span that reached past a later one.
+  ///
+  /// # What the ordering assumes, and where each assumption is kept
+  ///
+  /// The ordering rule was ported from the terminal, and the second defect here was porting it past
+  /// a precondition it silently relied on. The terminal satisfies these **structurally** — most of
+  /// them fall out of one `if` — so none of them is written down there, and a reader taking the rule
+  /// takes only the rule. They are written down here because that is what went wrong.
+  ///
+  /// | assumption | how the terminal keeps it | how this does |
+  /// |---|---|---|
+  /// | a close stop exists only where a span has a far end | queues one inside `if opening.reaches_another_line()` | [`stops_of`] emits one only where `end > start` |
+  /// | a span's own two stops never share an offset | follows from the first | follows from the first |
+  /// | a tie is therefore always between two *different* spans | follows | follows |
+  /// | `closes_on` is only ever asked about a genuine far end | follows | follows |
+  /// | every stop's line is a line some mark is drawn on | anchors are built from placements | `debug_assert` at the anchor, below |
+  /// | stops arrive in non-decreasing offset order | the heap drains ahead of each start | the scan takes the minimum above the last |
+  /// | offsets are clamped before anything compares them | `Walk::clamped` at the ordering site | `in_input`, once per mark |
+  ///
+  /// The fifth is the one that would have caught the defect, and it is now an assertion rather than
+  /// a consequence: the spurious stop produced a *monotone* sequence of anchors, so nothing about
+  /// the ordering looked wrong, and the extra row was blank and read as context.
   fn block<'a>(
     &mut self,
     earliest: Drawable<'a>,
@@ -469,9 +490,27 @@ impl Page<'_> {
       } else {
         walk.closes_on(offset)
       };
+      // Every anchor is a line some mark is DRAWN on. The plan has no other reason to put a row on
+      // the page, and this is the invariant the stop generation exists to keep — a stop that
+      // resolved somewhere no mark reaches is a row a reader is shown for nothing. Asserted rather
+      // than argued because the way it went wrong once was silent: an empty span contributed a
+      // close stop at its own start offset, drawn-end semantics resolved that to the line BEFORE
+      // it, and the extra row was blank and monotone and looked like context.
+      debug_assert!(
+        marks.clone().any(|(_, span)| draws_on(anchor, span)),
+        "an anchor at line {} that no mark is drawn on",
+        anchor.number()
+      );
+      // Stops arrive in ascending offset order and a line number is monotone in the offset, so the
+      // walk never hands back a line behind the one it has reached.
+      debug_assert!(
+        above.is_none_or(|previous| previous.number() <= anchor.number()),
+        "a stop resolved to line {}, behind the walk's own position",
+        anchor.number()
+      );
       // Several stops land on one line — a span's own two ends where it is drawn on one line, two
       // labels on one line, one span closing where another opens. The anchors are the DISTINCT
-      // lines, and the stops arrive in ascending order, so the repeats are consecutive.
+      // lines, and the repeats are therefore consecutive.
       if above.is_some_and(|previous| previous.number() >= anchor.number()) {
         continue;
       }
@@ -700,18 +739,55 @@ fn in_input<'a>(
 
 /// The next place the walk has to stop, after the one it is standing on.
 ///
-/// Every span's two ends, in ascending offset order. **A close goes first where two land on one
-/// offset**, which is the terminal's rule and is load-bearing for the same reason: a walk asked for
-/// an offset it is already standing on cannot see that a line break ended there, and that is the one
-/// question a close exists to answer. `false` sorts before `true`, so the pair orders itself.
+/// In ascending offset order, and **a close goes first where two land on one offset**. That is the
+/// terminal's rule and it is load-bearing for the terminal's reason: a walk asked for an offset it
+/// is already standing on cannot see that a line break ended there, and that is the one question a
+/// close exists to answer. `false` sorts before `true`, so the pair orders itself.
 fn next_stop<'a>(
   marks: impl Iterator<Item = (Drawable<'a>, Span)>,
   after: Option<(usize, bool)>,
 ) -> Option<(usize, bool)> {
   marks
-    .flat_map(|(_, span)| [(span.end(), false), (span.start(), true)])
+    .flat_map(|(_, span)| stops_of(span))
     .filter(|stop| after.is_none_or(|previous| previous < *stop))
     .min()
+}
+
+/// The stops one span contributes: where it opens, and — **only where it has a far end** — where it
+/// closes.
+///
+/// # The condition is the terminal's precondition, and leaving it out is what broke
+///
+/// "A close before an open at one offset" is correct in the terminal because there a **single span
+/// never contributes two stops at one offset**: a far end is queued only inside
+/// `if opening.reaches_another_line()`. The rule was ported here and the precondition that made it
+/// safe was not, so an empty span emitted a close at its own start. The close was visited first, it
+/// carries drawn-end semantics — which resolves an offset just past a line break to the line
+/// *before* it, deliberately, because that is where a span that swallowed its newline is drawn —
+/// and `Span::empty(start_of_line_2)` therefore anchored line 1 as well as line 2 and put a blank
+/// row on the page. Four sources produce it: the first byte after `\n`, after `\r\n`, after `\r`,
+/// and the position after a trailing break.
+///
+/// So the pair is made unrepresentable rather than caught downstream. A close exists only where
+/// `end > start`, so a span's own two stops can never collide and every tie is between two
+/// different spans — which is the precondition the ordering rule needs, restored at the one place
+/// a stop is created.
+///
+/// # Why "non-empty" and not "reaches another line"
+///
+/// The terminal's own condition is the stronger one, and it needs the opening LINE to evaluate —
+/// which this renderer does not have until it has walked to the stop it is deciding whether to
+/// emit. Non-emptiness is decidable from the bytes alone, and the gap between the two conditions
+/// costs nothing: for a non-empty span the drawn end is never on an *earlier* line than the start,
+/// so the extra stop a single-line span contributes lands on the line its opening already anchored
+/// and is dropped as a repeat. That is provable rather than observed — the drawn end is the line
+/// holding `end - 1`, or the line whose break ends at `end` and therefore holds `end - break_len`,
+/// and clamping has already moved `start` out of any break, so both are at or after `start`.
+fn stops_of(span: Span) -> impl Iterator<Item = (usize, bool)> {
+  (!span.is_empty())
+    .then_some((span.end(), false))
+    .into_iter()
+    .chain(core::iter::once((span.start(), true)))
 }
 
 /// Whether any span that reaches a later line OPENS on this one.
