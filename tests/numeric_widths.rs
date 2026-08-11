@@ -610,7 +610,7 @@ impl<'ast> Visit<'ast> for Scan<'_> {
   fn visit_type_param(&mut self, node: &'ast syn::TypeParam) {
     // `pub struct Page<T = usize>` publishes a width through a default nobody has to write.
     if let Some(default) = &node.default
-      && !integers_in_type(default).is_empty()
+      && !integers_in_type(&default.1).is_empty()
     {
       self.spelling(
         format!("defaulted type parameter `{}::{}`", self.owner, node.ident),
@@ -677,7 +677,7 @@ fn ascribed() -> Vec<Pin> {
   impl<'ast> Visit<'ast> for Locals {
     fn visit_local(&mut self, node: &'ast syn::Local) {
       if let syn::Pat::Type(typed) = &node.pat
-        && let Type::BareFn(signature) = &*typed.ty
+        && let Type::FnPtr(signature) = &*typed.ty
         && let Some(init) = &node.init
         && let syn::Expr::Path(path) = &*init.expr
       {
@@ -689,7 +689,7 @@ fn ascribed() -> Vec<Pin> {
           .collect::<Vec<_>>()
           .join("::");
         let mut bare = Integers::default();
-        bare.visit_type_bare_fn(signature);
+        bare.visit_type_fn_ptr(signature);
         self.0.push(Pin {
           path: joined,
           bare: bare.0,
