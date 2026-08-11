@@ -2,22 +2,6 @@
 name = "painty"
 version = "0.0.0"
 edition = "2024"
-# MSRV policy, and where this number comes from.
-#
-# It is NOT derived from what painty's own code needs. The crate is empty, and the colour
-# detection the design calls for wants `std::io::IsTerminal`, stable since 1.70 — so nothing
-# here forces a floor above edition 2024's own 1.85.
-#
-# It is set by the CONSUMER side instead. painty exists to render `tokora`'s diagnostic
-# contract, and tokora declares `rust-version = "1.95"`; smear, the first producer, declares
-# 1.95 as well. A renderer whose floor sits BELOW its contract's is a floor nobody can stand
-# on — a caller pinned to 1.90 could compile painty and not the trait it renders — so the
-# lower number would be a claim no consumer is able to exercise. Matching tokora keeps the
-# declared floor reachable and keeps the family on one number rather than three.
-#
-# As in tokora, this is a floor maintainers set rather than the bare minimum, it is what the
-# `msrv` CI job actually builds against — that job reads this field instead of hardcoding a
-# toolchain, so the two cannot drift — and raising it is not treated as a breaking change.
 rust-version = "1.95"
 repository = "https://github.com/al8n/painty"
 homepage = "https://github.com/al8n/painty"
@@ -32,28 +16,8 @@ categories = [
   "no-std",
   "text-processing",
 ]
-# The published artifact is the crate, not the repository. Without this the `.crate` for an empty
-# skeleton is 92 KiB, two thirds of which is CI machinery that every consumer would download and
-# no consumer can run. Root-anchored so the patterns cannot start matching something nested later.
 exclude = ["/.github/", "/ci/", "/.codecov.yml"]
 
-# The feature set is fixed by the design and is asserted by the `manifest` job in
-# `.github/workflows/ci.yml`, which reads it back out of `cargo metadata` and compares it to a
-# literal. Adding, renaming or re-wiring a feature therefore fails CI until the design and the
-# gate are updated together — the point being that a rendering surface is easy to grow by
-# accident and the three outputs are meant to stay independently selectable.
-#
-# `default = []` is deliberate and is the primary configuration: the crate is `no_std` and
-# dependency-free unless a caller asks for an output. There is no `alloc` feature — the
-# resolution layer borrows from the source and is meant to stay allocation-free, so a feature
-# that hands it a heap would be answering an open question by default.
-#
-# `tokora` is an INPUT, not an output, and it is the one feature whose absence is itself gated:
-# painty takes a borrowed data view it defines itself, so a project with its own error type never
-# has to adopt a parser-combinator library to draw an underline. The `no-tokora` job in
-# `.github/workflows/ci.yml` proves the dependency really is absent from every other
-# configuration's graph, and `tests/` carries consumers built on a hand-rolled error type so the
-# claim is exercised rather than asserted.
 [features]
 default = []
 std = []
@@ -62,72 +26,16 @@ html = []
 model = []
 tokora = ["dep:tokora"]
 
-# The three the terminal renderer costs, and why each is a dependency rather than code here.
-#
-# Default features are left ON for `unicode-width` and `anstyle`. `anstyle`'s default is `std`,
-# which `terminal` already implies.
-#
-# `unicode-width`'s default is `cjk`, and what that feature does is NOT what this comment used to
-# say. It claimed CJK being two cells wide was the entire reason the dependency is taken and that
-# turning it off would render wrongly. False mechanism, on both halves: East Asian Wide and
-# Fullwidth are two cells from the base table, and `cjk` gates only the `*_cjk` method variants —
-# where East Asian *Ambiguous* is two cells instead of one — plus the trait's sealing
-# (unicode-width 0.2.2, `Cargo.toml:49-50` and the `#[cfg(feature = "cjk")]` sites in `lib.rs`).
-# painty calls `.width()` and never a `*_cjk` variant, so disabling it would change nothing
-# rendered; it would only shrink the static tables.
-#
-# It stays on because it is the default and nothing is bought by diverging from it. The convention
-# painty actually measures against — ambiguous characters at one cell — is not left to a feature
-# flag: `the_ambiguous_width_convention_is_the_one_painty_measures_against` pins it at a character
-# that distinguishes the two, and that test needs `cjk` to compile, so turning the feature off is a
-# visible change rather than a silent one.
-#
-# `unicode-segmentation` is taken for the reason `syn` is taken below: it is the AUTHORITY for a
-# question this crate kept answering by recognising a pattern. Where a placement unit ENDS is
-# UAX#29 grapheme segmentation, and two rounds of review found two different heuristics that each
-# inferred it from incremental prefix width — the second silently mis-placing every marker after a
-# variation-selector emoji. A heuristic that has to be tuned a third time is a wrong model, so the
-# question is asked of the crate that implements the standard.
-#
-# No `default-features = false`, and that is a statement about this crate rather than an omission:
-# it declares no default feature set at all. Its one feature, `no_std`, is vestigial — the lib is
-# `#![no_std]` unconditionally and no source file reads `feature = "no_std"`, verified in 1.13.3 —
-# so switching it on would change nothing and imply a choice that does not exist. It also brings no
-# dependencies of its own and declares `rust-version = "1.85"`, under painty's 1.95 floor.
-#
-# None of the three is on a normal edge of `default = []`; the `no-tokora` job walks that.
-#
-# `tokora` is the opposite: `default-features = false` and no feature list at all. The adapter
-# reads `tokora::diagnostic`, which is `core` plus `SimpleSpan` and is not behind any feature, so
-# every one tokora ships would be graph painty made a consumer pay for. In particular NOT `std` —
-# painty's own `tokora` feature does not imply `std`, and enabling tokora's would silently take
-# that choice away from a `--no-default-features` build.
 [dependencies]
 anstyle = { version = "1", optional = true }
 tokora = { version = "0.9", default-features = false, optional = true }
 unicode-segmentation = { version = "1.13", optional = true }
 unicode-width = { version = "0.2", optional = true }
 
-# The first and only dev-dependency, and it is worth naming why a crate that took pains to have an
-# empty dependency graph now has one at all.
-#
-# `tests/numeric_widths.rs` asserts that every public numeric is the width the rule in README.md
-# gives it. To do that it has to find the public numerics, and it used to find them by scanning
-# lines for `pub fn`. That recogniser was wrong five times across two reviews — it missed a
-# rustfmt-wrapped signature, a trait method, a name that is a prefix of a pinned one, a duplicate
-# exempted line, and a whole declaration shape — which is what a checker that recognises a pattern
-# rather than asking an authority does. `syn` is the authority. It is a dev-dependency, so it is
-# absent from every consumer's graph, from the `no-tokora` job's `--edges normal` walk, and from
-# the bare-metal points, which build no test target.
 [dev-dependencies]
 proc-macro2 = { version = "1", features = ["span-locations"] }
-syn = { version = "2", features = ["full", "visit"] }
+syn = { version = "3", features = ["full", "visit"] }
 
-# Named so the target is ABSENT rather than empty when the feature is off. `#![cfg(feature =
-# "tokora")]` inside the file would compile a target with nothing in it, which reads as a passing
-# test suite and proves nothing; `required-features` makes cargo skip building it at all. That is
-# the sharp half of the no-hard-binding claim — the adapter and everything that exercises it leave
-# the build together.
 [[test]]
 name = "tokora_adapter"
 required-features = ["tokora"]
@@ -136,44 +44,15 @@ required-features = ["tokora"]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]
 
-[lints.rust]
+[lints]
+workspace = true
+
+[workspace.lints.rust]
 rust_2018_idioms = "warn"
 single_use_lifetimes = "warn"
 unexpected_cfgs = { level = "warn", check-cfg = [
-  # Set by rustdoc on docs.rs via the `rustdoc-args` above, and by nothing else.
   'cfg(docsrs)',
 ] }
 
-# One lint, and it is on because nothing this repository RUNS can catch what it catches.
-#
-# The narrowing this lint exists for is `u64 → usize`: a display column, which is a `u64` by rule 1
-# of the numeric widths in README.md, spent against something the machine sizes. Each is exact on a
-# 64-bit target and each is a truncation on a 32-bit one. That difference is not reachable by
-# execution here, and barely reachable anywhere: the suite does run on 32-bit —
-# `i686-unknown-linux-gnu` under both Miri borrow models, most of the `cross` cells, `thumbv6m` —
-# but truncating needs a value at or past 2^32, every such value is a display column, and a column
-# that large needs a line of roughly 16.7 MB, which a 32-bit target cannot address. The hazard
-# nearly cancels itself out, which is exactly what makes it worth a lint instead of a test: no
-# target painty runs on would redden.
-#
-# `cast_possible_truncation` is the check that does not need the value, because it reads the types.
-# It also fires on this host: clippy lints a cast to `usize` from a fixed 64-bit type whatever the
-# pointer width of the machine compiling it, so a 64-bit developer sees the 32-bit hazard.
-#
-# `warn` here, `-D warnings` on the clippy job of both CI workflows. It cost THIRTEEN sites, not the
-# one the census measured, and the difference is the census's scope rather than a miscount: it read
-# the library, and `--all-targets` lints the tests as well. One site is in the library and twelve
-# are in test code.
-#
-# Eleven of the thirteen are repaired rather than silenced — a `try_from`, or a loop that strides
-# over the byte it had been narrowing to. Two are silenced, each with the argument on it:
-# `terminal::paint::pad`, whose remainder the loop above it has already put below the chunk length,
-# and the padding test whose SUBJECT is the narrowing it reproduces. `#[expect]` rather than
-# `#[allow]` in both, so a silenced site that stops casting says so instead of sitting there.
-#
-# What it does NOT cover, so that its passing is not read as more than it is: a `u32 → usize` cast
-# is not a truncation on any target with a pointer 32 bits or wider, so the lint is silent on the
-# one in `Plan::of` — that cast is pinned at its site instead, by the width of `Location::source`
-# and by a const assertion on `usize::BITS`.
-[lints.clippy]
+[workspace.lints.clippy]
 cast_possible_truncation = "warn"
