@@ -2375,3 +2375,339 @@ fn a_bracket_costs_the_same_rows_however_many_lines_it_covers() {
     "a bracketed span costs {rows:?} rows, which is not a bound anybody would call one"
   );
 }
+
+// ── The second style, written out ───────────────────────────────────────────────────────────────
+//
+// Goldens, and they live beside the invariants for one commit only: `render_boxed` is not a choice
+// a caller can make yet, so there is no public entry an integration test could reach. They move to
+// `tests/style_appearance.rs` with the seam, where the two styles render one diagnostic set and
+// the gate "the same set, both styles" is structural rather than a claim.
+
+fn boxed(diagnostic: &Diagnostic<'_>, text: &str, origin: Option<&str>) -> String {
+  let mut input = Input::new(Source::new(text));
+  if let Some(origin) = origin {
+    input = input.with_origin(origin);
+  }
+  let mut out = String::new();
+  Terminal::plain()
+    .with_tab_width(4)
+    .render_boxed(diagnostic, &[input], &mut out)
+    .expect("a String never fails to be written to");
+  out
+}
+
+#[test]
+fn a_label_hangs_from_its_own_row_rather_than_sitting_on_the_marker() {
+  // The whole header, because every part of it differs: the code is a line of its own, the
+  // severity is a glyph and not a word, and the location line is the top of a box rather than an
+  // arrow. What follows is two rows per label where the first style writes one.
+  let text = "type Widget {\n  width: Int\n  width: Int\n}\n";
+  let message = "`width` is defined twice";
+  let diagnostic = Diagnostic::new(
+    "mylang::schema::duplicate-field",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(29, 34)),
+  )
+  .with_primary_label("redefined here")
+  .with_help("rename one of the two definitions");
+
+  assert_eq!(
+    boxed(&diagnostic, text, Some("widget.graphql")),
+    "\
+mylang::schema::duplicate-field
+
+  × `width` is defined twice
+   ╭─[widget.graphql:3:3]
+ 3 │   width: Int
+   ·   ━━┳━━
+   ·     ┗━━ redefined here
+   ╰────
+  help: rename one of the two definitions
+"
+  );
+}
+
+#[test]
+fn the_primary_is_heavy_and_a_secondary_is_light() {
+  // A box-drawing style has no second marker character to spare — `─` is the underline — so the
+  // distinction `^` against `-` carries is carried by WEIGHT here. Asserted because losing it is
+  // silent: both rows would still be underlines of the right width, under the right text, and a
+  // reader would simply not be told which position the diagnostic is about.
+  let text = "type Widget {\n  width: Int\n  width: Int\n}\n";
+  let message = "`width` is defined twice";
+  let labels = [Label::new(
+    Location::new(0, Span::new(16, 21)),
+    "first defined here",
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::schema::duplicate-field",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(29, 34)),
+  )
+  .with_primary_label("redefined here")
+  .with_labels(&labels);
+
+  let out = boxed(&diagnostic, text, None);
+  assert!(
+    out.contains('┳') && out.contains('┬'),
+    "the two positions are drawn alike, so nothing says which one the diagnostic is about\n{out}"
+  );
+  assert_eq!(
+    out,
+    "\
+mylang::schema::duplicate-field
+
+  × `width` is defined twice
+   ╭─[3:3]
+ 2 │   width: Int
+   ·   ──┬──
+   ·     ╰── first defined here
+ 3 │   width: Int
+   ·   ━━┳━━
+   ·     ┗━━ redefined here
+   ╰────
+"
+  );
+}
+
+#[test]
+fn two_labels_on_one_line_keep_their_own_pair_of_rows() {
+  // The primary's span starts AFTER the secondary's and is still written first, which is the
+  // caller's order surviving where it still says something.
+  let text = "type Widget { width: Int, width: Float }\n";
+  let message = "`width` is defined twice";
+  let labels = [Label::new(
+    Location::new(0, Span::new(14, 19)),
+    "first defined here",
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::schema::duplicate-field",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(26, 31)),
+  )
+  .with_primary_label("redefined here")
+  .with_labels(&labels);
+
+  assert_eq!(
+    boxed(&diagnostic, text, Some("widget.graphql")),
+    "\
+mylang::schema::duplicate-field
+
+  × `width` is defined twice
+   ╭─[widget.graphql:1:27]
+ 1 │ type Widget { width: Int, width: Float }
+   ·                           ━━┳━━
+   ·                             ┗━━ redefined here
+   ·               ──┬──
+   ·                 ╰── first defined here
+   ╰────
+"
+  );
+}
+
+#[test]
+fn a_multi_line_span_is_bracketed_down_the_margin_and_marks_no_cell() {
+  // The deepest divergence, and the design named it in advance: this style boxes where the other
+  // indents. The bracket opens, runs and closes in the margin of the SOURCE rows themselves, and
+  // the label turns the corner under it — so a multi-line span has no marker on any cell at all,
+  // where the first style puts one on the cell its last character occupies.
+  let text = "query Hero {\n  hero {\n    name\n    friends\n  }\n}\n";
+  let message = "this selection set is nested too deeply";
+  let diagnostic = Diagnostic::new(
+    "mylang::query::too-deep",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(15, 44)),
+  )
+  .with_primary_label("this selection set");
+
+  let out = boxed(&diagnostic, text, Some("hero.graphql"));
+  assert!(
+    !out.contains('┳'),
+    "a bracketed span marked a cell, which is the other style's form\n{out}"
+  );
+  assert_eq!(
+    out,
+    "\
+mylang::query::too-deep
+
+  × this selection set is nested too deeply
+   ╭─[hero.graphql:2:3]
+ 2 │ ┏   hero {
+ 3 │ ┃     name
+ 4 │ ┃     friends
+ 5 │ ┣   }
+   · ┗━━━━ this selection set
+   ╰────
+"
+  );
+}
+
+#[test]
+fn an_opening_with_text_before_it_costs_this_style_no_row() {
+  // The other style needs a row here — `let x = ` precedes the span, so a glyph in the margin
+  // would not say which column it begins at, and an underscore run says it exactly. This style
+  // cannot say it at all: the bracket is in the margin whatever precedes the span, so the opening
+  // COLUMN is what it gives up, and it gives it up on every multi-line span rather than on some.
+  let text = "let x = if a {\n  1\n} else {\n  2\n};\n";
+  let message = "the branches disagree";
+  let diagnostic = Diagnostic::new(
+    "mylang::type::branches",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(8, 33)),
+  )
+  .with_primary_label("this expression");
+
+  assert_eq!(
+    boxed(&diagnostic, text, None),
+    "\
+mylang::type::branches
+
+  × the branches disagree
+   ╭─[1:9]
+ 1 │ ┏ let x = if a {
+ 2 │ ┃   1
+ 3 │ ┃ } else {
+ 4 │ ┃   2
+ 5 │ ┣ };
+   · ┗━━━━ this expression
+   ╰────
+"
+  );
+}
+
+#[test]
+fn what_a_long_span_left_out_is_said_in_the_wall() {
+  // `⋮` in the wall's column rather than `...` in the number's. Both are true and they say
+  // different things; a boxed style has a wall to say it in.
+  let text = "fragment F on Query {\n  a\n  b\n  c\n  d\n  e\n  f\n  g\n}\n";
+  let message = "this fragment is never used";
+  let diagnostic = Diagnostic::new(
+    "mylang::query::unused-fragment",
+    Severity::Warning,
+    &message,
+    Location::new(0, Span::new(0, text.len() - 1)),
+  )
+  .with_primary_label("declared here");
+
+  assert_eq!(
+    boxed(&diagnostic, text, None),
+    "\
+mylang::query::unused-fragment
+
+  ⚠ this fragment is never used
+   ╭─[1:1]
+ 1 │ ┏ fragment F on Query {
+ 2 │ ┃   a
+ 3 │ ┃   b
+ 4 │ ┃   c
+   ⋮ ┃
+ 9 │ ┣ }
+   · ┗━━━━ declared here
+   ╰────
+"
+  );
+}
+
+#[test]
+fn two_overlapping_brackets_run_in_columns_of_their_own() {
+  // One column would leave a reader unable to tell which opening a closing belongs to. The inner
+  // span opens later so it runs to the RIGHT, and the outer's closing run crosses it: what the
+  // crossing says is that this bracket closes over that one, exactly as the underscore run does
+  // in the other style.
+  let text = "outer (\n  inner (\n    x\n  )\n)\n";
+  let message = "two of these disagree";
+  let labels = [Label::new(
+    Location::new(0, Span::new(10, 26)),
+    "and this one",
+  )];
+  let diagnostic = Diagnostic::new(
+    "mylang::type::nested",
+    Severity::Error,
+    &message,
+    Location::new(0, Span::new(6, 29)),
+  )
+  .with_primary_label("this one")
+  .with_labels(&labels);
+
+  assert_eq!(
+    boxed(&diagnostic, text, None),
+    "\
+mylang::type::nested
+
+  × two of these disagree
+   ╭─[1:7]
+ 1 │ ┏  outer (
+ 2 │ ┃╭   inner (
+ 3 │ ┃│     x
+ 4 │ ┃├   )
+   · ┃╰──── and this one
+ 5 │ ┣  )
+   · ┗━━━━━ this one
+   ╰────
+"
+  );
+}
+
+#[test]
+fn an_underline_is_as_wide_as_the_cells_it_covers_and_not_the_characters() {
+  // The cell arithmetic is the renderer's and not the style's, and this is what says so: a tab
+  // before the span and two-cell ideographs inside it, placed by the same walk that places the
+  // other style's carets.
+  let text = "\tlet x = \u{65e5}\u{672c};\n";
+  let message = "a wide name behind a tab";
+  let diagnostic = Diagnostic::new(
+    "mylang::test::wide",
+    Severity::Advice,
+    &message,
+    Location::new(0, Span::new(9, 15)),
+  )
+  .with_primary_label("two cells each");
+
+  let out = boxed(&diagnostic, text, None);
+  // Four cells, which is what two ideographs draw as. A style counting characters would write two.
+  assert_eq!(
+    out
+      .lines()
+      .find(|row| row.contains('┳'))
+      .map(|row| row.chars().filter(|c| *c == '━' || *c == '┳').count()),
+    Some(4),
+    "the underline is not the width of what it covers\n{out}"
+  );
+  assert_eq!(
+    out,
+    "\
+mylang::test::wide
+
+  ☞ a wide name behind a tab
+   ╭─[1:10]
+ 1 │     let x = 日本;
+   ·             ━━┳━
+   ·               ┗━━ two cells each
+   ╰────
+"
+  );
+}
+
+#[test]
+fn a_position_with_nothing_to_point_at_prints_only_its_header() {
+  let message = "this document was generated, so it has no positions";
+  let diagnostic = Diagnostic::new(
+    "mylang::input::synthesized",
+    Severity::Warning,
+    &message,
+    Location::entire(0),
+  );
+  assert_eq!(
+    boxed(&diagnostic, "type Widget {}\n", None),
+    "\
+mylang::input::synthesized
+
+  ⚠ this document was generated, so it has no positions
+"
+  );
+}

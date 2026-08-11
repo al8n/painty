@@ -140,7 +140,7 @@ use syn::{
 /// [`the_file_list_is_the_whole_crate`] walks `src/` and checks it. `src/tokora.rs` is here whether
 /// or not its feature is on: `include_str!` reads the disk, not the build, which is what keeps the
 /// adapter under the same censuses as everything else.
-const CRATE: [(&str, &str); 16] = [
+const CRATE: [(&str, &str); 17] = [
   ("src/lib.rs", include_str!("../src/lib.rs")),
   (
     "src/diagnostic/mod.rs",
@@ -173,6 +173,10 @@ const CRATE: [(&str, &str); 16] = [
   (
     "src/terminal/detect.rs",
     include_str!("../src/terminal/detect.rs"),
+  ),
+  (
+    "src/terminal/miette.rs",
+    include_str!("../src/terminal/miette.rs"),
   ),
   (
     "src/terminal/render.rs",

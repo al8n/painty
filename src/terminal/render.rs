@@ -66,13 +66,13 @@ impl<'a> Input<'a> {
 /// [the numeric widths](crate#numeric-widths) makes it a `usize`, where spelling a `u32` here would
 /// be declaring a ceiling that is `Location`'s to declare and not this file's.
 #[derive(Debug, Clone, Copy)]
-struct Drawable<'a> {
-  at: usize,
-  input: usize,
-  from: Input<'a>,
-  span: Span,
-  text: Option<&'a str>,
-  primary: bool,
+pub(super) struct Drawable<'a> {
+  pub(super) at: usize,
+  pub(super) input: usize,
+  pub(super) from: Input<'a>,
+  pub(super) span: Span,
+  pub(super) text: Option<&'a str>,
+  pub(super) primary: bool,
 }
 
 /// Which part of a span one mark draws.
@@ -82,7 +82,7 @@ struct Drawable<'a> {
 /// a different line and the two are the same span — which is why this is a property of the mark
 /// rather than of the row it lands in.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Ends {
+pub(super) enum Ends {
   /// The whole of a span that is drawn on one line.
   Whole,
   /// Where a span that reaches a later line begins.
@@ -93,25 +93,25 @@ enum Ends {
 
 /// What one marker row says, and where the position under it starts.
 #[derive(Debug, Clone, Copy)]
-struct Phrase<'a> {
-  text: Option<&'a str>,
-  primary: bool,
+pub(super) struct Phrase<'a> {
+  pub(super) text: Option<&'a str>,
+  pub(super) primary: bool,
   /// Where this was in the caller's order.
-  at: usize,
+  pub(super) at: usize,
   /// The line the mark is drawn under. Carried rather than paired up outside, because the marks of
   /// a whole render are one flat run and an excerpt takes its slice of them by walking it.
-  line: u64,
-  ends: Ends,
+  pub(super) line: u64,
+  pub(super) ends: Ends,
   /// The connector column the span was given, counting from 1, or zero for a span that needs none.
-  depth: u64,
+  pub(super) depth: u64,
   /// Opens with a `/` in the margin rather than with an underscore run of its own.
-  compact: bool,
+  pub(super) compact: bool,
 }
 
 impl Phrase<'_> {
   /// The style everything this mark draws is written in — the marker, the label, and the connector
   /// that joins them.
-  const fn role(&self) -> Role {
+  pub(super) const fn role(&self) -> Role {
     if self.primary {
       Role::PrimaryLabel
     } else {
@@ -134,29 +134,29 @@ impl Phrase<'_> {
 /// It may name none. A line between a multi-line span's ends carries no mark and is drawn anyway,
 /// because a bracket down the margin of lines a reader cannot see says nothing.
 #[derive(Debug, Clone)]
-struct Excerpt<'a> {
-  line: Line<'a>,
-  marks: core::ops::Range<usize>,
+pub(super) struct Excerpt<'a> {
+  pub(super) line: Line<'a>,
+  pub(super) marks: core::ops::Range<usize>,
   /// The line before this one in the same input, when lines were left out between them and a `...`
   /// row stands in for what is missing.
-  after: Option<u64>,
+  pub(super) after: Option<u64>,
 }
 
 /// One multi-line span's connector: the rows it runs down, the column it runs in, and how it starts.
 #[derive(Debug, Clone, Copy)]
-struct Connector {
-  first: u64,
-  last: u64,
+pub(super) struct Connector {
+  pub(super) first: u64,
+  pub(super) last: u64,
   /// Counting from 1. Two spans open at the same row never share one — see [`Plan::block`].
-  depth: u64,
-  role: Role,
+  pub(super) depth: u64,
+  pub(super) role: Role,
   /// Drawn as `/` on the source row itself, rather than as an underscore run below it.
-  compact: bool,
+  pub(super) compact: bool,
 }
 
 impl Connector {
   /// What stands in this connector's column on the source row of `line`.
-  const fn on_source_row(&self, line: u64) -> Option<char> {
+  pub(super) const fn on_source_row(&self, line: u64) -> Option<char> {
     if line < self.first || line > self.last {
       None
     } else if line == self.first {
@@ -172,26 +172,26 @@ impl Connector {
   ///
   /// A span's ends are both drawn, so neither can be inside a gap — which is what makes this a
   /// comparison against the two lines that bound it rather than against the lines it hides.
-  const fn spans_the_gap(&self, above: u64, below: u64) -> bool {
+  pub(super) const fn spans_the_gap(&self, above: u64, below: u64) -> bool {
     self.first <= above && self.last >= below
   }
 }
 
 /// One input's whole block: what the `-->` line says, and the geometry every row under it shares.
 #[derive(Debug, Clone)]
-struct Block<'a> {
-  origin: Option<&'a str>,
+pub(super) struct Block<'a> {
+  pub(super) origin: Option<&'a str>,
   /// Where the input's earliest caller position is, in the units the `-->` line reports.
-  line: u64,
-  column: u64,
+  pub(super) line: u64,
+  pub(super) column: u64,
   /// The earliest caller position anywhere in this input, which is where the input sits among the
   /// others.
-  at: usize,
+  pub(super) at: usize,
   /// How many connector columns this input's multi-line spans need, and zero when it has none —
   /// which is what keeps an input without them flush against the gutter.
-  depth: u64,
-  excerpts: core::ops::Range<usize>,
-  connectors: core::ops::Range<usize>,
+  pub(super) depth: u64,
+  pub(super) excerpts: core::ops::Range<usize>,
+  pub(super) connectors: core::ops::Range<usize>,
 }
 
 /// Where a span is drawn, before the lines are gathered into excerpts.
@@ -478,7 +478,7 @@ impl<P: Palette> Terminal<P> {
   }
 
   /// How this renderer measures a line, and what measuring one may spend.
-  fn measure(&self) -> Measure {
+  pub(super) fn measure(&self) -> Measure {
     Measure {
       tab_width: self.tab_width,
       budget: Budget {
@@ -520,67 +520,12 @@ impl<P: Palette> Terminal<P> {
     write_shown(out, diagnostic.message())?;
     out.write_char('\n')?;
 
-    // Every position the diagnostic names, in the order the caller gave them, and then only those
-    // that can be drawn at all: an input the caller did not supply and a position with no span both
-    // draw nothing, on the same terms as `Location::entire`.
-    let mut positions = Vec::with_capacity(1 + diagnostic.labels().len());
-    positions.push((diagnostic.primary(), diagnostic.primary_label(), true));
-    for label in diagnostic.labels() {
-      positions.push((label.location(), Some(label.text()), false));
-    }
-    let mut drawable: Vec<Drawable<'_>> = Vec::with_capacity(positions.len());
-    drawable.extend(positions.into_iter().enumerate().filter_map(
-      |(at, (location, text, primary))| {
-        let input = location.source() as usize;
-        Some(Drawable {
-          at,
-          input,
-          from: *inputs.get(input)?,
-          span: location.span()?,
-          text,
-          primary,
-        })
-      },
-    ));
-
-    // RESOLUTION order, which is not the order any of this is drawn in. Layer 2 walks forwards, so
-    // a set of spans resolved in ascending order over one input costs one pass; resolved in the
-    // caller's order it costs one pass EACH, and on a multi-megabyte line each pass is the whole
-    // line again. The caller's order is carried in `at` and put back below.
-    drawable.sort_unstable_by_key(|position| (position.input, position.span.start(), position.at));
-
-    // One block per input, worked out completely before anything is written: the gutter is as wide
-    // as the widest line number the whole render will show, and the first row does not know what is
-    // coming.
-    //
     // Measured against the same stops and the same budget the rows below are, and by one value
     // rather than two, because the plan decides one thing about a row it does not draw — see
     // [`Measure`].
+    let mut plan = Plan::of(diagnostic, inputs, self.measure());
     let measure = self.measure();
-    let mut plan = Plan::default();
-    let mut run = 0;
-    while run < drawable.len() {
-      let input = drawable[run].input;
-      let mut end = run;
-      while end < drawable.len() && drawable[end].input == input {
-        end += 1;
-      }
-      plan.block(&drawable[run..end], measure);
-      run = end;
-    }
-
-    // By the order each input FIRST appears, not by its index: the primary is pushed first, so
-    // sorting by index would move another file's label above the position the diagnostic is
-    // actually about. Only the blocks are sorted — the LINES inside one are in source order, which
-    // is what a connector running down the margin between two of them is able to mean.
-    plan.blocks.sort_unstable_by_key(|block| block.at);
-
-    let gutter = plan
-      .excerpts
-      .iter()
-      .map(|excerpt| digits(excerpt.line.number()))
-      .max()
-      .unwrap_or(1);
+    let gutter = plan.gutter();
 
     let Plan {
       blocks,
@@ -713,7 +658,11 @@ impl<P: Palette> Terminal<P> {
   /// marker rows already cost. Spelled out rather than given a name, because
   /// `tests/numeric_widths.rs` refuses a type alias outright — an alias is a place a primitive
   /// integer can hide from the surface scan, and it offers no exception.
-  fn margin(&self, out: &mut impl fmt::Write, margin: &[Option<(char, Role)>]) -> fmt::Result {
+  pub(super) fn margin(
+    &self,
+    out: &mut impl fmt::Write,
+    margin: &[Option<(char, Role)>],
+  ) -> fmt::Result {
     if margin.is_empty() {
       return Ok(());
     }
@@ -866,7 +815,11 @@ impl<P: Palette> Terminal<P> {
   }
 
   /// The connector columns left of a corner, without the blank that would follow them.
-  fn margin_upto(&self, out: &mut impl fmt::Write, margin: &[Option<(char, Role)>]) -> fmt::Result {
+  pub(super) fn margin_upto(
+    &self,
+    out: &mut impl fmt::Write,
+    margin: &[Option<(char, Role)>],
+  ) -> fmt::Result {
     for column in margin {
       match column {
         Some((glyph, role)) => self.styled(out, *role, glyph.encode_utf8(&mut [0; 4]))?,
@@ -878,7 +831,7 @@ impl<P: Palette> Terminal<P> {
 
   /// Writes `text` in the style the palette gives `role`, and nothing at all when it asks for
   /// nothing.
-  fn styled(&self, out: &mut impl fmt::Write, role: Role, text: &str) -> fmt::Result {
+  pub(super) fn styled(&self, out: &mut impl fmt::Write, role: Role, text: &str) -> fmt::Result {
     // Fully qualified for the reason `write_shown` is, below: the numeric census cannot see through
     // an imported `fmt::Write`, and this file keeps the trait out of scope rather than exempt.
     self.styled_with(out, role, |shown| fmt::Write::write_str(shown, text))
@@ -907,7 +860,7 @@ impl<P: Palette> Terminal<P> {
   /// trade a caller's recoverable bug for a dead one, using the very writer that just misbehaved,
   /// and buy nothing at all under `panic = "abort"`. The reset is best-effort on the error path,
   /// which is the path a caller can actually reach by design.
-  fn styled_with<W: fmt::Write>(
+  pub(super) fn styled_with<W: fmt::Write>(
     &self,
     out: &mut W,
     role: Role,
@@ -953,14 +906,14 @@ impl<P: Palette> Terminal<P> {
 /// have to measure the line identically, and a caller pairing a tab width with somebody else's
 /// budget is a caret placed against a row nobody drew.
 #[derive(Debug, Clone, Copy)]
-struct Measure {
-  tab_width: u64,
-  budget: Budget,
+pub(super) struct Measure {
+  pub(super) tab_width: u64,
+  pub(super) budget: Budget,
 }
 
 impl Measure {
   /// One line, as this render measures it.
-  const fn cells<'a>(&self, line: Line<'a>) -> LineCells<'a> {
+  pub(super) const fn cells<'a>(&self, line: Line<'a>) -> LineCells<'a> {
     LineCells::new(line, self.tab_width)
   }
 
@@ -999,17 +952,96 @@ const CONTEXT: u64 = 3;
 /// and lines it turns out to have, and the gutter — which is as wide as the widest line number
 /// anywhere in it — can be sized before the first row is written.
 #[derive(Debug, Default)]
-struct Plan<'a> {
-  blocks: Vec<Block<'a>>,
-  excerpts: Vec<Excerpt<'a>>,
-  marks: Vec<Mark<Phrase<'a>>>,
-  connectors: Vec<Connector>,
+pub(super) struct Plan<'a> {
+  pub(super) blocks: Vec<Block<'a>>,
+  pub(super) excerpts: Vec<Excerpt<'a>>,
+  pub(super) marks: Vec<Mark<Phrase<'a>>>,
+  pub(super) connectors: Vec<Connector>,
 }
 
 impl<'a> Plan<'a> {
+  /// Everything one render works out before it writes anything.
+  ///
+  /// Style-independent, and that is the claim this function makes rather than a convenience: which
+  /// lines are drawn, which cells each end of each span occupies, and which column a bracket runs
+  /// down are answers about the SOURCE and the caller's positions. A presentation chooses the
+  /// glyphs and the rows that carry them; it does not get to move a mark. So both styles are built
+  /// on this one plan, and `which_cells_are_marked_is_the_same_in_both_styles` is what holds that
+  /// claim to more than an intention.
+  pub(super) fn of(
+    diagnostic: &Diagnostic<'a>,
+    inputs: &[Input<'a>],
+    measure: Measure,
+  ) -> Plan<'a> {
+    // Every position the diagnostic names, in the order the caller gave them, and then only those
+    // that can be drawn at all: an input the caller did not supply and a position with no span both
+    // draw nothing, on the same terms as `Location::entire`.
+    let mut positions = Vec::with_capacity(1 + diagnostic.labels().len());
+    positions.push((diagnostic.primary(), diagnostic.primary_label(), true));
+    for label in diagnostic.labels() {
+      positions.push((label.location(), Some(label.text()), false));
+    }
+    let mut drawable: Vec<Drawable<'a>> = Vec::with_capacity(positions.len());
+    drawable.extend(positions.into_iter().enumerate().filter_map(
+      |(at, (location, text, primary))| {
+        let input = location.source() as usize;
+        Some(Drawable {
+          at,
+          input,
+          from: *inputs.get(input)?,
+          span: location.span()?,
+          text,
+          primary,
+        })
+      },
+    ));
+
+    // RESOLUTION order, which is not the order any of this is drawn in. Layer 2 walks forwards, so
+    // a set of spans resolved in ascending order over one input costs one pass; resolved in the
+    // caller's order it costs one pass EACH, and on a multi-megabyte line each pass is the whole
+    // line again. The caller's order is carried in `at` and put back below.
+    drawable.sort_unstable_by_key(|position| (position.input, position.span.start(), position.at));
+
+    // One block per input, worked out completely before anything is written: the gutter is as wide
+    // as the widest line number the whole render will show, and the first row does not know what is
+    // coming.
+    let mut plan = Plan::default();
+    let mut run = 0;
+    while run < drawable.len() {
+      let input = drawable[run].input;
+      let mut end = run;
+      while end < drawable.len() && drawable[end].input == input {
+        end += 1;
+      }
+      plan.block(&drawable[run..end], measure);
+      run = end;
+    }
+
+    // By the order each input FIRST appears, not by its index: the primary is pushed first, so
+    // sorting by index would move another file's label above the position the diagnostic is
+    // actually about. Only the blocks are sorted — the LINES inside one are in source order, which
+    // is what a connector running down the margin between two of them is able to mean.
+    plan.blocks.sort_unstable_by_key(|block| block.at);
+    plan
+  }
+
+  /// How many cells the line-number field takes: the widest number this whole render will show.
+  ///
+  /// Asked of the finished plan rather than of the first row, because the first row does not know
+  /// what is coming and a gutter that widened partway down would leave every row above it
+  /// misaligned.
+  pub(super) fn gutter(&self) -> u64 {
+    self
+      .excerpts
+      .iter()
+      .map(|excerpt| digits(excerpt.line.number()))
+      .max()
+      .unwrap_or(1)
+  }
+
   /// Works out one input's block: where each of its spans is drawn, which lines that puts on the
   /// page, and which column each multi-line connector runs down.
-  fn block(&mut self, drawable: &[Drawable<'a>], measure: Measure) {
+  pub(super) fn block(&mut self, drawable: &[Drawable<'a>], measure: Measure) {
     let Some(leading) = drawable.first() else {
       return;
     };
@@ -1326,14 +1358,14 @@ fn close<'a>(walk: &mut Walk<'a>, placement: &mut Placement<'a>) {
 /// One value rather than three parameters, because the three are read together on every row and a
 /// caller pairing them by position is a caller that can pair them wrongly.
 #[derive(Debug, Clone, Copy)]
-struct Frame<'m> {
-  gutter: u64,
-  depth: u64,
-  margin: &'m [Option<(char, Role)>],
+pub(super) struct Frame<'m> {
+  pub(super) gutter: u64,
+  pub(super) depth: u64,
+  pub(super) margin: &'m [Option<(char, Role)>],
 }
 
 impl<'m> Frame<'m> {
-  const fn new(gutter: u64, depth: u64, margin: &'m [Option<(char, Role)>]) -> Self {
+  pub(super) const fn new(gutter: u64, depth: u64, margin: &'m [Option<(char, Role)>]) -> Self {
     Self {
       gutter,
       depth,
@@ -1348,17 +1380,20 @@ impl<'m> Frame<'m> {
 /// anything. `try_from` rather than `as` all the same: if that reasoning were ever wrong the answer
 /// is a column past the end of the margin, which draws nothing, rather than a column near the
 /// gutter, which draws a bar under the wrong span.
-fn slot(column: u64) -> usize {
+pub(super) fn slot(column: u64) -> usize {
   usize::try_from(column).unwrap_or(usize::MAX)
 }
 
 /// The margin slot a connector's column occupies.
-fn column_of(margin: &mut [Option<(char, Role)>], depth: u64) -> Option<&mut Option<(char, Role)>> {
+pub(super) fn column_of(
+  margin: &mut [Option<(char, Role)>],
+  depth: u64,
+) -> Option<&mut Option<(char, Role)>> {
   margin.get_mut(slot(depth).checked_sub(1)?)
 }
 
 /// Refills every connector column of one row.
-fn fill(
+pub(super) fn fill(
   margin: &mut [Option<(char, Role)>],
   connectors: &[Connector],
   mut glyph: impl FnMut(&Connector) -> Option<char>,
@@ -1393,7 +1428,7 @@ fn fill(
 /// C0 control that moves the cursor as surely as ESC sets a colour. So it is shown as `␉` like the
 /// rest, and `control_picture` is what says so, rather than an exception at this call site that the
 /// next writer of caller text would not know to repeat.
-fn write_shown(out: &mut impl fmt::Write, text: impl fmt::Display) -> fmt::Result {
+pub(super) fn write_shown(out: &mut impl fmt::Write, text: impl fmt::Display) -> fmt::Result {
   // Fully qualified rather than `write!` over an imported trait: the numeric census rejects a
   // renamed import outright — `Write as _` is a name it cannot see through — and it offers no
   // allowlist on purpose.
@@ -1405,7 +1440,7 @@ fn write_shown(out: &mut impl fmt::Write, text: impl fmt::Display) -> fmt::Resul
 /// An adapter rather than a function over `&str`, so that a message's own [`fmt::Display`] is
 /// covered: the text a caller's type writes is as caller-supplied as the text it hands over
 /// directly, and a `Display` that emits an escape would otherwise walk straight past this.
-struct Shown<'a, W: fmt::Write>(&'a mut W);
+pub(super) struct Shown<'a, W: fmt::Write>(pub(super) &'a mut W);
 
 impl<W: fmt::Write> fmt::Write for Shown<'_, W> {
   fn write_str(&mut self, text: &str) -> fmt::Result {
@@ -1450,7 +1485,7 @@ pub(super) fn pad(out: &mut impl fmt::Write, count: u64) -> fmt::Result {
 ///
 /// A zero-width span is a caret, and a caret of no cells is not a caret. Shared by
 /// [`Terminal::underline`] and the row that draws it so the two cannot disagree about it.
-fn never_empty(columns: core::ops::Range<u64>) -> core::ops::Range<u64> {
+pub(super) fn never_empty(columns: core::ops::Range<u64>) -> core::ops::Range<u64> {
   if columns.end > columns.start {
     columns
   } else {
@@ -1459,7 +1494,7 @@ fn never_empty(columns: core::ops::Range<u64>) -> core::ops::Range<u64> {
 }
 
 /// How many decimal digits a line number occupies.
-fn digits(mut number: u64) -> u64 {
+pub(super) fn digits(mut number: u64) -> u64 {
   let mut count = 1;
   while number >= 10 {
     number /= 10;
@@ -1468,7 +1503,7 @@ fn digits(mut number: u64) -> u64 {
   count
 }
 
-fn to_anstyle(style: Style) -> anstyle::Style {
+pub(super) fn to_anstyle(style: Style) -> anstyle::Style {
   let mut effects = anstyle::Effects::new();
   if style.bold() {
     effects |= anstyle::Effects::BOLD;
