@@ -2279,7 +2279,7 @@ fn which_cells_are_marked_is_a_function_of_the_span_alone() {
   // The property goldens cannot state, in the form that is now actually true. A golden pins one
   // arrangement of rows; this pins that the arrangement is not what decides WHAT is pointed at —
   // the same span marks the same cells of the same lines however the rows came out, whatever ELSE
-  // the caller sent, and in both styles.
+  // the caller sent, and in every style.
   //
   // "Whatever else the caller sent" is the half that did not hold until this commit. The compact
   // rule took the line's mark count as an input, so adding an unrelated label to a line changed

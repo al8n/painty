@@ -228,8 +228,8 @@ impl Presentation for Ariadne {
   /// The wall and every connector beside it, all broken the same way.
   ///
   /// **The one place this style needs [`Part::Gap`].** A row standing for lines that were left out
-  /// is not a row of the file, and the two styles before this one say so in the wall's column
-  /// alone while their brackets run through it unchanged. Here the break is the whole width of the
+  /// is not a row of the file, and every other style says so in the wall's column alone while its
+  /// brackets run through it unchanged. Here the break is the whole width of the
   /// margin, so a reader following a bracket downwards sees it dashed exactly where the lines it
   /// covers stop being shown.
   fn elision_row(&self, paint: &mut Painter<'_>, frame: Frame<'_>) -> fmt::Result {

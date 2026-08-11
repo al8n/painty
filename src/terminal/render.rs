@@ -865,9 +865,9 @@ impl<'a> Plan<'a> {
   /// Style-independent, and that is the claim this function makes rather than a convenience: which
   /// lines are drawn, which cells each end of each span occupies, and which column a bracket runs
   /// down are answers about the SOURCE and the caller's positions. A presentation chooses the
-  /// glyphs and the rows that carry them; it does not get to move a mark. So both styles are built
-  /// on this one plan, and `which_cells_are_marked_is_the_same_in_both_styles` is what holds that
-  /// claim to more than an intention.
+  /// glyphs and the rows that carry them; it does not get to move a mark. So every style is built
+  /// on this one plan, and `a_style_changes_appearance_and_not_which_source_is_marked` is what
+  /// holds that claim to more than an intention.
   pub(super) fn of(
     diagnostic: &Diagnostic<'a>,
     inputs: &[Input<'a>],
@@ -1092,7 +1092,8 @@ impl<'a> Plan<'a> {
 
     // Whether a multi-line span opens in the MARGIN or with a row of its own. Both facts are
     // worked out here because one of them needs a measurement of a row that does not exist yet;
-    // which of them matters is the style's, and the two styles disagree about both.
+    // which of them matters is the style's, and the styles disagree about both — one reads them,
+    // and three answer without looking.
     //
     // `drawn` is the one a reader would not think to ask for, and it is the one whose absence made
     // this wrong. Suppressing a marker is only a saving if the cell the marker would have gone on
