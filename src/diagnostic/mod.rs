@@ -174,6 +174,21 @@ impl<'a> Diagnostic<'a> {
     self.message
   }
 
+  /// The same diagnostic, saying `message` instead of its own.
+  ///
+  /// Crate-internal, and for one caller: a renderer that has to walk a diagnostic **twice** must
+  /// not ask a caller's [`Display`](fmt::Display) twice, because a stateful one is entitled to
+  /// answer differently. It formats the message once and re-attaches the result here, so the second
+  /// walk reads a `&str` — see
+  /// [`Terminal::render_svg`](crate::terminal::Terminal::render_svg).
+  ///
+  /// Functional update rather than a rebuilt value, deliberately: a field added to this type is
+  /// carried over by the `..` and would be silently dropped by a builder chain.
+  #[cfg(feature = "svg")]
+  pub(crate) fn saying(&self, message: &'a dyn fmt::Display) -> Self {
+    Self { message, ..*self }
+  }
+
   /// Returns the position the diagnostic is about.
   #[inline]
   pub const fn primary(&self) -> Location {

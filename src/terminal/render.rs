@@ -11,7 +11,7 @@ use super::{
   ariadne::Ariadne,
   codespan::Codespan,
   miette::Miette,
-  paint::Painter,
+  paint::{Ansi, Painter, Surface},
   present::{Drawn, Frame, Onset, Part, Presentation, Standing},
   rustc::Rustc,
   width::{Budget, Mark},
@@ -503,6 +503,16 @@ impl<P: Palette> Terminal<P> {
   /// Both halves are pinned in `tests/writer_discipline.rs`: that no small input yields a large
   /// excerpt, and that a large label really does come out whole.
   ///
+  /// # Where "passes through" stops being true, which is one renderer and one input
+  ///
+  /// [`render_svg`](Self::render_svg) **retains** the message instead of printing it — it renders
+  /// twice and may only ask a [`Display`](fmt::Display) once — and the message is the one caller
+  /// input that is not a `&str` the caller had to allocate. So neither reason above survives there:
+  /// it does not stream past a writer that could refuse it, and a caller value of two words can
+  /// synthesize a gigabyte of it. That renderer, and only that renderer, bounds one caller input,
+  /// with [`max_svg_message_bytes`](Self::max_svg_message_bytes) — which refuses rather than
+  /// truncates, so the paragraph above still holds about what a diagnostic may quietly drop.
+  ///
   /// Nor does it bound the **connector margin** a bracketed span adds to the left of every row,
   /// which is one column per multi-line span and so is a function of the label count rather than of
   /// the source. That is the same k a marker row per label already is, and it is bounded for the
@@ -562,6 +572,80 @@ impl<P: Palette> Terminal<P> {
     65_536
   }
 
+  /// How many bytes of the caller's formatted message [`render_svg`](Self::render_svg) will hold.
+  ///
+  /// # Why this renderer bounds caller text when the others deliberately do not
+  ///
+  /// [`max_rendered_width`](Self::max_rendered_width) settles that painty does not bound the
+  /// caller's own words, and gives two reasons: caller text **passes through** — printed once,
+  /// straight to the writer, so a writer unwilling to take it refuses it — and the caller already
+  /// spent the memory it is asking painty to spend, so it can pass something shorter. That holds
+  /// for [`render`](Self::render) and for [`painty::html`](crate::html). Both halves of it are
+  /// false here, and this is the only place they are.
+  ///
+  /// It does not pass through. An SVG states its size in its root element, so the render runs
+  /// twice, and a [`Display`](fmt::Display) may not be asked twice — so the message is formatted
+  /// once and **retained** across both passes. None of it streams, and `out` is offered nothing
+  /// until all of it is in memory.
+  ///
+  /// And it is not the caller's memory. Every other input a [`Diagnostic`] carries is a `&str` the
+  /// caller allocated, so supplying a megabyte cost the caller a megabyte. The message is a
+  /// `&dyn Display`: two words that can synthesize a gigabyte, and the one input in this crate
+  /// whose size is not already bounded by memory the caller has spent.
+  ///
+  /// # What it costs a caller nowhere near it
+  ///
+  /// Nothing. This is a ceiling and not a size: nothing is reserved against this number up front,
+  /// so an ordinary message costs an ordinary message.
+  ///
+  /// It bounds the **allocation** and not only the length. The capture grows geometrically, which
+  /// is what keeps a message accumulated one scalar at a time from costing a quadratic amount of
+  /// copying, and that growth is clamped here — so the capacity behind a message is at most this
+  /// number rather than the next power of two above it.
+  ///
+  /// # What a caller sees, and how it tells this apart from its own writer refusing
+  ///
+  /// `Err(`[`fmt::Error`]`)` — and **`out` was never offered a byte**. The message is captured
+  /// before the root element is written, so a refusal here happens before the writer is consulted
+  /// at all, which is what distinguishes the two: [`fmt::Error`] carries no payload, so an untouched
+  /// `out` beside an `Err` is what says the message was the reason.
+  ///
+  /// It is also predictable before the call, which is the stronger half — a caller knows its own
+  /// message and can read this number.
+  ///
+  /// The refusal is whole rather than partial. Truncating a message to fit would be the failure
+  /// [`max_rendered_width`](Self::max_rendered_width) already refuses for a label: a diagnostic
+  /// that silently drops the part its author wrote lies about what it was asked to report.
+  ///
+  /// # What it does not promise, said plainly
+  ///
+  /// That a message under this number renders. It bounds what the capture will *attempt*; whether
+  /// the machine can serve the attempt is the allocator's answer, and under memory pressure it may
+  /// be no. That arrives as **the same `Err`, with `out` untouched**, rather than as the process
+  /// aborting — which is what an ordinary `String` would have done, in the middle of reporting a
+  /// failure that had already happened. The two causes are deliberately not distinguished; the
+  /// reasoning is on `Captured`, and the short form is that they have the same contract, the same
+  /// remedy and the same discriminator.
+  ///
+  /// # The number
+  ///
+  /// A mebibyte — sixteen times [`max_source_bytes`](Self::max_source_bytes), on the reasoning that
+  /// already makes that one sixteen times the cell ceiling: far enough past any honest value that
+  /// reaching it means something built it. A message that long is a pathological *image* well
+  /// before it is a pathological allocation, since the document spends about twenty-two bytes a
+  /// cell and a mebibyte of prose is a twenty-eight-megabyte SVG. Sizing it to make the output
+  /// reasonable would be answering the wrong question — the writer can refuse the output, which is
+  /// exactly what it cannot do about the capture.
+  ///
+  /// Fixed rather than configurable, like the two budgets above it.
+  #[cfg(feature = "svg")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "svg")))]
+  #[inline]
+  #[must_use]
+  pub const fn max_svg_message_bytes() -> u64 {
+    1_048_576
+  }
+
   /// How this renderer measures a line, and what measuring one may spend.
   pub(super) fn measure(&self) -> Measure {
     Measure {
@@ -596,6 +680,186 @@ impl<P: Palette> Terminal<P> {
     inputs: &[Input<'_>],
     out: &mut impl fmt::Write,
   ) -> fmt::Result {
+    let mut surface = Ansi::new(out);
+    self.draw(diagnostic, inputs, &mut surface, self.capability)
+  }
+
+  /// Writes the same render as [`render`](Self::render), as an SVG image of a terminal.
+  ///
+  /// # It is a surface, not a second renderer
+  ///
+  /// The plan, the style, the elision and the geometry are [`render`](Self::render)'s — the same
+  /// call, writing to a different medium. So every style already has an SVG:
+  /// [`like_rustc`](Self::like_rustc), [`like_miette`](Self::like_miette),
+  /// [`like_ariadne`](Self::like_ariadne) and [`like_codespan`](Self::like_codespan) draw here with
+  /// nothing added, and the invariant that a style changes appearance and never changes which
+  /// source is marked is inherited rather than restated. The document's rows are, character for
+  /// character, the rows [`render`](Self::render) writes.
+  ///
+  /// A **monospace image of a terminal**, deliberately, and not a drawing with real geometry: SVG
+  /// has no layout engine, so placing a label under a span of variable-width text needs that text's
+  /// advance in the font that will draw it — a measurement this crate has no font to take and does
+  /// not intend to acquire. What it does have is the cell each grapheme cluster was assigned, so
+  /// every cluster is drawn at an absolute coordinate computed from that: no font metric enters the
+  /// placement, and a caret is under its glyph in any face at all.
+  ///
+  /// # The stylesheet, and the class per [`Role`]
+  ///
+  /// The document carries a `<style>` element generated from this renderer's palette, so it stands
+  /// alone in a README with no stylesheet attached; the runs carry **classes**, so an outer sheet
+  /// still overrides it. The names are `painty::html`'s, so one list of selectors themes both:
+  ///
+  /// | class | [`Role`] |
+  /// |---|---|
+  /// | `painty-error`, `painty-warning`, `painty-advice` | `Role::Severity` |
+  /// | `painty-code` | `Role::Code` |
+  /// | `painty-gutter` | `Role::Gutter` |
+  /// | `painty-number` | `Role::LineNumber` |
+  /// | `painty-text` | `Role::SourceText` |
+  /// | `painty-primary`, `painty-secondary` | `Role::PrimaryLabel`, `Role::SecondaryLabel` |
+  /// | `painty-help` | `Role::Help` |
+  ///
+  /// A role the palette asks nothing of gets no rule, which is what leaves `painty-text` free for
+  /// an embedder to claim. [`Style::background`](crate::Style::background) is the one property with
+  /// no equivalent — SVG text has no background, and drawing one means a rectangle as wide as a run
+  /// that has not been written yet — so it is dropped. None of painty's built-in themes sets one.
+  ///
+  /// # Two passes over the diagnostic, and exactly one formatting of its message
+  ///
+  /// An SVG declares its size in its root element, and the size is a function of the whole render.
+  /// The alternative is materialising the document to measure it, which would take from a bounded
+  /// writer the ability to refuse something it never saw — the property [`render`](Self::render) is
+  /// built around, and `tests/writer_discipline.rs` holds it to. So the render runs twice and no
+  /// document is ever held.
+  ///
+  /// Running it twice used to mean **formatting the caller's message twice**, and that is not an
+  /// assumption a renderer is entitled to make. A [`Display`](fmt::Display) may be stateful — a
+  /// counter, a cursor over a stream, a value that reports how many times it has been asked — and
+  /// nothing in its contract says two formattings agree. One that did not was silently given a
+  /// viewport measured against text the document does not contain.
+  ///
+  /// So the message is formatted **once**, into a string, and both passes read that string. It is
+  /// the only input a render has that is not already a `&str`: the code, the labels, the origins,
+  /// the help and every byte of source text are borrowed data that reads the same however often it
+  /// is walked. What it costs is that string — the same bytes [`render`](Self::render) would have
+  /// handed the writer, held instead of streamed — and what it buys is that the two passes are two
+  /// walks over one value rather than two invocations of a caller's code.
+  ///
+  /// # What the first pass spends before the writer is asked anything, and what bounds it
+  ///
+  /// Written down rather than left to be found. The measuring pass builds the render's plan and
+  /// walks every drawn row before `out` is offered its first byte, so a writer that refuses after a
+  /// fixed count cannot stop it. What that costs is bounded by data the caller already holds — a
+  /// plan is linear in the labels, and a row is bounded by
+  /// [`max_source_bytes`](Self::max_source_bytes) — with one exception, which is the message.
+  ///
+  /// Formatting it once bounds how often a `Display` is asked. It does not bound what the `Display`
+  /// answers, and holding it between the passes turns the answer into retained memory: a
+  /// `&dyn Display` is two words that may synthesize a gigabyte, so a caller's value smaller than
+  /// this sentence could make the render allocate a gigabyte and spend a gigabyte of work before
+  /// `out` was offered anything to refuse. That is not a hypothetical shape for a crate whose whole
+  /// job is reporting a failure that has already happened.
+  ///
+  /// So the capture is bounded: past
+  /// [`max_svg_message_bytes`](Self::max_svg_message_bytes) it refuses, **before** the bytes are
+  /// appended rather than after, and the render returns [`fmt::Error`] with `out` never offered a
+  /// byte. With that in place every input to the first pass is bounded by memory the caller has
+  /// already spent, which is what the paragraph above claims and what a synthesizing `Display` was
+  /// the one counterexample to.
+  ///
+  /// # The capability is not consulted
+  ///
+  /// [`ColorCapability`] decides which escape sequences a *terminal* may be sent. This medium has
+  /// none, so the palette is read at full fidelity and `Terminal::plain()` produces a coloured
+  /// image. Asking for no colour is [`Theme::monochrome`](crate::Theme::monochrome), which is the
+  /// same answer [`Style::without_color`](crate::Style::without_color) already gives.
+  ///
+  /// ```
+  /// use painty::{Diagnostic, Location, Severity, Source, Span, terminal::{Input, Terminal}};
+  ///
+  /// let text = "type Widget {\n  width: Int\n}\n";
+  /// let diagnostic = Diagnostic::new(
+  ///   "mylang::schema::duplicate-field",
+  ///   Severity::Error,
+  ///   &"`width` is defined twice",
+  ///   Location::new(0, Span::new(16, 21)),
+  /// )
+  /// .with_primary_label("redefined here");
+  ///
+  /// let mut out = String::new();
+  /// Terminal::plain()
+  ///   .render_svg(&diagnostic, &[Input::new(Source::new(text))], &mut out)
+  ///   .unwrap();
+  ///
+  /// assert!(out.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+  /// assert!(out.ends_with("</svg>\n"));
+  ///
+  /// // The five cells `width` occupies, each carrying its own coordinate — which is what puts
+  /// // them under the five cells of the word above whatever face draws the image.
+  /// assert!(out.contains(r#"<tspan class="painty-primary">"#));
+  /// assert_eq!(out.matches(r#">^</tspan>"#).count(), 5);
+  /// ```
+  #[cfg(feature = "svg")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "svg")))]
+  pub fn render_svg(
+    &self,
+    diagnostic: &Diagnostic<'_>,
+    inputs: &[Input<'_>],
+    out: &mut impl fmt::Write,
+  ) -> fmt::Result {
+    use super::svg::{Captured, Document, Extent, Verbatim, close_document, open_document};
+
+    // Once, before either pass, and the value the passes see is a `&str`. Formatting it inside the
+    // measuring pass would be the same defect one layer down: what the second pass then renders is
+    // a second answer from the same caller.
+    //
+    // Bounded, because holding it is what makes it a hazard — see
+    // [`max_svg_message_bytes`](Self::max_svg_message_bytes). Saturating when the ceiling does not
+    // fit the target's pointer, which is what the byte budget beside it already does: a ceiling
+    // past the address space is not a weaker bound than `usize::MAX`, because no `String` reaches
+    // `usize::MAX` without the allocator refusing first.
+    let ceiling = usize::try_from(Self::max_svg_message_bytes()).unwrap_or(usize::MAX);
+    let mut captured = Captured::new(ceiling);
+    fmt::Write::write_fmt(&mut captured, format_args!("{}", diagnostic.message()))?;
+    // And asked again, because the `?` above reports what the caller's `Display` returned rather
+    // than what this capture did — see [`Captured`].
+    let message = captured.whole()?;
+    let verbatim = Verbatim(&message);
+    let diagnostic = &diagnostic.saying(&verbatim);
+
+    let mut extent = Extent::new();
+    self.draw(diagnostic, inputs, &mut extent, ColorCapability::TrueColor)?;
+    let (cells, rows) = extent.finish();
+
+    open_document(out, cells, rows, &self.palette)?;
+    let mut document = Document::new(out);
+    self.draw(
+      diagnostic,
+      inputs,
+      &mut document,
+      ColorCapability::TrueColor,
+    )?;
+    document.finish()?;
+    close_document(out)
+  }
+
+  /// One render, onto whatever surface it is given.
+  ///
+  /// Everything above the surface — the plan, the style, the gutter, the order of the hooks — is
+  /// the same call whatever the medium, which is the whole of what makes a second output a
+  /// surface rather than a second renderer.
+  ///
+  /// The capability is a parameter rather than read off `self` because it is a fact about the
+  /// DEVICE and not about the render: it decides which escapes may be emitted, and a medium with
+  /// no escapes is not the one it was answered for. See
+  /// [`render_svg`](Self::render_svg).
+  pub(super) fn draw(
+    &self,
+    diagnostic: &Diagnostic<'_>,
+    inputs: &[Input<'_>],
+    surface: &mut dyn Surface,
+    capability: ColorCapability,
+  ) -> fmt::Result {
     // Measured against the same stops and the same budget the rows below are, and by one value
     // rather than two, because the plan decides one thing about a row it does not draw — see
     // [`Measure`].
@@ -603,7 +867,7 @@ impl<P: Palette> Terminal<P> {
     let style = self.presentation;
     let mut plan = Plan::of(diagnostic, inputs, measure, style);
     let gutter = plan.gutter();
-    let mut paint = Painter::new(out, &self.palette, self.capability);
+    let mut paint = Painter::new(surface, &self.palette, capability);
 
     style.header(&mut paint, diagnostic)?;
 

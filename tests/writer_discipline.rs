@@ -62,8 +62,9 @@
 //! What makes that decisive rather than philosophical is the size of the inputs. [`cases`] is sized
 //! against `Terminal::max_source_bytes`, which is 65,536, so one render walks and segments tens of
 //! thousands of bytes — and five of the tests below render the whole table, between six and roughly
-//! two thousand times each. Three more build their own large inputs instead: two twenty-kilobyte
-//! origins, a twenty-thousand-byte line, and four caller strings of a hundred kilobytes apiece.
+//! two thousand times each. Four more build their own large inputs instead: two twenty-kilobyte
+//! origins, a twenty-thousand-byte line, four caller strings of a hundred kilobytes apiece, and a
+//! four-mebibyte fragment written until a mebibyte of it has been kept.
 //!
 //! CI has measured exactly one of them. Six of the eight cells in Miri run 31316096247 reached this
 //! file at all — the other two had already ICEd in `tests/numeric_widths.rs` — and not one of the
@@ -115,14 +116,55 @@ struct Counting;
 
 thread_local! {
   static ALLOCATED: core::cell::Cell<usize> = const { core::cell::Cell::new(0) };
+  /// Refuse any single allocation strictly larger than this, on this thread only.
+  ///
+  /// `usize::MAX` is off, which is why it is a ceiling rather than a flag: the two tests that use
+  /// it want different thresholds, one to make an allocation fail and one to assert that none is
+  /// attempted above a published number.
+  ///
+  /// # Why a real allocator and not a wrapper type
+  ///
+  /// The fault being planted is "the allocator said no", and everything downstream of that —
+  /// whether `try_reserve_exact` reports it, whether the sticky flag survives it, whether the
+  /// process is still alive afterwards — is a property of the real allocation path. A sink that
+  /// pretended to fail would exercise the reporting and not the path, and the path is the finding.
+  ///
+  /// Thread-local, because the harness runs tests in parallel and a process-wide switch would fail
+  /// allocations belonging to whatever else was running.
+  static DENY_ABOVE: core::cell::Cell<usize> = const { core::cell::Cell::new(usize::MAX) };
 }
 
 fn allocated() -> usize {
   ALLOCATED.with(core::cell::Cell::get)
 }
 
+/// Runs `body` with allocations over `bytes` refused on this thread.
+///
+/// The switch is turned off before `body`'s value is inspected, so an assertion that fails inside
+/// the caller can still allocate its own panic message.
+///
+/// Gated with its callers: both are `svg` tests, and CI builds a feature set that omits `svg`
+/// (`--no-default-features --features default,html,model,terminal,tokora`), where an ungated
+/// definition is a `never used` error under `-D warnings`. An `--all-features` run cannot see that.
+#[cfg(feature = "svg")]
+fn denying_above<T>(bytes: usize, body: impl FnOnce() -> T) -> T {
+  DENY_ABOVE.with(|deny| deny.set(bytes));
+  let outcome = body();
+  DENY_ABOVE.with(|deny| deny.set(usize::MAX));
+  outcome
+}
+
+fn denied(size: usize) -> bool {
+  DENY_ABOVE
+    .try_with(|deny| size > deny.get())
+    .unwrap_or(false)
+}
+
 unsafe impl core::alloc::GlobalAlloc for Counting {
   unsafe fn alloc(&self, layout: core::alloc::Layout) -> *mut u8 {
+    if denied(layout.size()) {
+      return core::ptr::null_mut();
+    }
     let _ = ALLOCATED.try_with(|bytes| bytes.set(bytes.get() + layout.size()));
     unsafe { core::alloc::GlobalAlloc::alloc(&std::alloc::System, layout) }
   }
@@ -137,6 +179,11 @@ unsafe impl core::alloc::GlobalAlloc for Counting {
     layout: core::alloc::Layout,
     new_size: usize,
   ) -> *mut u8 {
+    // Null leaves the original block untouched, which is what `realloc` is specified to do on
+    // failure and what `RawVec` relies on to keep the string it could not grow.
+    if denied(new_size) {
+      return core::ptr::null_mut();
+    }
     let _ = ALLOCATED.try_with(|bytes| bytes.set(bytes.get() + new_size));
     unsafe { core::alloc::GlobalAlloc::realloc(&std::alloc::System, pointer, layout, new_size) }
   }
@@ -568,6 +615,259 @@ fn the_renderer_allocates_nothing_proportional_to_a_row() {
     spent_on[1], spent_on[2],
     "{} cells and {} cells cost {} and {} bytes, so the renderer still allocates with the row",
     all[1].cells, all[2].cells, spent_on[1], spent_on[2]
+  );
+}
+
+/// A `Display` that synthesizes `target` bytes by writing `chunk` until it has, and stops when it
+/// is refused.
+///
+/// # It BORROWS its fragment, and that is the whole reason this can be measured
+///
+/// The hazard being measured is that a caller value of a few words makes painty allocate without
+/// bound, so the instrument has to charge painty for painty's bytes and nobody else's. A `Display`
+/// that builds its own fragment allocates inside the measurement window, and in the oversized case
+/// below the fragment IS the whole message — which made the first shape of this test charge the
+/// renderer four mebibytes the *caller* had spent and read a correct capture as a broken one.
+///
+/// So the fragment is built once by the test, outside every window, and this writes it. What the
+/// counter then sees between the two reads is the renderer's, and nothing here is on the invoice.
+#[cfg(feature = "svg")]
+struct Synthesizing<'a> {
+  chunk: &'a str,
+  target: usize,
+}
+
+#[cfg(feature = "svg")]
+impl core::fmt::Display for Synthesizing<'_> {
+  fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut written = 0;
+    while written < self.target {
+      out.write_str(self.chunk)?;
+      written += self.chunk.len();
+    }
+    Ok(())
+  }
+}
+
+#[cfg(feature = "svg")]
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "three renders whose inputs are megabytes, measuring allocation — which under an \
+            interpreter is the interpreter's and not the renderer's. The capture's boundary \
+            arithmetic stays interpreted by \
+            `the_capture_admits_exactly_the_ceiling_and_reports_what_it_refused`, in \
+            `src/terminal/svg/mod.rs`"
+)]
+fn the_svg_capture_refuses_a_message_before_it_allocates_it() {
+  // Dimension 2, for the one input in this crate that is HELD rather than streamed. `render_svg`
+  // renders twice and may only ask a `Display` once, so it formats the message into a string that
+  // outlives the measuring pass — and a `&dyn Display` is two words that can answer with a
+  // gigabyte. Before the ceiling, a caller value smaller than this comment made the renderer
+  // allocate and spend without limit, and it did so before `out` was offered the first byte it
+  // would have refused.
+  //
+  // Measured rather than read: a refusal after the bytes have been appended returns the same error
+  // to the same caller as a refusal before, so there is no output to assert on. This is the only
+  // instrument that separates them.
+  let ceiling = usize::try_from(Terminal::<Theme>::max_svg_message_bytes()).unwrap_or(usize::MAX);
+
+  // Every fragment any case below writes, allocated once and here — see [`Synthesizing`] for why
+  // that placement is the instrument rather than a tidiness. Sliced rather than re-allocated, so
+  // the small fragment costs nothing either.
+  let synthesized = "x".repeat(ceiling * 4);
+  let oversized = synthesized.as_str();
+  let drip = &synthesized[..4096];
+
+  fn spend(message: &Synthesizing<'_>) -> (core::fmt::Result, usize) {
+    let diagnostic = Diagnostic::new(
+      "mylang::synthesized",
+      Severity::Error,
+      message,
+      Location::new(0, Span::new(0, 3)),
+    )
+    .with_primary_label("here");
+    let inputs = [Input::new(Source::new("let x = 1;\n"))];
+    // Accepts everything and holds nothing, so the refusal below is the ceiling's and the bytes
+    // counted are the renderer's.
+    let mut out = Accepting::default();
+
+    let before = allocated();
+    let outcome = Terminal::plain().render_svg(&diagnostic, &inputs, &mut out);
+    (outcome, allocated() - before)
+  }
+
+  // ONE fragment, four times the ceiling, and this is the case that separates the two orders.
+  // Refused before the append it costs nothing whatever; appended and then refused it costs four
+  // mebibytes, and no later refusal gives them back. The drip below cannot ask this, because a
+  // fragment that crosses the ceiling by 4096 bytes is over it by 4096 bytes either way.
+  //
+  // It also asks a second thing, and it is worth naming because a passing run is the only evidence
+  // for it: that `write_fmt` hands the sink the caller's fragment rather than materialising the
+  // `Arguments` into a string of its own first. If it did, the bytes would be on this invoice.
+  let (outcome, spent) = spend(&Synthesizing {
+    chunk: oversized,
+    target: oversized.len(),
+  });
+  //
+  // Measured: zero bytes as it stands, and 4,194,304 with the append moved in front of the test.
+  // The threshold is the ceiling rather than either, so it is a statement about the order and not
+  // a transcript of one allocator's arithmetic.
+  assert!(
+    outcome.is_err(),
+    "a message four times the ceiling rendered"
+  );
+  assert!(
+    spent < ceiling,
+    "one write of {} bytes cost {spent}, so the capture appended it before refusing it",
+    oversized.len()
+  );
+
+  // And the drip, which is the shape a `Display` would actually take. Held bytes stop at the
+  // ceiling; what is counted is above that only because a `String` reaching a size reallocates on
+  // the way and this counter charges every one of those in full — measured at 2,093,056, which is
+  // the doubling sum for one mebibyte held. Without the ceiling it is that arithmetic over
+  // sixty-four mebibytes instead, so the threshold sits at twice what was measured and a
+  // thirtieth of what the defect costs.
+  let (outcome, spent) = spend(&Synthesizing {
+    chunk: drip,
+    target: ceiling * 64,
+  });
+  assert!(
+    outcome.is_err(),
+    "a message sixty-four times the ceiling rendered"
+  );
+  assert!(
+    spent < ceiling * 4,
+    "sixty-four mebibytes offered a fragment at a time cost {spent}, which is not a bound"
+  );
+
+  // Not vacuous in the other direction, and this is the half that says the ceiling is a ceiling
+  // rather than a refusal: a message just under it renders, and costs about what it is.
+  let (outcome, spent) = spend(&Synthesizing {
+    chunk: drip,
+    target: ceiling - 4096,
+  });
+  assert!(
+    outcome.is_ok(),
+    "a message under the ceiling was refused anyway"
+  );
+  assert!(
+    spent >= ceiling - 4096,
+    "a message of {} bytes was rendered having allocated {spent}, so it was never held",
+    ceiling - 4096
+  );
+}
+
+/// Renders `message` and returns what came back and what the writer was handed.
+///
+/// The writer accepts everything and holds nothing, so an empty result beside an `Err` is the
+/// renderer saying it stopped before it wrote — which is the discriminator `max_svg_message_bytes`
+/// publishes for telling its refusal from the caller's own writer's.
+#[cfg(feature = "svg")]
+fn render_message(message: &Synthesizing<'_>) -> (core::fmt::Result, usize) {
+  let diagnostic = Diagnostic::new(
+    "mylang::synthesized",
+    Severity::Error,
+    message,
+    Location::new(0, Span::new(0, 3)),
+  )
+  .with_primary_label("here");
+  let inputs = [Input::new(Source::new("let x = 1;\n"))];
+  let mut out = Accepting::default();
+  let outcome = Terminal::plain().render_svg(&diagnostic, &inputs, &mut out);
+  (outcome, out.taken)
+}
+
+#[cfg(feature = "svg")]
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "renders a message of half a mebibyte, and the fault it plants is a refusal from the \
+            real allocator — which is the path being asserted and not one an interpreter models"
+)]
+fn a_capture_that_cannot_allocate_refuses_instead_of_aborting() {
+  // The fault: `String::push_str` grows through the INFALLIBLE path, so an allocation the machine
+  // cannot serve aborts the process. Everywhere else that is merely bad; here it happens while
+  // something is already reporting a failure, so it loses the diagnostic being written as well as
+  // the one that caused it — the crate's own premise, not a corner of it.
+  //
+  // Planted for real rather than simulated. `Counting` returns null above a threshold, so this is
+  // the allocator refusing on the actual `try_reserve_exact` path; nothing here stands in for it.
+  let ceiling = usize::try_from(Terminal::<Theme>::max_svg_message_bytes()).unwrap_or(usize::MAX);
+  let fragment = "x".repeat(4096);
+
+  // Under the ceiling, so the length guard cannot be what refuses this — the allocator has to be.
+  // The capture doubles, so it asks for 262,144 and then 524,288; the second is over the threshold
+  // and is the one refused. Nothing else in a render of an eleven-byte source is that large.
+  let target = ceiling / 2;
+  let (outcome, written) = denying_above(300_000, || {
+    render_message(&Synthesizing {
+      chunk: &fragment,
+      target,
+    })
+  });
+
+  // Reaching this line at all is half the assertion: an abort would have taken the process with it,
+  // and there would be no failing test to read.
+  assert!(
+    outcome.is_err(),
+    "an allocation the machine refused was reported as a rendered document"
+  );
+  assert_eq!(
+    written, 0,
+    "the writer was handed {written} bytes of a render that could not allocate its message"
+  );
+
+  // And the switch really was what did it, rather than the message being over some other bound: the
+  // same render with the allocator willing succeeds.
+  let (outcome, written) = render_message(&Synthesizing {
+    chunk: &fragment,
+    target,
+  });
+  assert!(
+    outcome.is_ok(),
+    "half the ceiling was refused with the allocator willing, so the test above proved nothing"
+  );
+  assert!(written > target, "the message did not reach the document");
+}
+
+#[cfg(feature = "svg")]
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "renders a mebibyte-long message to assert what was reserved for it, which is a \
+            resource dimension rather than an execution one"
+)]
+fn the_capture_never_reserves_more_than_the_ceiling_it_publishes() {
+  // The other half of the same finding, and it is a separate claim: the ceiling is denominated in
+  // the message's LENGTH, and amortized growth is free to hold more than it. Unclamped doubling
+  // does exactly that — fragments of 3000 bytes reach a capacity of 2,097,152 for a mebibyte of
+  // text — so the published number would be true of the length and false of the memory.
+  //
+  // Asserted through the allocator rather than by reading `capacity`, which is what makes it a
+  // claim about the renderer instead of a claim about a field: nothing above the ceiling may even
+  // be ASKED FOR, so a growth step that overshoots is refused and the render fails.
+  let ceiling = usize::try_from(Terminal::<Theme>::max_svg_message_bytes()).unwrap_or(usize::MAX);
+
+  // Not a power of two, deliberately. Fragments that divide the ceiling make the doubling land on
+  // it exactly, so the clamp is never reached and a test built on them is green either way.
+  let fragment = "x".repeat(3000);
+  let target = ceiling - 3000;
+
+  let (outcome, written) = denying_above(ceiling, || {
+    render_message(&Synthesizing {
+      chunk: &fragment,
+      target,
+    })
+  });
+  assert!(
+    outcome.is_ok(),
+    "a message that fits the ceiling could not be rendered without reserving more than the ceiling"
+  );
+  assert!(
+    written > target,
+    "the message did not reach the document, so nothing above was exercised"
   );
 }
 

@@ -10,6 +10,8 @@ mod paint;
 mod present;
 mod render;
 mod rustc;
+#[cfg(feature = "svg")]
+mod svg;
 mod width;
 
 pub use detect::{CapturedEnvironment, ColorCapability, ColorChoice, Environment};

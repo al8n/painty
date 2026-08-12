@@ -165,7 +165,7 @@ jobs:
       - name: The declared feature set is the one the design fixed
         run: |
           set -euo pipefail
-          WANT='{"default": [], "html": [], "model": [], "std": [], "terminal": ["dep:anstyle", "dep:unicode-segmentation", "dep:unicode-width", "std"], "tokora": ["dep:tokora"]}'
+          WANT='{"default": [], "html": [], "model": [], "std": [], "svg": ["terminal"], "terminal": ["dep:anstyle", "dep:unicode-segmentation", "dep:unicode-width", "std"], "tokora": ["dep:tokora"]}'
           GOT="$(cargo metadata --no-deps --format-version 1 \
             | python3 -c 'import json,sys; p=[x for x in json.load(sys.stdin)["packages"] if x["name"]=="painty"][0]; print(json.dumps({k: sorted(v) for k, v in p["features"].items()}, sort_keys=True))')"
           echo "declared: $GOT"
@@ -389,6 +389,11 @@ jobs:
   # list complete — it pins the feature set, so a new std-free feature cannot appear without
   # reddening there first and sending whoever added it back to this job.
   #
+  # `svg` is absent for the same reason `terminal` is, and it is worth writing down rather than
+  # leaving to be inferred from the list: it IMPLIES `terminal`, so it implies `std` too and could
+  # only ever be red here. The `manifest` job is what makes that a decision rather than an
+  # omission — the feature's implication is pinned there.
+  #
   # `tokora` IS a std-free feature point and is here for that reason, which is not an accident of
   # the dependency: painty takes it with `default-features = false`, so tokora's own `std` stays
   # off and its diagnostic contract — `core` plus a span type — is all that has to reach a
@@ -524,7 +529,7 @@ jobs:
         run: |
           set -euo pipefail
           failed=0
-          for features in '' 'std' 'html' 'model' 'terminal' 'std,html,model' 'std,terminal,html,model'; do
+          for features in '' 'std' 'html' 'model' 'terminal' 'svg' 'std,html,model' 'std,terminal,svg,html,model'; do
             tree="$(cargo tree -p painty --no-default-features --features "$features" --edges normal --prefix none)"
             printf '%s\n' "--- features: '${features:-<none>}'" "$tree"
             if printf '%s' "$tree" | grep -q '^tokora '; then

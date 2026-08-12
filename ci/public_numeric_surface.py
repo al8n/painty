@@ -64,6 +64,7 @@ EXPECTED = {
     "LineCells::width": ["u64"],
     "Terminal::max_rendered_width": ["u64"],
     "Terminal::max_source_bytes": ["u64"],
+    "Terminal::max_svg_message_bytes": ["u64"],
     "Terminal::underline": ["u64"],
     "Terminal::with_tab_width": ["u64"],
     "Line::char_count": ["u64"],

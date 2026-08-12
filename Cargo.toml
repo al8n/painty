@@ -24,6 +24,9 @@ std = []
 terminal = ["std", "dep:unicode-width", "dep:unicode-segmentation", "dep:anstyle"]
 html = []
 model = []
+# A second surface under the terminal renderer rather than a renderer of its own, which is why it
+# implies `terminal` and brings no dependency — see `Terminal::render_svg`.
+svg = ["terminal"]
 tokora = ["dep:tokora"]
 
 [dependencies]
@@ -47,6 +50,17 @@ required-features = ["html"]
 [[test]]
 name = "html_and_terminal"
 required-features = ["html", "terminal"]
+
+[[test]]
+name = "svg_gallery"
+required-features = ["svg"]
+
+# The example writes the goldens the test above compares against, so the two carry the same
+# requirement. Without it, a feature set that omits `svg` still builds the example and fails on a
+# `render_svg` that is not there — which is how CI first went red on this branch.
+[[example]]
+name = "svg_gallery"
+required-features = ["svg"]
 
 [package.metadata.docs.rs]
 all-features = true

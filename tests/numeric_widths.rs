@@ -140,12 +140,12 @@ use syn::{
 /// [`the_file_list_is_the_whole_crate`] walks `src/` and checks it. `src/tokora.rs` is here whether
 /// or not its feature is on: `include_str!` reads the disk, not the build, which is what keeps the
 /// adapter under the same censuses as everything else.
-const CRATE: [(&str, &str); 26] = [
+const CRATE: [(&str, &str); 27] = [
   ("src/lib.rs", include_str!("../src/lib.rs")),
   ("src/elide/mod.rs", include_str!("../src/elide/mod.rs")),
   ("src/input.rs", include_str!("../src/input.rs")),
   ("src/html/mod.rs", include_str!("../src/html/mod.rs")),
-  ("src/html/escape.rs", include_str!("../src/html/escape.rs")),
+  ("src/escape/mod.rs", include_str!("../src/escape/mod.rs")),
   (
     "src/diagnostic/mod.rs",
     include_str!("../src/diagnostic/mod.rs"),
@@ -197,6 +197,10 @@ const CRATE: [(&str, &str); 26] = [
   (
     "src/terminal/present.rs",
     include_str!("../src/terminal/present.rs"),
+  ),
+  (
+    "src/terminal/svg/mod.rs",
+    include_str!("../src/terminal/svg/mod.rs"),
   ),
   (
     "src/terminal/render.rs",
@@ -834,6 +838,13 @@ fn pin<'a>(_witness: &'a ()) {
     // painty's own rendered geometry rather than an index into anything, and it is the number the
     // resource bound rests on.
     let _: fn() -> Ordinal = Terminal::<Theme>::max_source_bytes;
+
+    // The third of the renderer's resource ceilings, and rule 1 for the reason the second one is:
+    // a budget the renderer spends, denominated in bytes, rather than an index into anything. It
+    // is also the argument for not splitting the family across two widths — the three are read
+    // against one another, and a `usize` among two `u64`s is the seam the pin above warns about.
+    #[cfg(feature = "svg")]
+    let _: fn() -> Ordinal = Terminal::<Theme>::max_svg_message_bytes;
   }
 
   // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and

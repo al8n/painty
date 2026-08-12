@@ -239,6 +239,7 @@ crate is `no_std` and dependency-free until a caller asks for something.
 | `std`       | —       | —                          | anything needing the standard library               |
 | `terminal`  | `std`   | `unicode-width`, `unicode-segmentation`, `anstyle` | the terminal renderer: cell arithmetic, colour detection, ANSI |
 | `html`      | —       | —                          | the HTML renderer: escaping and CSS classes, still `no_std` and allocation-free |
+| `svg`       | `terminal` | —                       | `Terminal::render_svg`: the same render, as an SVG image of a terminal |
 | `model`     | —       | —                          | a stable C-ABI export of the resolved model         |
 | `tokora`    | —       | `tokora`                   | an adapter from `tokora::diagnostic::Diagnose`      |
 
@@ -266,6 +267,20 @@ comparisons in the label count, against the terminal's `O(k log k)`, measured at
 thousand labels. What the two renderers do share is layer 2 and the elision rule, which is one
 function both call rather than one rule each keeps — the first thing two copies of it did was
 disagree about which lines a reader is shown.
+
+`svg` is the odd one, and its shape is the finding rather than a convenience: it is **not a third
+renderer**. Every byte of a terminal render goes through one painter, and every byte that means
+anything goes through a hook that knows its `Role` — so an SVG is that painter writing to a second
+surface, and the plan, the style, the elision and the geometry are the same call. Every style
+therefore has an SVG at no cost, the document's rows are character for character the rows the
+terminal writes, and the invariant that a style changes appearance and never changes which source is
+marked is inherited rather than restated. It is an image of a *terminal*: a monospace grid, because
+SVG has no layout engine and placing a label under variable-width text needs that text's advance in
+a font this crate has no business owning. What the crate does have is the cell each grapheme cluster
+was assigned, so every cluster is drawn at an absolute coordinate computed from that — no font
+metric enters the placement, and a caret is under its glyph in any face at all. Roles become CSS
+classes with `painty::html`'s own names, and the document carries a `<style>` element generated from
+the palette so it stands alone in a README while an outer sheet still overrides it.
 
 ### The placement model
 
