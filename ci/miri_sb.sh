@@ -35,6 +35,12 @@ rustup toolchain install nightly --component miri
 rustup override set nightly
 cargo miri setup --target "$TARGET"
 
+# The Tree Borrows twin carries the same guard and the reason for it.
+if ! cargo nextest --version >/dev/null 2>&1; then
+  echo "Error: cargo-nextest is not installed (cargo install --locked cargo-nextest)" >&2
+  exit 1
+fi
+
 export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbolic-alignment-check"
 
 # `-p painty` names the package, and `--lib --tests` keeps bench targets out of the interpreter;
@@ -45,4 +51,10 @@ export MIRIFLAGS="-Zmiri-strict-provenance -Zmiri-disable-isolation -Zmiri-symbo
 # Miri's address space, and `tests/writer_discipline.rs`, whose case table is sized for a
 # 65,536-byte budget rather than for an interpreter. Both opt out from inside the file, so this
 # script is not what excludes them and editing this line will not bring them back.
-cargo miri test -p painty --lib --tests --all-features --target "$TARGET"
+#
+# `nextest run` AND NOT `test` for the reason that note gives at length: one interpreter per test,
+# because a single interpreter's address watermark only climbs and a 32-bit target stops being able
+# to validate a `MaybeDangling` reference once it passes 2 GiB. Both aliasing models reach it — this
+# leg failed at `terminal::tests::the_lines_of_one_input_are_drawn_in_source_order` exactly as the
+# Tree Borrows leg did, which is itself the evidence that the finding is not about aliasing.
+cargo miri nextest run -p painty --lib --tests --all-features --target "$TARGET"

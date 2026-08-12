@@ -136,6 +136,15 @@ jobs:
               sudo apt-get install -y gcc-powerpc64-linux-gnu
               ;;
           esac
+      # `ci/miri_tb.sh` runs the suite through `cargo miri nextest run` rather than
+      # `cargo miri test`, so that each test gets its own interpreter and its own address space;
+      # the script's own note carries the measurement and the reason. `taiki-e/install-action`
+      # fetches a prebuilt binary, which is what keeps this step seconds rather than the minutes
+      # `cargo install cargo-nextest` costs on every cell of an eight-cell matrix.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Miri (tree borrows)
         run: bash ci/miri_tb.sh ${{ matrix.target }}
 
@@ -175,5 +184,11 @@ jobs:
               sudo apt-get install -y gcc-powerpc64-linux-gnu
               ;;
           esac
+      # Same install as `miri-tb` above, and for the same reason: `ci/miri_sb.sh` is that script's
+      # sibling and runs the suite the same way.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
       - name: Miri (stacked borrows)
         run: bash ci/miri_sb.sh ${{ matrix.target }}
