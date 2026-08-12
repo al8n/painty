@@ -271,13 +271,6 @@ const AWKWARD: [&str; 8] = [
 ];
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "about two thousand renders, and the failure it is looking for is a panic on a slice at \
-            a character boundary rather than undefined behaviour — so the interpreter is not the \
-            instrument for it, and it costs four minutes a cell. Every path it walks is walked by \
-            the twelve tests above, which Miri does interpret."
-)]
 fn every_span_over_every_awkward_source_renders_without_panicking() {
   // Every offset pair, not a chosen few: the slicing in `row` is the one place a byte offset is
   // turned into three `&str` slices, and an offset that is not a character boundary panics rather

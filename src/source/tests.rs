@@ -506,12 +506,6 @@ fn alloc(left: &str, right: &str) -> String {
 /// of every awkward source rather than by the argument that they ought to agree.
 #[cfg(feature = "html")]
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "a few hundred thousand resolutions over a corpus of tiny sources, checking an \
-            agreement between two pure predicates — the interpreter answers a different question \
-            and every path here is walked by the tests around it"
-)]
 fn every_line_a_region_draws_is_a_line_it_says_it_draws_on() {
   for text in awkward() {
     let source = Source::new(&text);

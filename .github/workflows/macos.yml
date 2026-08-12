@@ -26,7 +26,7 @@ name: macOS
 # line endings.
 
 # `push`/`pull_request` triggers and `paths-ignore` are deliberately identical to
-# `.github/workflows/ci.yml` and `.github/workflows/miri.yml`; read the comment there for why the
+# `.github/workflows/ci.yml`; read the comment there for why the
 # ignore list carries no blanket `**.md`. `schedule` is the one deliberate difference — see below.
 # `ci/check_workflow_triggers.sh` enforces that the `on.push.branches` lists stay identical across
 # every workflow that has one, because that is the part where a divergence is silent.
@@ -54,8 +54,8 @@ on:
   # dependency shows up between merges, for ubuntu and windows time.
 
 concurrency:
-  # Same expression as `CI`'s and `Miri`'s, and `${{ github.workflow }}` leading it is what keeps
-  # the three lanes independent: `CI-...`, `Miri-...` and `macOS-...` are different groups, so no
+  # Same expression as `CI`'s, and `${{ github.workflow }}` leading it is what keeps the two lanes
+  # independent: `CI-...` and `macOS-...` are different groups, so no
   # lane can cancel another's run. See `ci.yml`'s concurrency comment for why a push is keyed on
   # the commit SHA and why that must not be collapsed back to one group per ref.
   group: ${{ github.workflow }}-${{ github.ref }}-${{ (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev') && github.sha || '' }}
