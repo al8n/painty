@@ -84,12 +84,15 @@
 //! takes the decision to refuse away from the caller's writer — the thing
 //! [`Terminal::render`](super::Terminal::render) goes out of its way to preserve, and what
 //! `tests/writer_discipline.rs` holds it to. So the render runs twice: once into [`Extent`], which
-//! writes nothing and cannot refuse, and once into [`Document`], which streams. Nothing is ever
-//! held.
+//! writes nothing and cannot refuse, and once into [`Document`], which streams. No document is
+//! ever held.
 //!
-//! What that costs is the plan built twice, stated rather than hidden. What it assumes is that a
-//! caller's [`fmt::Display`] writes the same thing twice; one that does not gets a `viewBox` that
-//! disagrees with its contents, which is a wrong size and not a wrong marking.
+//! What that costs is the plan built twice, stated rather than hidden. What it does **not** cost is
+//! the caller's [`fmt::Display`] being asked twice: a `Display` is allowed to be stateful, so two
+//! walks over one render must not be two questions to one caller. The message is formatted once
+//! into a string and both passes read it — see
+//! [`Terminal::render_svg`](super::Terminal::render_svg), which is also where what the first pass
+//! spends before the writer is consulted is written down.
 //!
 //! # What it does not carry
 //!
@@ -97,14 +100,12 @@
 //!   for SVG text: drawing one means a rectangle behind the run, and a run's width is not known
 //!   until it has been written — which is the buffering this surface refuses. painty's three
 //!   built-in themes set no background, so the default path loses nothing.
-//! * **Exact placement in a font that is not monospace.** Each row is one `<text>` with
-//!   `textLength`, so a row of a *monospace* face lands on its cells whatever that face's advance
-//!   ratio is — the correction is uniform and every advance is equal, so it is exact rather than
-//!   close. A proportional face is outside the model, exactly as it is for the terminal this
-//!   serialises. The residual is a row mixing zero-width or double-width clusters with a face
-//!   whose ratio is not the nominal one, where the uniform per-glyph correction is not the
-//!   per-cell one; it is bounded by the ratio error and is sub-pixel on every face in the stack
-//!   below.
+//! * **A glyph that fits its cell in a face whose advance is not this one's.** *Placement* is
+//!   exact in any face whatever, because every unit states an absolute `x` and no font metric
+//!   enters the arithmetic — see [`Document`]. What a face's ratio still decides is the ink: a
+//!   glyph drawn wider than [`ADVANCE`] overhangs the cell it starts in, and one drawn narrower
+//!   leaves a gap in it. Bounded by the ratio error, sub-pixel on every face in the stack below,
+//!   and — unlike a caret in the wrong cell — visible for what it is.
 //! * **A capability.** [`ColorCapability`](super::ColorCapability) says which escape sequences a
 //!   *terminal* may be sent. This medium has none, so the question is not asked of it and the
 //!   palette is read at full fidelity — which is why `Terminal::plain()`, whose capability is
@@ -117,14 +118,14 @@ mod tests;
 
 use core::fmt;
 
-use super::{paint::Surface, width::cells_from};
+use super::{paint::Surface, width::measured};
 use crate::{Color, Palette, Role, Severity, Style, escape::Escaped};
 
 /// The cell width, in user units.
 ///
 /// Nominally `0.6em` at [`FONT_SIZE`], which is the ratio most monospace faces use. It does not
-/// have to be any face's actual ratio: every row carries `textLength`, so the glyphs are placed on
-/// these cells rather than on the font's.
+/// have to be any face's actual ratio: every unit is placed at an absolute `x` that is a multiple
+/// of this, so the grid is this number's and never the font's.
 const ADVANCE: u64 = 8;
 
 /// The distance between two rows' baselines.
@@ -236,46 +237,69 @@ const fn ansi256_to_rgb(index: u8) -> (u8, u8, u8) {
   (grey, grey, grey)
 }
 
-/// What the first pass learns: how many cells each row of the render occupies.
+/// What the first pass learns: how far the render reaches, right and down.
 ///
-/// Writes nothing, so it cannot refuse and cannot be refused. It is the ONLY thing that measures:
-/// the second pass places nothing itself, it reads a row's width back out of here and hands it to
-/// `textLength`. One measure and one reader is what makes the viewport, the rows and the glyphs
-/// agree by construction rather than by three readings of one rule.
+/// Writes nothing, so it cannot refuse and cannot be refused.
 ///
-/// The measure is [`cells_from`], which is [`LineCells`](super::LineCells)' own walk — so the cells
-/// a row is stretched to are the cells the terminal counted for the source in it, and a marker row
-/// lands under the glyph it was placed under.
+/// # Two numbers, where this used to keep a row of them
+///
+/// It held a `Vec<u64>` — one width per row — because the second pass stretched each row to its
+/// total and had to read that total back. Nothing reads a row total any more, so the vector is
+/// gone, and with it an allocation that grew with the render and stayed alive underneath the second
+/// pass's [`Plan`](super::render::Plan).
+///
+/// That is not a saving found beside the placement change; it is the same change. A row total is
+/// the only thing a row-wide correction can be computed from, and a document that states every
+/// unit's position has nothing left to want it for.
 pub(super) struct Extent {
   column: u64,
-  rows: Vec<u64>,
+  widest: u64,
+  rows: u64,
 }
 
 impl Extent {
   pub(super) const fn new() -> Self {
     Self {
       column: 0,
-      rows: Vec::new(),
+      widest: 0,
+      rows: 0,
     }
   }
 
-  /// Every row's width, including a last row the render did not end with a break.
-  pub(super) fn finish(mut self) -> Vec<u64> {
-    if self.column > 0 {
-      self.rows.push(self.column);
+  /// The widest row and how many rows there are, counting a last row the render did not end with a
+  /// break.
+  pub(super) const fn finish(self) -> (u64, u64) {
+    if self.column == 0 {
+      return (self.widest, self.rows);
     }
-    self.rows
+    let widest = if self.column > self.widest {
+      self.column
+    } else {
+      self.widest
+    };
+    (widest, self.rows.saturating_add(1))
+  }
+
+  const fn break_row(&mut self) {
+    if self.column > self.widest {
+      self.widest = self.column;
+    }
+    self.rows = self.rows.saturating_add(1);
+    self.column = 0;
   }
 }
 
 impl fmt::Write for Extent {
+  /// Defined in terms of [`advance`](Surface::advance), so that painty's own frame is measured by
+  /// the same rule as everything a caller supplied and there is one place a cell is counted.
   fn write_str(&mut self, text: &str) -> fmt::Result {
     for (index, segment) in text.split('\n').enumerate() {
       if index > 0 {
-        self.rows.push(self.column);
-        self.column = 0;
+        self.break_row();
       }
-      self.column += cells_from(segment);
+      for (cluster, cells) in measured(segment) {
+        self.advance(cluster, cells)?;
+      }
     }
     Ok(())
   }
@@ -289,18 +313,69 @@ impl Surface for Extent {
   fn close(&mut self, _role: Role, _style: Style) -> fmt::Result {
     Ok(())
   }
+
+  fn advance(&mut self, _text: &str, cells: u64) -> fmt::Result {
+    self.column = self.column.saturating_add(cells);
+    Ok(())
+  }
 }
 
 /// The document being written, and the only thing that decides what reaches the writer unread.
 ///
-/// One `<text>` element per row and one `<tspan>` per styled run inside it, both opened lazily —
-/// so a row with nothing on it costs no element and a run with nothing in it costs no element
-/// either. Nothing is buffered: a run's `x` is not written, because the row's `textLength` places
-/// every glyph, and the row's width came from the pass before.
+/// One `<text>` element per row, one `<tspan class>` per styled run inside it, and one
+/// `<tspan x>` per placement unit inside that — each opened lazily, so a row with nothing on it
+/// costs no element and a run with nothing in it costs no element either. Nothing is buffered.
+///
+/// # Every unit states its own position, and the alternative is not a tuning
+///
+/// A row used to be one `<text>` with a `textLength` equal to its cells, stretched by
+/// `lengthAdjust="spacing"`. That is a **row-wide** correction, and it cannot express a cell grid
+/// for two independent reasons.
+///
+/// The first is the one a mixed row shows. The correction is distributed between glyphs, not
+/// applied per cell, so on a row of ASCII and CJK the slack a wide fallback glyph creates is spread
+/// in front of narrow glyphs that were already where they belonged. Marker rows are corrected
+/// separately from the source rows they point at, so two rows whose totals are both right can still
+/// disagree cell for cell.
+///
+/// The second holds even on a row where every advance is equal, and it is the one that settles it.
+/// `textLength` fixes the SUM of a run's advances; where the interior glyphs land is then whatever
+/// the renderer's distribution rule says, and "the advance values are adjusted" admits two. Spread
+/// the slack across all *n* advances and glyph *i* lands at `i·L/n`, which is the grid. Spread it
+/// across the *n−1* spacings between the glyphs and glyph *i* lands at `i·(L−a)/(n−1)`, which
+/// equals the grid only when `L = n·a` — only, that is, when there was no correction to make. Both
+/// readings put the run's total at `L`, so the row is the right width under either and its cells
+/// are right under only one. A mechanism whose accuracy depends on which reading the viewer
+/// implements is not a mechanism to tune.
+///
+/// So position is **stated**. Each unit is a text chunk of its own at an absolute `x`, computed
+/// from the cells [`LineCells`](super::LineCells) assigned to everything before it on the row.
+/// Nothing accumulates, nothing is corrected, and no font metric enters: the *placement* is exact
+/// in any face whatever, and what a face's advance ratio still decides is only whether a glyph
+/// slightly overhangs its cell or leaves a gap in it — ink, not position.
+///
+/// Two consequences worth stating rather than discovering. A cluster is one chunk, so the shaping
+/// inside it — a ZWJ sequence, a base and its combining marks — is the viewer's to do and comes out
+/// as one glyph. And a ligature *across* clusters is broken, which is
+/// [`LineCells`](super::LineCells)' model rather than a loss: two code points the caller can span
+/// separately are two addressable cells.
+///
+/// # What it costs
+///
+/// About twenty-two bytes a cell, against about one before, which over this file's corpus is a
+/// document of two and a half to seven kilobytes where it used to be one to two — the stylesheet
+/// being most of the floor either way.
+///
+/// The cheaper encodings do not survive the constraint above this one. SVG can position a whole run
+/// from a list — `x="8 16 24"` — but an attribute has to be written before its element's content,
+/// so a surface would have to know how long the run is *before* writing any of it, and a streaming
+/// surface is told a unit at a time. Buying those bytes means buffering a run, which is the thing
+/// this exists not to do.
 pub(super) struct Document<'a> {
   out: &'a mut dyn fmt::Write,
-  widths: &'a [u64],
-  row: usize,
+  row: u64,
+  /// The cells already spent on the row being written, which is where the next unit goes.
+  column: u64,
   /// The role in effect, which survives a row break: a style writing a run that spans one is rare
   /// but the surface must not lose it.
   role: Option<Role>,
@@ -330,11 +405,11 @@ pub(super) struct Document<'a> {
 }
 
 impl<'a> Document<'a> {
-  pub(super) fn new(out: &'a mut dyn fmt::Write, widths: &'a [u64]) -> Self {
+  pub(super) fn new(out: &'a mut dyn fmt::Write) -> Self {
     Self {
       out,
-      widths,
       row: 0,
+      column: 0,
       role: None,
       span: false,
       line: false,
@@ -367,29 +442,19 @@ impl<'a> Document<'a> {
 
   /// Opens the row's element, if it has not been opened already.
   ///
-  /// `textLength` is what places the glyphs: the row is stretched to exactly its cells, and since
-  /// every advance in a monospace face is equal, a uniform correction leaves each glyph on its own
-  /// cell. A row whose width the first pass did not reach — which no render produces, the two
-  /// passes being the same call — is written without it rather than with a fabricated one.
+  /// Carries the baseline and nothing else. The row has no `x` of its own and no width: every unit
+  /// inside it states an absolute position, so there is no total for this element to hold and
+  /// nothing for the first pass to have told it.
   fn open_line(&mut self) -> fmt::Result {
     if self.line {
       return Ok(());
     }
-    self.markup("<text xml:space=\"preserve\" x=\"")?;
-    self.number(PAD)?;
-    self.markup("\" y=\"")?;
-    let above = LINE_HEIGHT.saturating_mul(u64::try_from(self.row).unwrap_or(u64::MAX));
-    self.number(PAD + BASELINE + above)?;
-    if let Some(width) = self
-      .widths
-      .get(self.row)
-      .copied()
-      .filter(|width| *width > 0)
-    {
-      self.markup("\" textLength=\"")?;
-      self.number(width.saturating_mul(ADVANCE))?;
-      self.markup("\" lengthAdjust=\"spacing")?;
-    }
+    self.markup("<text xml:space=\"preserve\" y=\"")?;
+    self.number(
+      LINE_HEIGHT
+        .saturating_mul(self.row)
+        .saturating_add(PAD + BASELINE),
+    )?;
     self.markup("\">")?;
     // After the element, not before it. Set first, a refused opener leaves the surface believing
     // something is open, and the balance call that follows writes a closer for an element the
@@ -424,11 +489,16 @@ impl<'a> Document<'a> {
   }
 
   /// The document, once the writer has refused, is over — see [`poisoned`](Self::poisoned).
+  ///
+  /// Two filters, and they answer two different questions. [`Escaped`] takes the characters that
+  /// would stop being text and become markup; [`Representable`] takes the ones that are not
+  /// permitted in an XML document under any spelling, entity references included.
   fn write_escaped(&mut self, text: &str) -> fmt::Result {
     if self.poisoned {
       return Err(fmt::Error);
     }
-    fmt::Write::write_str(&mut Escaped(self.out), text).inspect_err(|_| {
+    let mut representable = Representable(&mut *self.out);
+    fmt::Write::write_str(&mut Escaped(&mut representable), text).inspect_err(|_| {
       self.poisoned = true;
     })
   }
@@ -454,21 +524,20 @@ impl<'a> Document<'a> {
 }
 
 impl fmt::Write for Document<'_> {
+  /// A row break is the one thing a unit cannot be, so it is the one thing this handles: everything
+  /// between two of them is segmented by [`measured`] and placed by
+  /// [`advance`](Surface::advance), which is the same path text that arrived already measured
+  /// takes.
   fn write_str(&mut self, text: &str) -> fmt::Result {
     for (index, segment) in text.split('\n').enumerate() {
       if index > 0 {
         self.close_line()?;
-        self.row += 1;
+        self.row = self.row.saturating_add(1);
+        self.column = 0;
       }
-      if segment.is_empty() {
-        continue;
+      for (cluster, cells) in measured(segment) {
+        self.advance(cluster, cells)?;
       }
-      self.open_line()?;
-      self.open_span()?;
-      // Everything is escaped, painty's own glyphs included. Which context a writer three calls
-      // down is in is not a question it can answer, and `-->` carries a `>` — so one rule, applied
-      // everywhere, exactly as the escaper's own documentation argues.
-      self.write_escaped(segment)?;
     }
     Ok(())
   }
@@ -486,6 +555,110 @@ impl Surface for Document<'_> {
     self.role = None;
     Ok(())
   }
+
+  /// One unit, at the cell the terminal put it in.
+  ///
+  /// A zero-cell unit — a lone combining mark, a joiner that began a cluster — is written like any
+  /// other and moves nothing, which is what [`LineCells`](super::LineCells) says a zero-width
+  /// cluster does.
+  fn advance(&mut self, text: &str, cells: u64) -> fmt::Result {
+    self.open_line()?;
+    self.open_span()?;
+    self.markup("<tspan x=\"")?;
+    self.number(PAD.saturating_add(self.column.saturating_mul(ADVANCE)))?;
+    self.markup("\">")?;
+    // Everything is escaped, painty's own glyphs included. Which context a writer three calls
+    // down is in is not a question it can answer, and `-->` carries a `>` — so one rule, applied
+    // everywhere, exactly as the escaper's own documentation argues.
+    self.write_escaped(text)?;
+    self.markup("</tspan>")?;
+    // After the unit reached the writer. A refused write must not move the column, or the rest of
+    // the row would be placed against cells nothing was drawn in — and the refusal path is the one
+    // where a wrong column is least likely to be looked at.
+    self.column = self.column.saturating_add(cells);
+    Ok(())
+  }
+}
+
+/// A writer that replaces every scalar an XML document cannot carry.
+///
+/// # The whole of XML 1.0's `Char` production, because two values would be a sample
+///
+/// ```text
+/// Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | [#x10000-#x10FFFF]
+/// ```
+///
+/// Everything outside it is unrepresentable — not merely discouraged, and not fixable with a
+/// numeric reference, since `&#xFFFF;` is as ill-formed as the character itself. A document
+/// carrying one does not render badly; it does not parse, so a single such scalar anywhere in a
+/// source line, a message, a label, a code, an origin or a help string costs the whole image.
+///
+/// Read against what a Rust `char` can be, the complement is a closed list of three parts and this
+/// enumerates it rather than sampling it:
+///
+/// * **C0 except tab, newline and carriage return.** Substituted before this, by
+///   [`control_picture`](super::width::control_picture) — which is why the escaper beside this one
+///   says a C0 character is not its problem. True, and true of C0 alone: the sanitizer is a table of
+///   *pictures*, and there is no picture for a noncharacter.
+/// * **The surrogates, `#xD800`–`#xDFFF`.** Unreachable: a `char` is a Unicode scalar value, so no
+///   `&str` this crate can be handed contains one. Said out loud because a reader checking this
+///   list against the production has to know the omission is a proof and not an oversight.
+/// * **`#xFFFE` and `#xFFFF`.** Reachable, from any caller string and from source text, and the two
+///   the range above ends at `#xFFFD` to exclude.
+///
+/// The rest of Unicode's noncharacters — `#xFDD0`–`#xFDEF`, and the pair at the end of every
+/// astral plane — are *inside* the production and stay. They are discouraged for interchange and
+/// perfectly well-formed in XML, and a renderer that dropped them would be substituting on a rule
+/// it made up.
+///
+/// The stand-in is [`char::REPLACEMENT_CHARACTER`], which is what the sanitizer already writes for
+/// a C1 character that has no picture. One cell, like the value it replaces, so nothing placed
+/// against the row moves — asserted in `a_scalar_xml_forbids_is_replaced_and_moves_nothing` rather
+/// than assumed.
+struct Representable<'a>(&'a mut dyn fmt::Write);
+
+impl fmt::Write for Representable<'_> {
+  /// In runs, like [`Escaped`]: ordinary text costs one `write_str` and only a forbidden scalar
+  /// costs a call of its own.
+  fn write_str(&mut self, text: &str) -> fmt::Result {
+    let mut rest = text;
+    while let Some(at) = rest.find(|character| !is_xml_char(character)) {
+      let (before, from) = rest.split_at(at);
+      self.0.write_str(before)?;
+      let mut characters = from.chars();
+      characters
+        .next()
+        .expect("`find` reported a character at this index");
+      self.0.write_str("\u{fffd}")?;
+      rest = characters.as_str();
+    }
+    self.0.write_str(rest)
+  }
+}
+
+/// A string as a [`fmt::Display`] that writes it in one call.
+///
+/// What [`Terminal::render_svg`](super::Terminal::render_svg) re-attaches its formatted message as,
+/// and the reason is the seam under it. [`Shown`](super::paint::Shown) segments what each
+/// `write_str` hands it, so a `Display` that split a grapheme cluster across two calls would be
+/// measured as its parts — the defect this surface was just repaired for, arriving by a second
+/// route. `<String as Display>` does not split anything, but that is a fact about the standard
+/// library rather than about this crate, and six lines is cheaper than the assumption.
+pub(super) struct Verbatim<'a>(pub(super) &'a str);
+
+impl fmt::Display for Verbatim<'_> {
+  #[inline]
+  fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+    out.write_str(self.0)
+  }
+}
+
+/// Whether `character` is one XML 1.0 permits — see [`Representable`].
+const fn is_xml_char(character: char) -> bool {
+  matches!(
+    character,
+    '\t' | '\n' | '\r' | '\u{20}'..='\u{d7ff}' | '\u{e000}'..='\u{fffd}' | '\u{10000}'..='\u{10ffff}'
+  )
 }
 
 /// The root element and the stylesheet, written from the caller's palette.
@@ -495,13 +668,12 @@ impl Surface for Document<'_> {
 /// and the second pair is what stops a viewer with no container from falling back to 300 by 150.
 pub(super) fn open_document(
   out: &mut impl fmt::Write,
-  widths: &[u64],
+  cells: u64,
+  rows: u64,
   palette: &dyn Palette,
 ) -> fmt::Result {
-  let cells = widths.iter().copied().max().unwrap_or(0);
-  let width = PAD.saturating_mul(2) + cells.saturating_mul(ADVANCE);
-  let rows = u64::try_from(widths.len()).unwrap_or(u64::MAX);
-  let height = PAD.saturating_mul(2) + LINE_HEIGHT.saturating_mul(rows);
+  let width = cells.saturating_mul(ADVANCE).saturating_add(PAD * 2);
+  let height = LINE_HEIGHT.saturating_mul(rows).saturating_add(PAD * 2);
   out.write_fmt(format_args!(
     "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 {width} {height}\" \
      width=\"{width}\" height=\"{height}\">\n"

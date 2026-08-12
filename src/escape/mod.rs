@@ -26,12 +26,16 @@
 //! Nothing else is touched, and the two consumers are owed different accounts of why. A control
 //! character is not an injection vector in **HTML** — it is not markup, it cannot leave its
 //! element, and a browser renders it as nothing — where in a terminal `\x1b` *is* the escape
-//! mechanism. In **XML** a C0 character other than tab, newline and carriage return is not
-//! representable at all, not even as a numeric reference, so a document carrying one is not
-//! well-formed. That is not this file's problem either, and the reason is worth stating rather
-//! than trusting: the SVG surface sits *under* the terminal renderer, so every byte reaching it
-//! has already been through that renderer's control-character substitution — and the rule that
-//! keeps an ESC out of a terminal is the same rule that keeps a C0 out of the XML.
+//! mechanism.
+//!
+//! **XML asks a second question, and it is not this file's.** A scalar outside XML 1.0's `Char`
+//! production is not representable at all — not even as a numeric reference — so a document
+//! carrying one does not parse. That set is *larger* than the control characters, and reading it as
+//! "the C0 characters" is how it was got wrong here once: the terminal renderer's substitution does
+//! sit under the SVG surface and does keep every C0 out of it, and U+FFFE and U+FFFF walked past it
+//! untouched, because a sanitizer built on Control Pictures has no picture for a noncharacter. So
+//! the whole production is enumerated at the boundary that needs it, by
+//! `terminal::svg::Representable`, and this file stays the answer to "what would stop being text".
 
 #[cfg(test)]
 mod tests;

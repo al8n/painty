@@ -9,16 +9,16 @@
 //! row of the document and compares it, character for character, with what
 //! [`Terminal::render`](crate::terminal::Terminal::render) wrote, over every style.
 //!
-//! Everything else is about the **document**: that a row is as wide as the cells it holds, that
-//! the viewport covers every row, that caller text comes back out verbatim, and that a class the
-//! document uses is one the stylesheet knows about.
+//! Everything else is about the **document**: that every glyph is at the cell the terminal gave it,
+//! that the viewport covers every row, that caller text comes back out verbatim and parseable, and
+//! that a class the document uses is one the stylesheet knows about.
 
 use core::fmt;
 
 use super::{ADVANCE, BASELINE, Document, LINE_HEIGHT, PAD, ROLES, ansi256_to_rgb, class};
 use crate::{
   Ansi16, Color, Diagnostic, Label, Location, Role, Severity, Source, Span, Style, Theme,
-  terminal::{ColorCapability, Input, Terminal},
+  terminal::{ColorCapability, Input, Terminal, width::cells_from},
 };
 
 /// The harness is a `std` program whatever the crate under it is, so the strings these render into
@@ -93,10 +93,75 @@ fn attribute(element: &str, name: &str) -> Option<String> {
   Some(rest[..end].to_string())
 }
 
-/// One row of the image: which row of the render it is, and the text on it.
+/// One placement unit of a row: where the document says it is, what it draws, and under which
+/// class.
+struct Unit {
+  x: u64,
+  class: Option<String>,
+  text: String,
+}
+
+/// One row of the image: which row of the render it is, the text on it, and every unit of it.
 struct Row {
   index: usize,
   text: String,
+  units: Vec<Unit>,
+}
+
+/// The units of one row's element content.
+///
+/// Total over the content rather than a search through it, and that is what makes it a gate as well
+/// as a parser: **every character of a row has to be inside a unit element**, so a surface that
+/// wrote text anywhere else — or an element this does not know about — fails here instead of
+/// quietly producing a row that still reads correctly.
+fn units(content: &str) -> Vec<Unit> {
+  let mut units = Vec::new();
+  let mut class: Option<String> = None;
+  let mut rest = content;
+  while let Some(at) = rest.find('<') {
+    assert!(
+      rest[..at].is_empty(),
+      "a row carries {:?} outside any unit",
+      &rest[..at]
+    );
+    let from = &rest[at..];
+    if let Some(after) = from.strip_prefix("<tspan x=\"") {
+      let quote = after.find('"').expect("an attribute value is quoted");
+      let x: u64 = after[..quote]
+        .parse()
+        .expect("a coordinate is a whole number");
+      // Past the closing quote and the `>` after it.
+      let body = &after[quote + 2..];
+      let end = body.find('<').expect("a unit element is closed");
+      // The escaping census for `>`, made structural: a raw one is well-formed XML, so nothing
+      // downstream would notice it, and the round trip through `unescape` reproduces the caller's
+      // row either way. Here is the only place that can tell the two apart.
+      assert!(
+        !body[..end].contains('>'),
+        "a unit carries an unescaped `>`: {:?}",
+        &body[..end]
+      );
+      units.push(Unit {
+        x,
+        class: class.clone(),
+        text: unescape(&body[..end]),
+      });
+      rest = body[end..]
+        .strip_prefix("</tspan>")
+        .expect("a unit is closed by its own element");
+    } else if let Some(after) = from.strip_prefix("<tspan class=\"") {
+      let quote = after.find('"').expect("an attribute value is quoted");
+      class = Some(after[..quote].to_string());
+      rest = &after[quote + 2..];
+    } else if let Some(after) = from.strip_prefix("</tspan>") {
+      class = None;
+      rest = after;
+    } else {
+      panic!("a row holds an element this surface does not write: {from:?}");
+    }
+  }
+  assert!(rest.is_empty(), "a row ends with {rest:?} outside any unit");
+  units
 }
 
 /// Every row of a document, placed at the index its baseline decodes to.
@@ -115,17 +180,8 @@ fn rows(document: &str) -> Vec<Row> {
       .expect("a row carries a baseline")
       .parse()
       .expect("a baseline is a number");
-    let content = &from[open + 1..close];
-    // The runs of a row, with their elements taken off: what is left is exactly the characters
-    // the terminal put on that row.
-    let mut text = String::new();
-    let mut inner = content;
-    while let Some(mark) = inner.find('<') {
-      text.push_str(&unescape(&inner[..mark]));
-      let after = inner[mark..].find('>').expect("an element is closed");
-      inner = &inner[mark + after + 1..];
-    }
-    text.push_str(&unescape(inner));
+    let units = units(&from[open + 1..close]);
+    let text: String = units.iter().map(|unit| unit.text.as_str()).collect();
     // Exactly, not by rounding. The first version of this took `/ LINE_HEIGHT` alone, and
     // integer division swallowed a baseline one unit off — every row still decoded to its own
     // index, so a planted shift was invisible. Deriving the index from the document only checks
@@ -139,6 +195,7 @@ fn rows(document: &str) -> Vec<Row> {
     rows.push(Row {
       index: usize::try_from(below / LINE_HEIGHT).expect("a row index fits a pointer"),
       text,
+      units,
     });
     rest = &from[close..];
   }
@@ -165,12 +222,22 @@ fn corpus() -> Vec<(&'static str, Diagnostic<'static>, &'static [Input<'static>]
   const WIDE: &str = "let x = 1;\n\t幅 = \"漢字\";\nlet z = 3;\n";
   const MESSAGE: &str = "`width` is defined twice";
 
+  /// Every cluster class the placement model distinguishes, in one line: a wide ideograph, a base
+  /// with a combining mark, a base with a variation selector, a regional indicator pair and a ZWJ
+  /// sequence. Each is one cluster and none of them is one scalar, which is the whole point —
+  /// measured scalar by scalar the emoji alone is two cells too wide.
+  ///
+  /// A second line with a carriage return on it, because `CR LF` is the one cluster whose width
+  /// and whose stand-ins disagree.
+  const CLUSTERS: &str = "let a = \"漢e\u{301}☃\u{fe0f}🇺🇸👩\u{200d}💻\";\r\nlet b = 2;\n";
+
   static ONE: [Input<'static>; 1] = [Input::new(Source::new(PLAIN))];
   static TWO: [Input<'static>; 2] = [
     Input::new(Source::new(PLAIN)),
     Input::new(Source::new(LONG)),
   ];
   static WIDE_INPUT: [Input<'static>; 1] = [Input::new(Source::new(WIDE))];
+  static CLUSTER_INPUT: [Input<'static>; 1] = [Input::new(Source::new(CLUSTERS))];
   static NONE: [Input<'static>; 0] = [];
 
   static SECOND: [Label<'static>; 1] = [Label::new(
@@ -180,6 +247,12 @@ fn corpus() -> Vec<(&'static str, Diagnostic<'static>, &'static [Input<'static>]
   static ELSEWHERE: [Label<'static>; 1] = [Label::new(
     Location::new(1, Span::new(0, 2)),
     "and over here",
+  )];
+  /// A label carrying the clusters itself, and one whose span lands INSIDE the ZWJ sequence — the
+  /// case `columns_for` widens to a whole unit, and the case a re-segmenting surface splits.
+  static INSIDE: [Label<'static>; 1] = [Label::new(
+    Location::new(0, Span::new(28, 32)),
+    "inside a joined 👩\u{200d}💻 sequence",
   )];
 
   std::vec![
@@ -240,6 +313,19 @@ fn corpus() -> Vec<(&'static str, Diagnostic<'static>, &'static [Input<'static>]
       )
       .with_primary_label("here"),
       &WIDE_INPUT[..],
+    ),
+    (
+      "every cluster class, and a mark inside one",
+      Diagnostic::new(
+        "code",
+        Severity::Error,
+        &"a message with a 👩\u{200d}💻 in it",
+        Location::new(0, Span::new(9, 40)),
+      )
+      .with_primary_label("this literal, with a ☃\u{fe0f} in the label")
+      .with_labels(&INSIDE)
+      .with_help("and a help line with 漢字 and e\u{301} in it"),
+      &CLUSTER_INPUT[..],
     ),
     (
       "nothing drawable",
@@ -322,43 +408,69 @@ fn the_image_says_what_the_terminal_says() {
 }
 
 #[test]
-fn a_row_is_as_wide_as_the_cells_it_holds_and_the_viewport_covers_them_all() {
-  // `textLength` is the whole of the placement model: the row is stretched to exactly its cells,
-  // so a wrong length is every glyph on that row in the wrong place. Measured against the
-  // TERMINAL's own row rather than against the surface's bookkeeping, which is why the corpus
-  // carries a tab and two wide clusters.
+fn every_unit_is_drawn_at_the_cell_the_terminal_gave_it() {
+  // The placement model, asserted where it is now stated. A row used to be stretched to a total and
+  // this read the total back; a total is exactly what could be right while the glyphs under it were
+  // not, so what is read back now is every unit's own coordinate.
+  //
+  // Against the TERMINAL's row rather than against the surface's bookkeeping — the walk starts from
+  // the row `Terminal::render` wrote — which is why the corpus carries a tab, two wide clusters and
+  // a joined emoji.
   for (style, terminal) in styles() {
     for (case, diagnostic, inputs) in corpus() {
       let image = as_svg(&terminal, &diagnostic, inputs);
       let plain = as_terminal(&terminal, &diagnostic, inputs);
       let expected = lines(&plain);
 
+      for row in rows(&image) {
+        let line = expected
+          .get(row.index)
+          .unwrap_or_else(|| panic!("{style}/{case}: the image has a row the render does not"));
+        // The oracle is `LineCells` over the terminal's own row, and that is the whole strength of
+        // this gate. Summing the units' widths as it goes would only check the document against
+        // ITSELF: a surface that segmented the row per scalar measures every fragment consistently
+        // and lays them out consistently, so the arithmetic closes while a caret two cells away
+        // from its glyph sits in the finished image. Placing the marker row is `column_at`'s job,
+        // so `column_at` is what the source row has to agree with.
+        let source = Source::new(line);
+        let cells = crate::terminal::LineCells::new(
+          source.line(1).expect("a row is one line"),
+          crate::terminal::LineCells::default_tab_width(),
+        );
+        let mut at = 0;
+        for unit in &row.units {
+          assert!(
+            line[at..].starts_with(unit.text.as_str()),
+            "{style}/{case}: row {} draws {:?} where the render has {:?}",
+            row.index,
+            unit.text,
+            &line[at..]
+          );
+          assert_eq!(
+            unit.x,
+            PAD + (cells.column_at(at) - 1) * ADVANCE,
+            "{style}/{case}: row {}, unit {:?}, is drawn at {} and belongs in column {}",
+            row.index,
+            unit.text,
+            unit.x,
+            cells.column_at(at)
+          );
+          at += unit.text.len();
+        }
+        assert_eq!(
+          at,
+          line.len(),
+          "{style}/{case}: row {} left {:?} undrawn",
+          row.index,
+          &line[at..]
+        );
+      }
+
       let mut widest = 0;
       for line in &expected {
-        widest = widest.max(super::cells_from(line));
+        widest = widest.max(cells_from(line));
       }
       let rows_drawn = u64::try_from(expected.len()).expect("a row count fits sixty-four bits");
-
-      for element in image.split("<text ").skip(1) {
-        let open = element.find('>').expect("an element is closed");
-        let head = &element[..open];
-        let content = rows(&format!("<text {element}"));
-        let row = content.first().expect("an element that opened has a row");
-        let cells = super::cells_from(&row.text);
-        match attribute(head, "textLength") {
-          Some(length) => assert_eq!(
-            length,
-            (cells * ADVANCE).to_string(),
-            "{style}/{case}: row {} is {cells} cells and is stretched to {length}",
-            row.index
-          ),
-          None => assert_eq!(
-            cells, 0,
-            "{style}/{case}: row {} holds {cells} cells and was written without a length",
-            row.index
-          ),
-        }
-      }
 
       let view = attribute(&image, "viewBox").expect("a document declares a viewport");
       assert_eq!(
@@ -466,10 +578,21 @@ fn caller_text_that_looks_like_markup_comes_back_out_verbatim() {
   let terminal = Terminal::plain();
   let image = as_svg(&terminal, &diagnostic, inputs);
   let plain = as_terminal(&terminal, &diagnostic, inputs);
-  assert!(
-    !image.contains("<script"),
-    "the document carries the caller's element: {image}"
-  );
+  // Every `<` in the document opens an element this surface wrote. Looking for `<script` is what
+  // this used to do, and a unit is one cluster: the caller's `<` is a unit of its own now, so a
+  // document that carried it verbatim would still hold no `<script` anywhere. A census over the
+  // character cannot be walked past that way.
+  const ELEMENTS: [&str; 8] = [
+    "<svg ", "</svg>", "<style>", "</style>", "<text ", "</text>", "<tspan ", "</tspan>",
+  ];
+  for (at, _) in image.match_indices('<') {
+    let from = &image[at..];
+    assert!(
+      ELEMENTS.iter().any(|element| from.starts_with(element)),
+      "the document has a `<` that opens nothing this surface writes: {:?}",
+      &from[..from.len().min(48)]
+    );
+  }
   for (index, line) in lines(&plain).iter().enumerate() {
     if line.is_empty() {
       continue;
@@ -609,7 +732,7 @@ fn one_run(left: usize, text: &str) -> String {
 
   let mut bounded = Bounded::new(left);
   {
-    let mut document = Document::new(&mut bounded, &[64]);
+    let mut document = Document::new(&mut bounded);
     let _ = document
       .open(Role::PrimaryLabel, Style::plain())
       .and_then(|()| fmt::Write::write_str(&mut document, text))
@@ -690,6 +813,255 @@ fn a_writer_that_refuses_stops_the_document() {
   assert_eq!(
     exact.took, document,
     "the document is not a function of the render"
+  );
+}
+
+#[test]
+fn a_caret_is_at_the_same_coordinate_as_the_glyph_it_marks() {
+  // The failure this crate exists to prevent, asserted as a COORDINATE. Every other gate here
+  // compares the image's rows to the terminal's rows, which a surface can satisfy while placing
+  // them anywhere; this one reads the two numbers that have to be equal and compares them.
+  //
+  // The marked cluster is the last thing on the line, and everything to its left is a cluster whose
+  // width is not the sum of its scalars' — so any re-segmentation anywhere on the row moves the
+  // caret off the glyph and this says so.
+  const TARGET: &str = "👩\u{200d}💻";
+  const LEADING: &str = "let x = \"a漢e\u{301}☃\u{fe0f}🇺🇸";
+  let line = std::format!("{LEADING}{TARGET}\";\n");
+  let at = line.find(TARGET).expect("the target is on the line");
+  let inputs = [Input::new(Source::new(&line))];
+  let diagnostic = Diagnostic::new(
+    "code",
+    Severity::Error,
+    &"the last cluster on the line",
+    Location::new(0, Span::new(at, at + TARGET.len())),
+  )
+  .with_primary_label("here");
+
+  for (style, terminal) in styles() {
+    let image = as_svg(&terminal, &diagnostic, &inputs);
+    let drawn = rows(&image);
+
+    let source = drawn
+      .iter()
+      .find(|row| row.text.contains(TARGET))
+      .unwrap_or_else(|| panic!("{style}: no row of the image draws the marked line"));
+    // One unit, not three. A surface that split the sequence would draw `👩`, U+200D and `💻` at
+    // three coordinates, and the first of them would still be in the right place.
+    let glyphs: Vec<&Unit> = source
+      .units
+      .iter()
+      .filter(|unit| unit.text == TARGET)
+      .collect();
+    assert_eq!(
+      glyphs.len(),
+      1,
+      "{style}: the joined sequence reached the document as {} units: {:?}",
+      glyphs.len(),
+      source
+        .units
+        .iter()
+        .map(|unit| &unit.text)
+        .collect::<Vec<_>>()
+    );
+
+    // Found by CLASS and not by glyph: the four styles mark with `^`, `━┳` and `─┬`, and a test
+    // that knew which would be testing the style rather than the placement.
+    let primary = class(Role::PrimaryLabel);
+    let marker = drawn
+      .iter()
+      .filter(|row| {
+        row.index > source.index
+          && row
+            .units
+            .iter()
+            .any(|unit| unit.class.as_deref() == Some(primary))
+      })
+      .min_by_key(|row| row.index)
+      .unwrap_or_else(|| panic!("{style}: nothing is marked under the line"));
+    let marked: Vec<&Unit> = marker
+      .units
+      .iter()
+      .filter(|unit| unit.class.as_deref() == Some(primary))
+      .collect();
+    assert!(
+      marked.len() >= 2,
+      "{style}: a two-cell cluster was marked in {} cells",
+      marked.len()
+    );
+    assert_eq!(
+      marked[0].x, glyphs[0].x,
+      "{style}: the mark is at {} and the glyph it names is at {}",
+      marked[0].x, glyphs[0].x
+    );
+    assert_eq!(
+      marked[1].x,
+      glyphs[0].x + ADVANCE,
+      "{style}: the mark's second cell is not the cluster's second cell"
+    );
+  }
+}
+
+#[test]
+fn a_caller_display_is_formatted_exactly_once() {
+  // Two passes over one render must not be two questions to one caller. A `Display` is entitled to
+  // be stateful — a counter, a cursor, a value that consumes what it reports — and nothing in its
+  // contract says two formattings agree.
+  //
+  // This one's answers differ in LENGTH as well as in content, which is what separates a gate that
+  // sees the defect from one that sees only its symptom: formatted twice, the viewport is measured
+  // against text the document does not contain.
+  struct Counting(core::cell::Cell<usize>);
+
+  impl fmt::Display for Counting {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+      self.0.set(self.0.get() + 1);
+      for _ in 0..self.0.get() {
+        out.write_str("asked ")?;
+      }
+      Ok(())
+    }
+  }
+
+  let counting = Counting(core::cell::Cell::new(0));
+  let diagnostic = Diagnostic::new(
+    "code",
+    Severity::Error,
+    &counting,
+    Location::new(0, Span::new(0, 3)),
+  )
+  .with_primary_label("here");
+  static INPUTS: [Input<'static>; 1] = [Input::new(Source::new("let x = 1;\n"))];
+
+  let image = as_svg(&Terminal::plain(), &diagnostic, &INPUTS[..]);
+  assert_eq!(
+    counting.0.get(),
+    1,
+    "the caller's `Display` was formatted {} times",
+    counting.0.get()
+  );
+  let drawn = rows(&image);
+  assert!(
+    drawn
+      .iter()
+      .any(|row| row.text.ends_with("asked ") && !row.text.ends_with("asked asked ")),
+    "the document does not carry the one answer the caller gave: {image}"
+  );
+
+  // And the viewport is the extent of what the document actually holds, measured off the document
+  // rather than off a second render — which is the assertion a caller with a stateful `Display`
+  // could not otherwise make, because asking again is the thing being checked.
+  let widest = drawn
+    .iter()
+    .map(|row| cells_from(&row.text))
+    .max()
+    .expect("the render has rows");
+  assert_eq!(
+    attribute(&image, "width"),
+    Some((PAD * 2 + widest * ADVANCE).to_string()),
+    "the viewport was measured against text the document does not contain: {image}"
+  );
+}
+
+#[test]
+fn a_scalar_xml_forbids_is_replaced_and_moves_nothing() {
+  // U+FFFE and U+FFFF are valid Rust `char`s, are outside XML 1.0's `Char` production, and have no
+  // Control Pictures glyph — so the sanitizer that keeps every C0 character out of the document
+  // passes them straight through, and one of them anywhere makes the whole image unparseable.
+  //
+  // The oracle is the same render with U+FFFD written by the caller instead. Byte identity is what
+  // asserts both halves at once: that the substitution happened, and that it moved nothing — a
+  // stand-in of a different width would put every later unit on a different cell and the documents
+  // would differ in every coordinate after the first.
+  fn image_of(hole: char) -> String {
+    let source = std::format!("let a = \"{hole}\";\nlet b = 2;\n");
+    let text = std::format!("a message with {hole} in it");
+    let label = std::format!("a label with {hole} in it");
+    let help = std::format!("a help line with {hole} in it");
+    let inputs = [Input::new(Source::new(&source)).with_origin("origin")];
+    let labels = [Label::new(Location::new(0, Span::new(17, 19)), &label)];
+    let diagnostic = Diagnostic::new(
+      "code",
+      Severity::Error,
+      &text,
+      Location::new(0, Span::new(8, 12)),
+    )
+    .with_primary_label(&label)
+    .with_labels(&labels)
+    .with_help(&help);
+    as_svg(&Terminal::plain(), &diagnostic, &inputs)
+  }
+
+  let benign = image_of('\u{fffd}');
+  for hole in ['\u{fffe}', '\u{ffff}'] {
+    let image = image_of(hole);
+    assert!(
+      !image.contains(hole),
+      "{hole:?} reached the document, which no XML parser will read"
+    );
+    assert_eq!(
+      image, benign,
+      "{hole:?} was not replaced by the stand-in, or was replaced by one of another width"
+    );
+  }
+  // Not vacuous in the other direction: a noncharacter the production PERMITS is left alone, so
+  // this is the `Char` production and not a wider rule made up beside it.
+  let permitted = image_of('\u{fdd0}');
+  assert!(
+    permitted.contains('\u{fdd0}'),
+    "a scalar XML permits was substituted anyway: {permitted}"
+  );
+}
+
+#[test]
+fn a_carriage_return_is_one_cell_wherever_it_is_measured() {
+  // `write_expanded_upto` prices a control cluster per STAND-IN rather than by the cluster's own
+  // width, and `CR LF` is the one input where the two differ: UAX#29 joins it into a single cluster
+  // of width 1, and it is drawn as `␍␊`, which is two cells.
+  //
+  // It cannot reach that walk, and this is why: a `Line`'s text is what lies between two breaks, so
+  // no line of any source holds a U+000A for the CR to join.
+  let source = Source::new("a\r\nb\r\nc");
+  let mut seen = 0;
+  for line in source.lines() {
+    assert!(
+      !line.text().contains('\n'),
+      "a line of a source carries the break that ended it: {:?}",
+      line.text()
+    );
+    seen += 1;
+  }
+  assert_eq!(seen, 3, "the source did not split where it was meant to");
+
+  // And where a `CR LF` CAN arrive — caller text, through the sanitizer — it is two pictures and
+  // two cells, in the extent and in the document alike. Read as a coordinate: the unit after it
+  // sits two cells along.
+  static INPUTS: [Input<'static>; 1] = [Input::new(Source::new("let x = 1;\n"))];
+  let diagnostic = Diagnostic::new(
+    "code",
+    Severity::Error,
+    &"before\r\nafter",
+    Location::new(0, Span::new(0, 3)),
+  );
+  let image = as_svg(&Terminal::plain(), &diagnostic, &INPUTS[..]);
+  let message = rows(&image)
+    .into_iter()
+    .find(|row| row.text.contains('\u{240d}'))
+    .expect("the message reached the document");
+  let at = message
+    .units
+    .iter()
+    .position(|unit| unit.text == "\u{240d}")
+    .expect("the carriage return is a unit of its own");
+  assert_eq!(
+    message.units[at + 1].text,
+    "\u{240a}",
+    "the two halves of a `CR LF` did not both reach the document"
+  );
+  assert_eq!(
+    message.units[at + 2].x,
+    message.units[at].x + 2 * ADVANCE,
+    "a `CR LF` was drawn as two pictures and measured as one cell"
   );
 }
 

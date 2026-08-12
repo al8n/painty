@@ -55,6 +55,18 @@ pub(super) trait Surface: fmt::Write {
   /// It has ended. Offered whenever [`open`](Self::open) was, including after a refused write —
   /// see [`Painter::styled_with`].
   fn close(&mut self, role: Role, style: Style) -> fmt::Result;
+
+  /// One placement unit and the cells the terminal gives it — see [`Advances`].
+  ///
+  /// # Why this is an obligation and not a defaulted observer
+  ///
+  /// A default of `self.write_str(text)` would compile, and every surface that forgot to place
+  /// text would then silently place it wrong: the failure would be a caret in the wrong cell in a
+  /// medium nobody re-read, not a build error. The direction a default fails in is what decides
+  /// whether to have one, so this has none — a third surface has to say what a cell is before it
+  /// can exist, which is the same reason the SVG surface's class table is a `match` over [`Role`]
+  /// rather than a lookup with a fallback.
+  fn advance(&mut self, text: &str, cells: u64) -> fmt::Result;
 }
 
 /// The surface a terminal render is drawn on: text as it is, and a role as an SGR pair.
@@ -95,6 +107,13 @@ impl Surface for Ansi<'_> {
     self
       .out
       .write_fmt(format_args!("{}", to_anstyle(style).render_reset()))
+  }
+
+  /// The cells are dropped, because a terminal moves its own cursor: the device that this surface
+  /// writes to is the one thing in the crate that does not have to be told where a cell is.
+  #[inline]
+  fn advance(&mut self, text: &str, _cells: u64) -> fmt::Result {
+    self.out.write_str(text)
   }
 }
 
@@ -278,17 +297,52 @@ impl<'a> Painter<'a> {
 /// every medium. It is not the terminal's guarantee alone: a C0 character other than tab, newline
 /// and carriage return is unrepresentable in XML, so the same substitution is what keeps an SVG
 /// document well-formed.
+///
+/// # It hands over clusters, and that is a placement decision rather than a taste
+///
+/// This forwarded one **scalar** at a time, which is the shape a substitution table suggests and
+/// the wrong unit for everything downstream of it. `👩‍💻` is one grapheme cluster, two cells and
+/// one glyph; as three scalars it is 2 + 0 + 2, so a medium that measures what it is handed made a
+/// source row four cells wide while the marker row under it was placed by
+/// [`LineCells`](super::LineCells) at two — a caret two cells away from the glyph it names, which
+/// is the one failure this crate exists to prevent.
+///
+/// So the walk is [`measured`](super::width::measured) — [`LineCells`](super::LineCells)' own —
+/// and each cluster crosses the seam whole, with the cells it was measured at. A control character
+/// is the exception in both directions: it is spent per SCALAR, because each stand-in is a glyph of
+/// its own, and it is measured as the stand-in rather than as the cluster, which is the answer for
+/// `CR LF` and the same answer for everything else.
 pub(super) struct Shown<'a>(&'a mut dyn Surface);
 
 impl fmt::Write for Shown<'_> {
   fn write_str(&mut self, text: &str) -> fmt::Result {
-    for character in text.chars() {
-      // `self.0`, not `self` — the default `write_char` forwards to `write_str`.
-      self
-        .0
-        .write_char(super::width::control_picture(character).unwrap_or(character))?;
+    let mut picture = [0; 4];
+    for (cluster, cells) in super::width::measured(text) {
+      if super::width::holds_a_control(cluster) {
+        for character in cluster.chars() {
+          let stand_in = super::width::control_picture(character).unwrap_or(character);
+          self.0.advance(stand_in.encode_utf8(&mut picture), 1)?;
+        }
+      } else {
+        self.0.advance(cluster, cells)?;
+      }
     }
     Ok(())
+  }
+}
+
+/// The path for text whose producer has already expanded and substituted it, and already knows what
+/// it measured — [`LineCells::write_expanded_upto`](super::LineCells::write_expanded_upto), which
+/// is the only caller.
+///
+/// Not a hole in the sanitizer: that walk replaces every control character itself, because it is
+/// the only one that can tell a tab it must spend against a stop from a tab it must draw. Passing
+/// its output back through the substitution above would be a second application of an idempotent
+/// rule at the price of re-segmenting the clusters it just measured.
+impl super::width::Advances for Shown<'_> {
+  #[inline]
+  fn advance(&mut self, text: &str, cells: u64) -> fmt::Result {
+    self.0.advance(text, cells)
   }
 }
 

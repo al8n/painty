@@ -276,9 +276,11 @@ therefore has an SVG at no cost, the document's rows are character for character
 terminal writes, and the invariant that a style changes appearance and never changes which source is
 marked is inherited rather than restated. It is an image of a *terminal*: a monospace grid, because
 SVG has no layout engine and placing a label under variable-width text needs that text's advance in
-a font this crate has no business owning. Roles become CSS classes with `painty::html`'s own names,
-and the document carries a `<style>` element generated from the palette so it stands alone in a
-README while an outer sheet still overrides it.
+a font this crate has no business owning. What the crate does have is the cell each grapheme cluster
+was assigned, so every cluster is drawn at an absolute coordinate computed from that — no font
+metric enters the placement, and a caret is under its glyph in any face at all. Roles become CSS
+classes with `painty::html`'s own names, and the document carries a `<style>` element generated from
+the palette so it stands alone in a README while an outer sheet still overrides it.
 
 ### The placement model
 

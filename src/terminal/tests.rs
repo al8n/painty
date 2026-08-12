@@ -1672,7 +1672,7 @@ fn a_zero_width_run_is_stopped_by_the_byte_budget_and_by_nothing_else() {
   // And the writer replays to that offset rather than re-deriving one, so it cannot disagree.
   let mut written = String::new();
   cells
-    .write_expanded_upto(&mut written, stopped.drawn_end)
+    .write_expanded_upto(&mut super::width::Plain(&mut written), stopped.drawn_end)
     .expect("a String is writable");
   assert_eq!(
     written.len(),

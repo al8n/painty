@@ -615,8 +615,9 @@ impl<P: Palette> Terminal<P> {
   /// A **monospace image of a terminal**, deliberately, and not a drawing with real geometry: SVG
   /// has no layout engine, so placing a label under a span of variable-width text needs that text's
   /// advance in the font that will draw it — a measurement this crate has no font to take and does
-  /// not intend to acquire. Each row is therefore one `<text>` with a `textLength`, which lands
-  /// every glyph on its cell for any fixed-advance face whatever that face's advance happens to be.
+  /// not intend to acquire. What it does have is the cell each grapheme cluster was assigned, so
+  /// every cluster is drawn at an absolute coordinate computed from that: no font metric enters the
+  /// placement, and a caret is under its glyph in any face at all.
   ///
   /// # The stylesheet, and the class per [`Role`]
   ///
@@ -639,14 +640,36 @@ impl<P: Palette> Terminal<P> {
   /// no equivalent — SVG text has no background, and drawing one means a rectangle as wide as a run
   /// that has not been written yet — so it is dropped. None of painty's built-in themes sets one.
   ///
-  /// # Two passes over the diagnostic
+  /// # Two passes over the diagnostic, and exactly one formatting of its message
   ///
   /// An SVG declares its size in its root element, and the size is a function of the whole render.
   /// The alternative is materialising the document to measure it, which would take from a bounded
   /// writer the ability to refuse something it never saw — the property [`render`](Self::render) is
-  /// built around. So the render runs twice and nothing is held. What that assumes is that a
-  /// caller's [`fmt::Display`] writes the same thing twice; one that does not gets a viewport that
-  /// disagrees with its contents, which is a wrong size rather than a wrong marking.
+  /// built around, and `tests/writer_discipline.rs` holds it to. So the render runs twice and no
+  /// document is ever held.
+  ///
+  /// Running it twice used to mean **formatting the caller's message twice**, and that is not an
+  /// assumption a renderer is entitled to make. A [`Display`](fmt::Display) may be stateful — a
+  /// counter, a cursor over a stream, a value that reports how many times it has been asked — and
+  /// nothing in its contract says two formattings agree. One that did not was silently given a
+  /// viewport measured against text the document does not contain.
+  ///
+  /// So the message is formatted **once**, into a string, and both passes read that string. It is
+  /// the only input a render has that is not already a `&str`: the code, the labels, the origins,
+  /// the help and every byte of source text are borrowed data that reads the same however often it
+  /// is walked. What it costs is that string — the same bytes [`render`](Self::render) would have
+  /// handed the writer, held instead of streamed — and what it buys is that the two passes are two
+  /// walks over one value rather than two invocations of a caller's code.
+  ///
+  /// # What the first pass still spends before the writer is asked anything
+  ///
+  /// Written down rather than left to be found. The measuring pass builds the render's plan and
+  /// walks every drawn row before `out` is offered its first byte, so a writer that refuses after a
+  /// fixed count cannot stop it. What that costs is now bounded by data the
+  /// caller already holds — a plan is linear in the labels, a row is bounded by
+  /// [`max_source_bytes`](Self::max_source_bytes), and the one input that could be *synthesized*
+  /// rather than supplied is spent once, above. A small `Display` producing a gigabyte is a
+  /// gigabyte of work, not two.
   ///
   /// # The capability is not consulted
   ///
@@ -673,8 +696,12 @@ impl<P: Palette> Terminal<P> {
   ///   .unwrap();
   ///
   /// assert!(out.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
-  /// assert!(out.contains(r#"<tspan class="painty-primary">^^^^^</tspan>"#));
   /// assert!(out.ends_with("</svg>\n"));
+  ///
+  /// // The five cells `width` occupies, each carrying its own coordinate — which is what puts
+  /// // them under the five cells of the word above whatever face draws the image.
+  /// assert!(out.contains(r#"<tspan class="painty-primary">"#));
+  /// assert_eq!(out.matches(r#">^</tspan>"#).count(), 5);
   /// ```
   #[cfg(feature = "svg")]
   #[cfg_attr(docsrs, doc(cfg(feature = "svg")))]
@@ -684,14 +711,22 @@ impl<P: Palette> Terminal<P> {
     inputs: &[Input<'_>],
     out: &mut impl fmt::Write,
   ) -> fmt::Result {
-    use super::svg::{Document, Extent, close_document, open_document};
+    use super::svg::{Document, Extent, Verbatim, close_document, open_document};
+
+    // Once, before either pass, and the value the passes see is a `&str`. Formatting it inside the
+    // measuring pass would be the same defect one layer down: what the second pass then renders is
+    // a second answer from the same caller.
+    let mut message = String::new();
+    fmt::Write::write_fmt(&mut message, format_args!("{}", diagnostic.message()))?;
+    let verbatim = Verbatim(&message);
+    let diagnostic = &diagnostic.saying(&verbatim);
 
     let mut extent = Extent::new();
     self.draw(diagnostic, inputs, &mut extent, ColorCapability::TrueColor)?;
-    let widths = extent.finish();
+    let (cells, rows) = extent.finish();
 
-    open_document(out, &widths, &self.palette)?;
-    let mut document = Document::new(out, &widths);
+    open_document(out, cells, rows, &self.palette)?;
+    let mut document = Document::new(out);
     self.draw(
       diagnostic,
       inputs,

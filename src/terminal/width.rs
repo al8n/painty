@@ -240,7 +240,7 @@ impl<'a> LineCells<'a> {
   /// what it asked for; [`Terminal`](super::Terminal) bounds what IT draws instead — see
   /// [`Terminal::max_source_bytes`](super::Terminal::max_source_bytes).
   pub fn write_expanded(&self, out: &mut impl fmt::Write) -> fmt::Result {
-    self.write_expanded_upto(out, self.line.text().len())
+    self.write_expanded_upto(&mut Plain(out), self.line.text().len())
   }
 
   /// Everything the renderer needs about one line and every mark on it, in a single walk that
@@ -373,12 +373,25 @@ impl<'a> LineCells<'a> {
   /// [`place_marks`](Self::place_marks) slices: a check sees a cluster only after the segmenter has
   /// read it, and the cluster starting at a stop can be the whole rest of the file. `drawn_end` is
   /// a cluster boundary of the line, so the slice segments to the same units the geometry measured.
+  ///
+  /// # It hands over units, not characters, and the cells with them
+  ///
+  /// The sink is an [`Advances`] rather than a [`fmt::Write`], so a cluster crosses it **whole**
+  /// and carries the number this walk already computed for it. A medium that has to place the text
+  /// itself — the SVG surface — therefore never re-derives the segmentation or the width, and
+  /// cannot answer either differently from [`column_at`](Self::column_at): a `👩‍💻` is two cells
+  /// here and two cells there because it is the same measurement and not two agreeing ones.
+  ///
+  /// Character by character is what this used to be, and it is exactly the defect that shape
+  /// produces: a writer downstream saw `👩`, U+200D and `💻` as three fragments, measured 2 + 0 + 2,
+  /// and stretched a row to four cells for a cluster the marker row was placed under at two.
   pub(crate) fn write_expanded_upto(
     &self,
-    out: &mut impl fmt::Write,
+    out: &mut impl Advances,
     byte_end: usize,
   ) -> fmt::Result {
     let text = self.upto(byte_end);
+    let mut picture = [0; 4];
     for unit in Units::new(text, self.tab_width) {
       let cluster = &text[unit.start..unit.end];
       // Before the control arm, and that ORDER is the tab's whole exception. `control_picture` has
@@ -388,14 +401,21 @@ impl<'a> LineCells<'a> {
       // unconditional for everyone who has no stop to spend it against.
       if cluster == "\t" {
         for _ in 0..unit.cells {
-          out.write_char(' ')?;
+          out.advance(" ", 1)?;
         }
       } else if holds_a_control(cluster) {
+        // One cell per stand-in, which is the SUBSTITUTION's width and not the cluster's. The two
+        // are the same for every control character a line can hold — the table gives each of them
+        // one cell — and they part on exactly one input, `CR LF`, which UAX#29 joins into a single
+        // cluster of width 1 while two pictures occupy two cells. A `Line`'s text is what lies
+        // between two breaks and so cannot contain U+000A, which is why that input cannot arrive
+        // here; `a_carriage_return_is_one_cell_wherever_it_is_measured` is what says so.
         for character in cluster.chars() {
-          out.write_char(control_picture(character).unwrap_or(character))?;
+          let stand_in = control_picture(character).unwrap_or(character);
+          out.advance(stand_in.encode_utf8(&mut picture), 1)?;
         }
       } else {
-        out.write_str(cluster)?;
+        out.advance(cluster, unit.cells)?;
       }
     }
     Ok(())
@@ -440,6 +460,47 @@ impl<'a> LineCells<'a> {
   /// The placement units of this line, left to right.
   fn units(&self) -> Units<'a> {
     Units::new(self.line.text(), self.tab_width)
+  }
+}
+
+/// Where a drawn line's placement units go, and what each of them was measured at.
+///
+/// # This is the seam an advance is carried across
+///
+/// A terminal does not need it: it moves its own cursor, so a row of text is a row of bytes and the
+/// cells are the device's business. A medium that has to **place** the text itself does need it,
+/// and there are only two ways it can get one — carried from the walk that already computed it, or
+/// derived again downstream from whatever fragments happen to arrive.
+///
+/// The second is what the SVG surface did, and both halves of it were wrong. The fragments were
+/// wrong, because [`Shown`](super::paint::Shown) forwarded one scalar at a time and a cluster is
+/// not one scalar. And deriving at all is wrong even when the fragments are right, because it makes
+/// "the row is as wide as its cells" a claim about two pieces of code agreeing rather than a
+/// property of one measurement — the same argument [`Units`]' own documentation makes about
+/// cross-checking two layers that share a model.
+///
+/// So the unit and its cells travel together. `cells` is the number
+/// [`column_at`](LineCells::column_at) placed that unit's successor at, which is what makes a
+/// marker row land under the glyph above it by construction.
+pub(crate) trait Advances {
+  /// One placement unit — a grapheme cluster as a terminal will draw it, already expanded against
+  /// its tab stops and with any control character replaced — and the cells it occupies.
+  ///
+  /// Never a line break: a row's end is the writer's business and not a unit's.
+  fn advance(&mut self, text: &str, cells: u64) -> fmt::Result;
+}
+
+/// A plain writer as a sink, for the callers that draw text without placing it.
+///
+/// [`LineCells::write_expanded`] is public and takes a [`fmt::Write`], because a caller drawing its
+/// own excerpt into a terminal has a cursor and no use for the measure. The cells are dropped here
+/// rather than at the walk, so that there is still only one walk.
+pub(crate) struct Plain<'a, W: ?Sized>(pub(crate) &'a mut W);
+
+impl<W: fmt::Write + ?Sized> Advances for Plain<'_, W> {
+  #[inline]
+  fn advance(&mut self, text: &str, _cells: u64) -> fmt::Result {
+    self.0.write_str(text)
   }
 }
 
@@ -656,13 +717,18 @@ impl<'a> Units<'a> {
   }
 }
 
-/// How many cells `text` occupies on a row that is already being drawn.
+/// The placement units of a fragment that is already being drawn, and the cells each occupies.
 ///
-/// The SVG surface's measure, and it is deliberately this function rather than one of its own.
-/// That surface has to agree with [`LineCells`] about a source row's width — a marker row is
-/// placed against the row above it, and a document sized by one rule and filled by another puts
-/// the two on different grids. Sharing the walk makes them agree by construction, which is the
-/// repair this crate has already had to make once for the elision rule.
+/// Deliberately this walk rather than one of its own. Everything that has to place text has to
+/// agree with [`LineCells`] about where a cell is — a marker row is placed against the row above
+/// it, and a document sized by one rule and filled by another puts the two on different grids — so
+/// the segmentation and the width come from the same iterator that answers
+/// [`column_at`](LineCells::column_at), and the answers are one measurement rather than two that
+/// happen to match.
+///
+/// This is the *fallback*. Text painty already measured crosses [`Advances`] with its number
+/// attached and never reaches here; what does reach here is painty's own frame — bars, brackets,
+/// digits, padding — whose fragments are the crate's own literals.
 ///
 /// # There is no tab stop here, because no tab reaches this
 ///
@@ -677,9 +743,14 @@ impl<'a> Units<'a> {
 /// **Asserted rather than defended.** A branch here for a tab would be a branch no plant can kill;
 /// `no_row_of_a_render_carries_a_tab` is what says the precondition holds, over every style and
 /// every case in the corpus.
-#[cfg(feature = "svg")]
+pub(super) fn measured(text: &str) -> impl Iterator<Item = (&str, u64)> {
+  Units::new(text, 1).map(move |unit| (&text[unit.start..unit.end], unit.cells))
+}
+
+/// How many cells `text` occupies, for the tests that need the number and not the units.
+#[cfg(all(test, feature = "svg"))]
 pub(super) fn cells_from(text: &str) -> u64 {
-  Units::new(text, 1).map(|unit| unit.cells).sum()
+  measured(text).map(|(_, cells)| cells).sum()
 }
 
 impl Iterator for Units<'_> {
@@ -764,7 +835,12 @@ pub(crate) fn control_picture(character: char) -> Option<char> {
 ///
 /// Measurement and writing consult this same predicate, which is what keeps the cells counted and
 /// the characters written in agreement.
-fn holds_a_control(cluster: &str) -> bool {
+///
+/// **Any**, rather than "is one", and UAX#29 is why the two are almost the same question: GB4 and
+/// GB5 break on both sides of a `Control`, so the only cluster that can hold a control character
+/// alongside anything else is `CR LF`, which GB3 joins. Every other cluster this answers `true` for
+/// is one character long.
+pub(super) fn holds_a_control(cluster: &str) -> bool {
   cluster.chars().any(|c| control_picture(c).is_some())
 }
 
