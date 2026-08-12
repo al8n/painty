@@ -656,6 +656,32 @@ impl<'a> Units<'a> {
   }
 }
 
+/// How many cells `text` occupies on a row that is already being drawn.
+///
+/// The SVG surface's measure, and it is deliberately this function rather than one of its own.
+/// That surface has to agree with [`LineCells`] about a source row's width — a marker row is
+/// placed against the row above it, and a document sized by one rule and filled by another puts
+/// the two on different grids. Sharing the walk makes them agree by construction, which is the
+/// repair this crate has already had to make once for the elision rule.
+///
+/// # There is no tab stop here, because no tab reaches this
+///
+/// A tab is the one unit whose width depends on where it already is, so a measure of a fragment
+/// would need the running column to price one. It does not get one, and the reason is upstream:
+/// source text is expanded against its stops by
+/// [`write_expanded_upto`](LineCells::write_expanded_upto) before it is written, and every other
+/// string reaches the writer through the sanitizer, which replaces U+0009 with a one-cell picture
+/// like every other control character. So the stop is fixed at one — an inert answer for a unit
+/// nothing can deliver — rather than a running column threaded through a surface to price it.
+///
+/// **Asserted rather than defended.** A branch here for a tab would be a branch no plant can kill;
+/// `no_row_of_a_render_carries_a_tab` is what says the precondition holds, over every style and
+/// every case in the corpus.
+#[cfg(feature = "svg")]
+pub(super) fn cells_from(text: &str) -> u64 {
+  Units::new(text, 1).map(|unit| unit.cells).sum()
+}
+
 impl Iterator for Units<'_> {
   type Item = Unit;
 

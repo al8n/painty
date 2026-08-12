@@ -157,17 +157,14 @@
 //! scratch buffer to sort in — the same answer §10 of the design already contemplates for elision
 //! in layer 2 — and nothing here forecloses it.
 
-mod escape;
-
 #[cfg(test)]
 mod tests;
 
 use core::fmt;
 
-use escape::Escaped;
-
 use crate::{
   Diagnostic, Input, Line, Position, Role, Severity, Source, Span, elide,
+  escape::Escaped,
   source::{Walk, clip, draws_on, ends_on},
 };
 

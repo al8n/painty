@@ -1,4 +1,12 @@
-//! The one thing between a caller's text and a document a browser will execute.
+//! The one thing between a caller's text and a markup document that would otherwise execute it.
+//!
+//! # Why this is not the HTML renderer's
+//!
+//! It was, until there was a second markup output. The rule below is the same five characters for
+//! HTML and for the XML an SVG document is, so a copy behind the second feature would be the shape
+//! this crate has already paid for twice — `Input`, and the elision rule, the second of which
+//! produced a divergence before it was one module. An escaping census is worth having only if it
+//! is a question about one file.
 //!
 //! # Why an adapter and not a function over `&str`
 //!
@@ -15,15 +23,23 @@
 //! this?" is a question a writer three calls down the stack cannot answer and a reviewer cannot
 //! check. One rule, applied everywhere, is a rule an escaping census can state.
 //!
-//! Nothing else is touched. A control character is not an injection vector in HTML — it is not
-//! markup, it cannot leave its element, and a browser renders it as nothing — where in a terminal
-//! `\x1b` *is* the escape mechanism. That difference is why the terminal substitutes control
-//! pictures and this does not.
+//! Nothing else is touched, and the two consumers are owed different accounts of why. A control
+//! character is not an injection vector in **HTML** — it is not markup, it cannot leave its
+//! element, and a browser renders it as nothing — where in a terminal `\x1b` *is* the escape
+//! mechanism. In **XML** a C0 character other than tab, newline and carriage return is not
+//! representable at all, not even as a numeric reference, so a document carrying one is not
+//! well-formed. That is not this file's problem either, and the reason is worth stating rather
+//! than trusting: the SVG surface sits *under* the terminal renderer, so every byte reaching it
+//! has already been through that renderer's control-character substitution — and the rule that
+//! keeps an ESC out of a terminal is the same rule that keeps a C0 out of the XML.
+
+#[cfg(test)]
+mod tests;
 
 use core::fmt;
 
 /// A writer that escapes as it goes.
-pub(super) struct Escaped<'a>(pub(super) &'a mut dyn fmt::Write);
+pub(crate) struct Escaped<'a>(pub(crate) &'a mut dyn fmt::Write);
 
 impl fmt::Write for Escaped<'_> {
   /// Written in runs rather than character by character, so ordinary text costs one `write_str`
@@ -70,12 +86,12 @@ const fn entity(character: char) -> Option<&'static str> {
 /// `write_str` is what a disagreement between them would reach. `every_escaped_character_has_an_
 /// entity` is what makes that a failing test rather than a panic in a caller's render.
 #[cfg(test)]
-pub(super) const fn escaped() -> [char; 5] {
+pub(crate) const fn escaped() -> [char; 5] {
   ESCAPED
 }
 
 /// The entity table, for the same test.
 #[cfg(test)]
-pub(super) const fn entity_of(character: char) -> Option<&'static str> {
+pub(crate) const fn entity_of(character: char) -> Option<&'static str> {
   entity(character)
 }

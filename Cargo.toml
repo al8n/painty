@@ -24,6 +24,9 @@ std = []
 terminal = ["std", "dep:unicode-width", "dep:unicode-segmentation", "dep:anstyle"]
 html = []
 model = []
+# A second surface under the terminal renderer rather than a renderer of its own, which is why it
+# implies `terminal` and brings no dependency — see `Terminal::render_svg`.
+svg = ["terminal"]
 tokora = ["dep:tokora"]
 
 [dependencies]

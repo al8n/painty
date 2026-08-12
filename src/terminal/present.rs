@@ -83,11 +83,35 @@
 //! **The two new methods fell on opposite sides, and that is the useful part.** `margin` is the
 //! most cell-denominated method in the trait — it exists precisely to let a style draw ACROSS the
 //! columns — while `close_render` is pure document structure and an HTML style would answer it by
-//! closing an element. So the split the earlier verdict guessed at is now visible as a line through
-//! the middle of the trait: **six structure hooks** (`header`, `open_block`, `close_block`, `help`,
-//! `close_render`, `opens_in_margin`) that name what a region IS, and **seven geometry hooks** that
-//! name where a glyph GOES. Three implementations added since that verdict landed on both sides of
-//! it and did not blur it.
+//! closing an element.
+//!
+//! ## That was read as a line through the middle of the trait, and it is not one
+//!
+//! The sentence this replaced said the split was **six structure hooks** (`header`, `open_block`,
+//! `close_block`, `help`, `close_render`, `opens_in_margin`) that name what a region IS, against
+//! **seven geometry hooks** that name where a glyph GOES. The numbers are right and the reading is
+//! not, and the correction is not a re-count — it is that the two columns above are answering one
+//! question rather than describing two kinds of method.
+//!
+//! The question is **does a cell appear in what this hook is handed?** Run it over all thirteen and
+//! the tally is not six against seven:
+//!
+//! * `header` is the **only** method with no cell anywhere in its parameters.
+//! * `open_block`, `close_block`, `help` and `close_render` take `gutter: u64`, a cell width. They
+//!   pass by DISCARDING it — the table above says "yes, ignoring `gutter`" four times — which is
+//!   not the same as not being asked.
+//! * `opens_in_margin` is handed [`Onset`], whose [`drawn`](Onset::drawn) is
+//!   [`Measure::draws_the_start_of`](super::render::Measure) — a question about the cell window the
+//!   row was cut to. It passes because a browser never cuts a row, so the answer is a constant.
+//!   And it names neither a region nor a glyph: it decides whether a MARK gets a row of its own.
+//! * The remaining seven are denominated in cells outright.
+//!
+//! So the honest statement is that **this trait is cell-denominated throughout, with one exception
+//! and five survivals**, and "structure hook" was a name for the survivals rather than a category
+//! they belong to. That does not weaken the conclusion below — it strengthens it, because a trait
+//! with one medium-independent method is further from being a shared seam than a trait split down
+//! the middle would be. Three implementations added since the original verdict changed neither the
+//! tally nor this reading.
 //!
 //! §4 of the design already draws the same line — resolution reports *character* columns and the
 //! terminal converts to *display* columns — and this trait sits **below** the conversion, because
@@ -99,14 +123,35 @@
 //! a row.
 //!
 //! **So Phase 3 is a peer of [`Terminal`](super::Terminal), not an implementor of this** — the
-//! same conclusion as before, now with four implementations behind it instead of two. What the
-//! outputs share is [`Plan`](super::render::Plan) — which lines are drawn, where each span's ends
-//! fall, which bracket runs where, what is elided — and a plan is stated in lines and byte spans,
-//! which every medium has. If a medium-independent version of this trait is ever wanted, the change
-//! it needs is still what it was, and the third style added one more to the list: hand a style a
-//! `RegionLine`, which carries the line and the byte span it covers, instead of a `Range<u64>` of
-//! cells; a semantic bracket value instead of a `char`; and, for `margin`, the SET of brackets a
-//! row shows instead of a run to be painted over cells.
+//! same conclusion as before, now with four implementations behind it instead of two.
+//!
+//! ## What the outputs share, corrected by the renderer that was then built
+//!
+//! This used to say the outputs share [`Plan`](super::render::Plan) — which lines are drawn, where
+//! each span's ends fall, which bracket runs where, what is elided. That was a **prediction made
+//! before there was a second output**, and `painty::html` falsified it. It shares
+//! [`Source`](crate::Source), [`Line`](crate::Line), [`Region`](crate::Region) and
+//! [`RegionLine`](crate::RegionLine), and it shares [`elide`](crate::elide) — and it does not share
+//! this plan, which is `pub(super)` to this module, is built by asking a `Presentation` and a cell
+//! budget questions, and is four `Vec`s in a renderer that has no allocator.
+//!
+//! The true half of the prediction is the VOCABULARY: a plan-shaped answer is stated in lines and
+//! byte spans, which every medium does have. What is not true is that the value is shared, and the
+//! difference is the whole cost of a second renderer — HTML re-derives the block order, the
+//! ascending stop walk, the anchors, the elision loop, the label order under a line, and whether a
+//! bracket opens at a line, as allocation-free selection scans at `O(k²)`. The one piece that was
+//! *extracted* rather than re-derived is [`elide`](crate::elide), and it was extracted because two
+//! copies of it put a line in neither output.
+//!
+//! [`Terminal::render_svg`](super::Terminal::render_svg) is the other side of the same finding: it
+//! is a second **surface** under this plan rather than a third renderer beside it, and so it costs
+//! no copy of any of that. See [`svg`](super::svg) for why the choice went that way.
+//!
+//! If a medium-independent version of this trait is ever wanted, the change it needs is still what
+//! it was, and the third style added one more to the list: hand a style a `RegionLine`, which
+//! carries the line and the byte span it covers, instead of a `Range<u64>` of cells; a semantic
+//! bracket value instead of a `char`; and, for `margin`, the SET of brackets a row shows instead of
+//! a run to be painted over cells.
 //!
 //! What a caller gets instead of a trait is the choice —
 //! [`Terminal::like_rustc`](super::Terminal::like_rustc),

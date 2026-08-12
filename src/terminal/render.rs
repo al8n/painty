@@ -11,7 +11,7 @@ use super::{
   ariadne::Ariadne,
   codespan::Codespan,
   miette::Miette,
-  paint::Painter,
+  paint::{Ansi, Painter, Surface},
   present::{Drawn, Frame, Onset, Part, Presentation, Standing},
   rustc::Rustc,
   width::{Budget, Mark},
@@ -596,6 +596,129 @@ impl<P: Palette> Terminal<P> {
     inputs: &[Input<'_>],
     out: &mut impl fmt::Write,
   ) -> fmt::Result {
+    let mut surface = Ansi::new(out);
+    self.draw(diagnostic, inputs, &mut surface, self.capability)
+  }
+
+  /// Writes the same render as [`render`](Self::render), as an SVG image of a terminal.
+  ///
+  /// # It is a surface, not a second renderer
+  ///
+  /// The plan, the style, the elision and the geometry are [`render`](Self::render)'s — the same
+  /// call, writing to a different medium. So every style already has an SVG:
+  /// [`like_rustc`](Self::like_rustc), [`like_miette`](Self::like_miette),
+  /// [`like_ariadne`](Self::like_ariadne) and [`like_codespan`](Self::like_codespan) draw here with
+  /// nothing added, and the invariant that a style changes appearance and never changes which
+  /// source is marked is inherited rather than restated. The document's rows are, character for
+  /// character, the rows [`render`](Self::render) writes.
+  ///
+  /// A **monospace image of a terminal**, deliberately, and not a drawing with real geometry: SVG
+  /// has no layout engine, so placing a label under a span of variable-width text needs that text's
+  /// advance in the font that will draw it — a measurement this crate has no font to take and does
+  /// not intend to acquire. Each row is therefore one `<text>` with a `textLength`, which lands
+  /// every glyph on its cell for any fixed-advance face whatever that face's advance happens to be.
+  ///
+  /// # The stylesheet, and the class per [`Role`]
+  ///
+  /// The document carries a `<style>` element generated from this renderer's palette, so it stands
+  /// alone in a README with no stylesheet attached; the runs carry **classes**, so an outer sheet
+  /// still overrides it. The names are `painty::html`'s, so one list of selectors themes both:
+  ///
+  /// | class | [`Role`] |
+  /// |---|---|
+  /// | `painty-error`, `painty-warning`, `painty-advice` | `Role::Severity` |
+  /// | `painty-code` | `Role::Code` |
+  /// | `painty-gutter` | `Role::Gutter` |
+  /// | `painty-number` | `Role::LineNumber` |
+  /// | `painty-text` | `Role::SourceText` |
+  /// | `painty-primary`, `painty-secondary` | `Role::PrimaryLabel`, `Role::SecondaryLabel` |
+  /// | `painty-help` | `Role::Help` |
+  ///
+  /// A role the palette asks nothing of gets no rule, which is what leaves `painty-text` free for
+  /// an embedder to claim. [`Style::background`](crate::Style::background) is the one property with
+  /// no equivalent — SVG text has no background, and drawing one means a rectangle as wide as a run
+  /// that has not been written yet — so it is dropped. None of painty's built-in themes sets one.
+  ///
+  /// # Two passes over the diagnostic
+  ///
+  /// An SVG declares its size in its root element, and the size is a function of the whole render.
+  /// The alternative is materialising the document to measure it, which would take from a bounded
+  /// writer the ability to refuse something it never saw — the property [`render`](Self::render) is
+  /// built around. So the render runs twice and nothing is held. What that assumes is that a
+  /// caller's [`fmt::Display`] writes the same thing twice; one that does not gets a viewport that
+  /// disagrees with its contents, which is a wrong size rather than a wrong marking.
+  ///
+  /// # The capability is not consulted
+  ///
+  /// [`ColorCapability`] decides which escape sequences a *terminal* may be sent. This medium has
+  /// none, so the palette is read at full fidelity and `Terminal::plain()` produces a coloured
+  /// image. Asking for no colour is [`Theme::monochrome`](crate::Theme::monochrome), which is the
+  /// same answer [`Style::without_color`](crate::Style::without_color) already gives.
+  ///
+  /// ```
+  /// use painty::{Diagnostic, Location, Severity, Source, Span, terminal::{Input, Terminal}};
+  ///
+  /// let text = "type Widget {\n  width: Int\n}\n";
+  /// let diagnostic = Diagnostic::new(
+  ///   "mylang::schema::duplicate-field",
+  ///   Severity::Error,
+  ///   &"`width` is defined twice",
+  ///   Location::new(0, Span::new(16, 21)),
+  /// )
+  /// .with_primary_label("redefined here");
+  ///
+  /// let mut out = String::new();
+  /// Terminal::plain()
+  ///   .render_svg(&diagnostic, &[Input::new(Source::new(text))], &mut out)
+  ///   .unwrap();
+  ///
+  /// assert!(out.starts_with("<svg xmlns=\"http://www.w3.org/2000/svg\""));
+  /// assert!(out.contains(r#"<tspan class="painty-primary">^^^^^</tspan>"#));
+  /// assert!(out.ends_with("</svg>\n"));
+  /// ```
+  #[cfg(feature = "svg")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "svg")))]
+  pub fn render_svg(
+    &self,
+    diagnostic: &Diagnostic<'_>,
+    inputs: &[Input<'_>],
+    out: &mut impl fmt::Write,
+  ) -> fmt::Result {
+    use super::svg::{Document, Extent, close_document, open_document};
+
+    let mut extent = Extent::new();
+    self.draw(diagnostic, inputs, &mut extent, ColorCapability::TrueColor)?;
+    let widths = extent.finish();
+
+    open_document(out, &widths, &self.palette)?;
+    let mut document = Document::new(out, &widths);
+    self.draw(
+      diagnostic,
+      inputs,
+      &mut document,
+      ColorCapability::TrueColor,
+    )?;
+    document.finish()?;
+    close_document(out)
+  }
+
+  /// One render, onto whatever surface it is given.
+  ///
+  /// Everything above the surface — the plan, the style, the gutter, the order of the hooks — is
+  /// the same call whatever the medium, which is the whole of what makes a second output a
+  /// surface rather than a second renderer.
+  ///
+  /// The capability is a parameter rather than read off `self` because it is a fact about the
+  /// DEVICE and not about the render: it decides which escapes may be emitted, and a medium with
+  /// no escapes is not the one it was answered for. See
+  /// [`render_svg`](Self::render_svg).
+  pub(super) fn draw(
+    &self,
+    diagnostic: &Diagnostic<'_>,
+    inputs: &[Input<'_>],
+    surface: &mut dyn Surface,
+    capability: ColorCapability,
+  ) -> fmt::Result {
     // Measured against the same stops and the same budget the rows below are, and by one value
     // rather than two, because the plan decides one thing about a row it does not draw — see
     // [`Measure`].
@@ -603,7 +726,7 @@ impl<P: Palette> Terminal<P> {
     let style = self.presentation;
     let mut plan = Plan::of(diagnostic, inputs, measure, style);
     let gutter = plan.gutter();
-    let mut paint = Painter::new(out, &self.palette, self.capability);
+    let mut paint = Painter::new(surface, &self.palette, capability);
 
     style.header(&mut paint, diagnostic)?;
 

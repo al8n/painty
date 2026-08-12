@@ -5,28 +5,115 @@
 //! terminal unread. Those are one answer for the whole renderer, and a style that could give a
 //! second one would be a style that can defeat [`ColorCapability::None`] — which is the guarantee
 //! this crate exists to make.
+//!
+//! # The medium is [`Surface`] and it is the second thing this file settles
+//!
+//! Every byte of a render reaches the writer through [`Painter`], and every byte that carries
+//! meaning reaches it through [`styled`](Painter::styled) or
+//! [`styled_with`](Painter::styled_with) — which know the [`Role`]. A `Presentation` never touches
+//! a writer, so the pair "which glyphs, in what arrangement" and "where the bytes go" are already
+//! two sides of a seam; this file is that seam's second half.
+//!
+//! Naming it is what makes an output that is **not** a stream of ANSI possible without a second
+//! renderer. The alternative — reading a finished render back — recovers colours rather than
+//! roles, and recovers nothing at all at [`ColorCapability::None`], which is what
+//! [`Terminal::plain`](super::Terminal::plain) selects. See
+//! [`Terminal::render_svg`](super::Terminal::render_svg), whose whole cost is one implementor of
+//! this trait.
 
 use core::fmt;
 
 use super::ColorCapability;
 use crate::{Color, Palette, Role, Style};
 
-/// The surface a render is drawn on.
+/// Where a render's bytes go, and what it is told about them.
 ///
-/// Holds the writer as `&mut dyn` rather than by generic parameter, so that
+/// A [`fmt::Write`] plus the two events a plain writer cannot see: a run of text carrying a
+/// [`Role`] beginning and ending. The terminal's own implementor spends them on SGR; another
+/// medium spends them on whatever it has.
+///
+/// # Both the role and the resolved style, because the two media want different halves
+///
+/// [`Ansi`] needs the [`Style`] — a colour, narrowed to what the terminal can carry — and has no
+/// use for the role, having already been given its consequence. A markup surface needs the
+/// **role**, because a class is what lets a stylesheet own appearance, and a resolved colour
+/// written into the document is the inline style this crate declined for HTML. Handing over the
+/// pair costs nothing and means neither surface has to re-derive the other's half.
+///
+/// What it does cost is that [`Ansi`] converts the same [`Style`] twice per run, where the pair
+/// used to be built once. That is a handful of branches against one indirect call per WRITE, and
+/// the alternative — a converted value carried between the two calls — is state a surface would
+/// have to keep correct across a refused body.
+pub(super) trait Surface: fmt::Write {
+  /// A run of text in `role` is about to be written.
+  ///
+  /// Offered for **every** styled run, including one whose style asks for nothing: whether a plain
+  /// style is worth marking is the surface's question, not the painter's. Making that decision
+  /// here is what would hide the role from a medium that has no escapes to save.
+  fn open(&mut self, role: Role, style: Style) -> fmt::Result;
+
+  /// It has ended. Offered whenever [`open`](Self::open) was, including after a refused write —
+  /// see [`Painter::styled_with`].
+  fn close(&mut self, role: Role, style: Style) -> fmt::Result;
+}
+
+/// The surface a terminal render is drawn on: text as it is, and a role as an SGR pair.
+pub(super) struct Ansi<'a> {
+  out: &'a mut dyn fmt::Write,
+}
+
+impl<'a> Ansi<'a> {
+  pub(super) fn new(out: &'a mut dyn fmt::Write) -> Self {
+    Self { out }
+  }
+}
+
+impl fmt::Write for Ansi<'_> {
+  #[inline]
+  fn write_str(&mut self, text: &str) -> fmt::Result {
+    self.out.write_str(text)
+  }
+}
+
+impl Surface for Ansi<'_> {
+  /// Nothing at all for a style that asks for nothing, which is what keeps
+  /// [`ColorCapability::None`] free of escapes and a plain role free of an opener it would
+  /// immediately have to undo.
+  fn open(&mut self, _role: Role, style: Style) -> fmt::Result {
+    if style.is_plain() {
+      return Ok(());
+    }
+    self
+      .out
+      .write_fmt(format_args!("{}", to_anstyle(style).render()))
+  }
+
+  fn close(&mut self, _role: Role, style: Style) -> fmt::Result {
+    if style.is_plain() {
+      return Ok(());
+    }
+    self
+      .out
+      .write_fmt(format_args!("{}", to_anstyle(style).render_reset()))
+  }
+}
+
+/// The painter a render is drawn with.
+///
+/// Holds the surface as `&mut dyn` rather than by generic parameter, so that
 /// [`Presentation`](super::present::Presentation) has no type parameter in its methods and stays
 /// object-safe. The cost is one indirect call per write and the buy is that a style can be
 /// selected at run time, from a flag, without the renderer's type changing.
 pub(super) struct Painter<'a> {
-  out: &'a mut dyn fmt::Write,
+  out: &'a mut dyn Surface,
   palette: &'a dyn Palette,
   capability: ColorCapability,
 }
 
 impl<'a> Painter<'a> {
-  /// A surface over `out`, styled by `palette` down to what `capability` can carry.
+  /// A painter over `out`, styled by `palette` down to what `capability` can carry.
   pub(super) fn new(
-    out: &'a mut dyn fmt::Write,
+    out: &'a mut dyn Surface,
     palette: &'a dyn Palette,
     capability: ColorCapability,
   ) -> Self {
@@ -116,23 +203,28 @@ impl<'a> Painter<'a> {
   /// trade a caller's recoverable bug for a dead one, using the very writer that just misbehaved,
   /// and buy nothing at all under `panic = "abort"`. The reset is best-effort on the error path,
   /// which is the path a caller can actually reach by design.
+  ///
+  /// # The plain case reaches the surface too
+  ///
+  /// The "is it worth an escape" test used to sit here and return early, which was right while the
+  /// only surface was a terminal and wrong the moment a second one existed: a markup surface wants
+  /// the ROLE, and at [`ColorCapability::None`] — what [`Terminal::plain`](super::Terminal::plain)
+  /// selects — [`narrow`](Self::narrow) makes every style plain, so the early return would have
+  /// hidden every role in the render. It is [`Ansi::open`]'s now, where it emits the same bytes and
+  /// costs the other surface nothing.
   pub(super) fn styled_with(
     &mut self,
     role: Role,
     body: impl FnOnce(&mut Shown<'_>) -> fmt::Result,
   ) -> fmt::Result {
     let style = self.narrow(self.palette.style(role));
-    if style.is_plain() {
-      return body(&mut Shown(self.out));
-    }
-    let ansi = to_anstyle(style);
     // Once an opener has been offered a reset is offered too, including when the opener was itself
     // refused. That keeps the rule total — an opener is never the last thing this writes — instead
     // of leaving a case where it depends on how far the writer got. `and_then` is what holds the
     // other half: a refused opener must not run the body, which is the expensive part.
-    let opened = self.out.write_fmt(format_args!("{}", ansi.render()));
+    let opened = self.out.open(role, style);
     let written = opened.and_then(|()| body(&mut Shown(self.out)));
-    let reset = self.out.write_fmt(format_args!("{}", ansi.render_reset()));
+    let reset = self.out.close(role, style);
     written.and(reset)
   }
 
@@ -181,7 +273,12 @@ impl<'a> Painter<'a> {
 /// An adapter rather than a function over `&str`, so that a message's own [`fmt::Display`] is
 /// covered: the text a caller's type writes is as caller-supplied as the text it hands over
 /// directly, and a `Display` that emits an escape would otherwise walk straight past this.
-pub(super) struct Shown<'a>(&'a mut dyn fmt::Write);
+///
+/// Wraps a [`Surface`] rather than a bare writer so that the substitution happens on the way IN to
+/// every medium. It is not the terminal's guarantee alone: a C0 character other than tab, newline
+/// and carriage return is unrepresentable in XML, so the same substitution is what keeps an SVG
+/// document well-formed.
+pub(super) struct Shown<'a>(&'a mut dyn Surface);
 
 impl fmt::Write for Shown<'_> {
   fn write_str(&mut self, text: &str) -> fmt::Result {
