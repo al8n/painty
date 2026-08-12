@@ -503,6 +503,16 @@ impl<P: Palette> Terminal<P> {
   /// Both halves are pinned in `tests/writer_discipline.rs`: that no small input yields a large
   /// excerpt, and that a large label really does come out whole.
   ///
+  /// # Where "passes through" stops being true, which is one renderer and one input
+  ///
+  /// [`render_svg`](Self::render_svg) **retains** the message instead of printing it — it renders
+  /// twice and may only ask a [`Display`](fmt::Display) once — and the message is the one caller
+  /// input that is not a `&str` the caller had to allocate. So neither reason above survives there:
+  /// it does not stream past a writer that could refuse it, and a caller value of two words can
+  /// synthesize a gigabyte of it. That renderer, and only that renderer, bounds one caller input,
+  /// with [`max_svg_message_bytes`](Self::max_svg_message_bytes) — which refuses rather than
+  /// truncates, so the paragraph above still holds about what a diagnostic may quietly drop.
+  ///
   /// Nor does it bound the **connector margin** a bracketed span adds to the left of every row,
   /// which is one column per multi-line span and so is a function of the label count rather than of
   /// the source. That is the same k a marker row per label already is, and it is bounded for the
@@ -560,6 +570,65 @@ impl<P: Palette> Terminal<P> {
   #[must_use]
   pub const fn max_source_bytes() -> u64 {
     65_536
+  }
+
+  /// How many bytes of the caller's formatted message [`render_svg`](Self::render_svg) will hold.
+  ///
+  /// # Why this renderer bounds caller text when the others deliberately do not
+  ///
+  /// [`max_rendered_width`](Self::max_rendered_width) settles that painty does not bound the
+  /// caller's own words, and gives two reasons: caller text **passes through** — printed once,
+  /// straight to the writer, so a writer unwilling to take it refuses it — and the caller already
+  /// spent the memory it is asking painty to spend, so it can pass something shorter. That holds
+  /// for [`render`](Self::render) and for [`painty::html`](crate::html). Both halves of it are
+  /// false here, and this is the only place they are.
+  ///
+  /// It does not pass through. An SVG states its size in its root element, so the render runs
+  /// twice, and a [`Display`](fmt::Display) may not be asked twice — so the message is formatted
+  /// once and **retained** across both passes. None of it streams, and `out` is offered nothing
+  /// until all of it is in memory.
+  ///
+  /// And it is not the caller's memory. Every other input a [`Diagnostic`] carries is a `&str` the
+  /// caller allocated, so supplying a megabyte cost the caller a megabyte. The message is a
+  /// `&dyn Display`: two words that can synthesize a gigabyte, and the one input in this crate
+  /// whose size is not already bounded by memory the caller has spent.
+  ///
+  /// # What it costs a caller nowhere near it
+  ///
+  /// Nothing. This is a ceiling and not a size: the capture allocates what was written and nothing
+  /// is reserved against this number, so an ordinary message costs an ordinary message.
+  ///
+  /// # What a caller sees, and how it tells this apart from its own writer refusing
+  ///
+  /// `Err(`[`fmt::Error`]`)` — and **`out` was never offered a byte**. The message is captured
+  /// before the root element is written, so a refusal here happens before the writer is consulted
+  /// at all, which is what distinguishes the two: [`fmt::Error`] carries no payload, so an untouched
+  /// `out` beside an `Err` is what says the message was the reason.
+  ///
+  /// It is also predictable before the call, which is the stronger half — a caller knows its own
+  /// message and can read this number.
+  ///
+  /// The refusal is whole rather than partial. Truncating a message to fit would be the failure
+  /// [`max_rendered_width`](Self::max_rendered_width) already refuses for a label: a diagnostic
+  /// that silently drops the part its author wrote lies about what it was asked to report.
+  ///
+  /// # The number
+  ///
+  /// A mebibyte — sixteen times [`max_source_bytes`](Self::max_source_bytes), on the reasoning that
+  /// already makes that one sixteen times the cell ceiling: far enough past any honest value that
+  /// reaching it means something built it. A message that long is a pathological *image* well
+  /// before it is a pathological allocation, since the document spends about twenty-two bytes a
+  /// cell and a mebibyte of prose is a twenty-eight-megabyte SVG. Sizing it to make the output
+  /// reasonable would be answering the wrong question — the writer can refuse the output, which is
+  /// exactly what it cannot do about the capture.
+  ///
+  /// Fixed rather than configurable, like the two budgets above it.
+  #[cfg(feature = "svg")]
+  #[cfg_attr(docsrs, doc(cfg(feature = "svg")))]
+  #[inline]
+  #[must_use]
+  pub const fn max_svg_message_bytes() -> u64 {
+    1_048_576
   }
 
   /// How this renderer measures a line, and what measuring one may spend.
@@ -661,15 +730,27 @@ impl<P: Palette> Terminal<P> {
   /// handed the writer, held instead of streamed — and what it buys is that the two passes are two
   /// walks over one value rather than two invocations of a caller's code.
   ///
-  /// # What the first pass still spends before the writer is asked anything
+  /// # What the first pass spends before the writer is asked anything, and what bounds it
   ///
   /// Written down rather than left to be found. The measuring pass builds the render's plan and
   /// walks every drawn row before `out` is offered its first byte, so a writer that refuses after a
-  /// fixed count cannot stop it. What that costs is now bounded by data the
-  /// caller already holds — a plan is linear in the labels, a row is bounded by
-  /// [`max_source_bytes`](Self::max_source_bytes), and the one input that could be *synthesized*
-  /// rather than supplied is spent once, above. A small `Display` producing a gigabyte is a
-  /// gigabyte of work, not two.
+  /// fixed count cannot stop it. What that costs is bounded by data the caller already holds — a
+  /// plan is linear in the labels, and a row is bounded by
+  /// [`max_source_bytes`](Self::max_source_bytes) — with one exception, which is the message.
+  ///
+  /// Formatting it once bounds how often a `Display` is asked. It does not bound what the `Display`
+  /// answers, and holding it between the passes turns the answer into retained memory: a
+  /// `&dyn Display` is two words that may synthesize a gigabyte, so a caller's value smaller than
+  /// this sentence could make the render allocate a gigabyte and spend a gigabyte of work before
+  /// `out` was offered anything to refuse. That is not a hypothetical shape for a crate whose whole
+  /// job is reporting a failure that has already happened.
+  ///
+  /// So the capture is bounded: past
+  /// [`max_svg_message_bytes`](Self::max_svg_message_bytes) it refuses, **before** the bytes are
+  /// appended rather than after, and the render returns [`fmt::Error`] with `out` never offered a
+  /// byte. With that in place every input to the first pass is bounded by memory the caller has
+  /// already spent, which is what the paragraph above claims and what a synthesizing `Display` was
+  /// the one counterexample to.
   ///
   /// # The capability is not consulted
   ///
@@ -711,13 +792,23 @@ impl<P: Palette> Terminal<P> {
     inputs: &[Input<'_>],
     out: &mut impl fmt::Write,
   ) -> fmt::Result {
-    use super::svg::{Document, Extent, Verbatim, close_document, open_document};
+    use super::svg::{Captured, Document, Extent, Verbatim, close_document, open_document};
 
     // Once, before either pass, and the value the passes see is a `&str`. Formatting it inside the
     // measuring pass would be the same defect one layer down: what the second pass then renders is
     // a second answer from the same caller.
-    let mut message = String::new();
-    fmt::Write::write_fmt(&mut message, format_args!("{}", diagnostic.message()))?;
+    //
+    // Bounded, because holding it is what makes it a hazard — see
+    // [`max_svg_message_bytes`](Self::max_svg_message_bytes). Saturating when the ceiling does not
+    // fit the target's pointer, which is what the byte budget beside it already does: a ceiling
+    // past the address space is not a weaker bound than `usize::MAX`, because no `String` reaches
+    // `usize::MAX` without the allocator refusing first.
+    let ceiling = usize::try_from(Self::max_svg_message_bytes()).unwrap_or(usize::MAX);
+    let mut captured = Captured::new(ceiling);
+    fmt::Write::write_fmt(&mut captured, format_args!("{}", diagnostic.message()))?;
+    // And asked again, because the `?` above reports what the caller's `Display` returned rather
+    // than what this capture did — see [`Captured`].
+    let message = captured.whole()?;
     let verbatim = Verbatim(&message);
     let diagnostic = &diagnostic.saying(&verbatim);
 

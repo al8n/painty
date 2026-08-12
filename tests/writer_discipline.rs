@@ -62,8 +62,9 @@
 //! What makes that decisive rather than philosophical is the size of the inputs. [`cases`] is sized
 //! against `Terminal::max_source_bytes`, which is 65,536, so one render walks and segments tens of
 //! thousands of bytes — and five of the tests below render the whole table, between six and roughly
-//! two thousand times each. Three more build their own large inputs instead: two twenty-kilobyte
-//! origins, a twenty-thousand-byte line, and four caller strings of a hundred kilobytes apiece.
+//! two thousand times each. Four more build their own large inputs instead: two twenty-kilobyte
+//! origins, a twenty-thousand-byte line, four caller strings of a hundred kilobytes apiece, and a
+//! four-mebibyte fragment written until a mebibyte of it has been kept.
 //!
 //! CI has measured exactly one of them. Six of the eight cells in Miri run 31316096247 reached this
 //! file at all — the other two had already ICEd in `tests/numeric_widths.rs` — and not one of the
@@ -568,6 +569,147 @@ fn the_renderer_allocates_nothing_proportional_to_a_row() {
     spent_on[1], spent_on[2],
     "{} cells and {} cells cost {} and {} bytes, so the renderer still allocates with the row",
     all[1].cells, all[2].cells, spent_on[1], spent_on[2]
+  );
+}
+
+/// A `Display` that synthesizes `target` bytes by writing `chunk` until it has, and stops when it
+/// is refused.
+///
+/// # It BORROWS its fragment, and that is the whole reason this can be measured
+///
+/// The hazard being measured is that a caller value of a few words makes painty allocate without
+/// bound, so the instrument has to charge painty for painty's bytes and nobody else's. A `Display`
+/// that builds its own fragment allocates inside the measurement window, and in the oversized case
+/// below the fragment IS the whole message — which made the first shape of this test charge the
+/// renderer four mebibytes the *caller* had spent and read a correct capture as a broken one.
+///
+/// So the fragment is built once by the test, outside every window, and this writes it. What the
+/// counter then sees between the two reads is the renderer's, and nothing here is on the invoice.
+#[cfg(feature = "svg")]
+struct Synthesizing<'a> {
+  chunk: &'a str,
+  target: usize,
+}
+
+#[cfg(feature = "svg")]
+impl core::fmt::Display for Synthesizing<'_> {
+  fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut written = 0;
+    while written < self.target {
+      out.write_str(self.chunk)?;
+      written += self.chunk.len();
+    }
+    Ok(())
+  }
+}
+
+#[cfg(feature = "svg")]
+#[test]
+#[cfg_attr(
+  miri,
+  ignore = "three renders whose inputs are megabytes, measuring allocation — which under an \
+            interpreter is the interpreter's and not the renderer's. The capture's boundary \
+            arithmetic stays interpreted by \
+            `the_capture_admits_exactly_the_ceiling_and_reports_what_it_refused`, in \
+            `src/terminal/svg/mod.rs`"
+)]
+fn the_svg_capture_refuses_a_message_before_it_allocates_it() {
+  // Dimension 2, for the one input in this crate that is HELD rather than streamed. `render_svg`
+  // renders twice and may only ask a `Display` once, so it formats the message into a string that
+  // outlives the measuring pass — and a `&dyn Display` is two words that can answer with a
+  // gigabyte. Before the ceiling, a caller value smaller than this comment made the renderer
+  // allocate and spend without limit, and it did so before `out` was offered the first byte it
+  // would have refused.
+  //
+  // Measured rather than read: a refusal after the bytes have been appended returns the same error
+  // to the same caller as a refusal before, so there is no output to assert on. This is the only
+  // instrument that separates them.
+  let ceiling = usize::try_from(Terminal::<Theme>::max_svg_message_bytes()).unwrap_or(usize::MAX);
+
+  // Every fragment any case below writes, allocated once and here — see [`Synthesizing`] for why
+  // that placement is the instrument rather than a tidiness. Sliced rather than re-allocated, so
+  // the small fragment costs nothing either.
+  let synthesized = "x".repeat(ceiling * 4);
+  let oversized = synthesized.as_str();
+  let drip = &synthesized[..4096];
+
+  fn spend(message: &Synthesizing<'_>) -> (core::fmt::Result, usize) {
+    let diagnostic = Diagnostic::new(
+      "mylang::synthesized",
+      Severity::Error,
+      message,
+      Location::new(0, Span::new(0, 3)),
+    )
+    .with_primary_label("here");
+    let inputs = [Input::new(Source::new("let x = 1;\n"))];
+    // Accepts everything and holds nothing, so the refusal below is the ceiling's and the bytes
+    // counted are the renderer's.
+    let mut out = Accepting::default();
+
+    let before = allocated();
+    let outcome = Terminal::plain().render_svg(&diagnostic, &inputs, &mut out);
+    (outcome, allocated() - before)
+  }
+
+  // ONE fragment, four times the ceiling, and this is the case that separates the two orders.
+  // Refused before the append it costs nothing whatever; appended and then refused it costs four
+  // mebibytes, and no later refusal gives them back. The drip below cannot ask this, because a
+  // fragment that crosses the ceiling by 4096 bytes is over it by 4096 bytes either way.
+  //
+  // It also asks a second thing, and it is worth naming because a passing run is the only evidence
+  // for it: that `write_fmt` hands the sink the caller's fragment rather than materialising the
+  // `Arguments` into a string of its own first. If it did, the bytes would be on this invoice.
+  let (outcome, spent) = spend(&Synthesizing {
+    chunk: oversized,
+    target: oversized.len(),
+  });
+  //
+  // Measured: zero bytes as it stands, and 4,194,304 with the append moved in front of the test.
+  // The threshold is the ceiling rather than either, so it is a statement about the order and not
+  // a transcript of one allocator's arithmetic.
+  assert!(
+    outcome.is_err(),
+    "a message four times the ceiling rendered"
+  );
+  assert!(
+    spent < ceiling,
+    "one write of {} bytes cost {spent}, so the capture appended it before refusing it",
+    oversized.len()
+  );
+
+  // And the drip, which is the shape a `Display` would actually take. Held bytes stop at the
+  // ceiling; what is counted is above that only because a `String` reaching a size reallocates on
+  // the way and this counter charges every one of those in full — measured at 2,093,056, which is
+  // the doubling sum for one mebibyte held. Without the ceiling it is that arithmetic over
+  // sixty-four mebibytes instead, so the threshold sits at twice what was measured and a
+  // thirtieth of what the defect costs.
+  let (outcome, spent) = spend(&Synthesizing {
+    chunk: drip,
+    target: ceiling * 64,
+  });
+  assert!(
+    outcome.is_err(),
+    "a message sixty-four times the ceiling rendered"
+  );
+  assert!(
+    spent < ceiling * 4,
+    "sixty-four mebibytes offered a fragment at a time cost {spent}, which is not a bound"
+  );
+
+  // Not vacuous in the other direction, and this is the half that says the ceiling is a ceiling
+  // rather than a refusal: a message just under it renders, and costs about what it is.
+  let (outcome, spent) = spend(&Synthesizing {
+    chunk: drip,
+    target: ceiling - 4096,
+  });
+  assert!(
+    outcome.is_ok(),
+    "a message under the ceiling was refused anyway"
+  );
+  assert!(
+    spent >= ceiling - 4096,
+    "a message of {} bytes was rendered having allocated {spent}, so it was never held",
+    ceiling - 4096
   );
 }
 

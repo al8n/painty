@@ -1104,3 +1104,201 @@ fn no_row_of_a_render_carries_a_tab() {
     );
   }
 }
+
+#[test]
+fn a_synthesized_message_cannot_outrun_the_writer() {
+  // The attack this ceiling exists for, in the shape a caller would build it: a `Display` value of
+  // two words against a writer that refuses its very first byte. Formatting once bounds how often
+  // the `Display` is ASKED; it bounds nothing about what the `Display` answers, and the answer is
+  // held rather than streamed — so before the ceiling, the render allocated and spent whatever the
+  // value chose, and only then offered `out` a byte it was always going to refuse.
+  //
+  // The `Display` here is well behaved: it stops the moment it is refused. Everything it manages to
+  // write, it was permitted to write, so its counter measures the bound and not its own restraint.
+  const CHUNK: usize = 4096;
+  const FAR_PAST: u64 = 64 << 20;
+
+  struct Synthesizing(core::cell::Cell<u64>);
+
+  impl fmt::Display for Synthesizing {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+      let chunk = "x".repeat(CHUNK);
+      while self.0.get() < FAR_PAST {
+        out.write_str(&chunk)?;
+        self.0.set(self.0.get() + CHUNK as u64);
+      }
+      Ok(())
+    }
+  }
+
+  /// Refuses its first byte, and records whether it was ever offered one.
+  struct Deaf(bool);
+
+  impl fmt::Write for Deaf {
+    fn write_str(&mut self, _text: &str) -> fmt::Result {
+      self.0 = true;
+      Err(fmt::Error)
+    }
+  }
+
+  let synthesizing = Synthesizing(core::cell::Cell::new(0));
+  let diagnostic = Diagnostic::new(
+    "code",
+    Severity::Error,
+    &synthesizing,
+    Location::new(0, Span::new(0, 3)),
+  )
+  .with_primary_label("here");
+  static INPUTS: [Input<'static>; 1] = [Input::new(Source::new("let x = 1;\n"))];
+
+  let mut deaf = Deaf(false);
+  assert!(
+    Terminal::plain()
+      .render_svg(&diagnostic, &INPUTS[..], &mut deaf)
+      .is_err(),
+    "a message past the ceiling was rendered"
+  );
+
+  let ceiling = Terminal::<Theme>::max_svg_message_bytes();
+  assert!(
+    synthesizing.0.get() <= ceiling,
+    "the `Display` was allowed to synthesize {} bytes against a ceiling of {ceiling}",
+    synthesizing.0.get()
+  );
+  // The half a byte count alone cannot see. A ceiling reached by measuring the whole answer and
+  // then reporting on it satisfies the assertion above only because the counter stops at the
+  // refusal — this says the refusal came before `out` was consulted at all, which is what makes the
+  // ceiling a bound on this render rather than a bound on what gets drawn.
+  assert!(
+    !deaf.0,
+    "the writer was offered a byte, so the message was spent before it could refuse"
+  );
+}
+
+#[test]
+fn the_message_ceiling_is_where_it_says_it_is() {
+  // A caller can predict this refusal only if the published number is the number, so the two sides
+  // of it are asserted rather than the middle: at the ceiling exactly the render is ordinary, and
+  // one byte past it there is no render at all.
+  fn render_message(bytes: usize) -> (fmt::Result, String) {
+    let message = "x".repeat(bytes);
+    let diagnostic = Diagnostic::new(
+      "code",
+      Severity::Error,
+      &message,
+      Location::new(0, Span::new(0, 3)),
+    )
+    .with_primary_label("here");
+    static INPUTS: [Input<'static>; 1] = [Input::new(Source::new("let x = 1;\n"))];
+
+    let mut out = String::new();
+    let outcome = Terminal::plain().render_svg(&diagnostic, &INPUTS[..], &mut out);
+    (outcome, out)
+  }
+
+  let ceiling = usize::try_from(Terminal::<Theme>::max_svg_message_bytes())
+    .expect("the ceiling fits this target's pointer");
+
+  let (outcome, image) = render_message(ceiling);
+  assert!(
+    outcome.is_ok(),
+    "a message of exactly the ceiling was refused"
+  );
+  assert!(
+    image.matches(">x</tspan>").count() >= ceiling,
+    "a message of exactly the ceiling did not come out whole"
+  );
+
+  let (outcome, image) = render_message(ceiling + 1);
+  assert!(outcome.is_err(), "a message past the ceiling was rendered");
+  // What a caller reads to tell this refusal from its own writer's: `fmt::Error` carries no
+  // payload, and this writer refuses nothing, so an empty `out` is the only thing that says the
+  // message was the reason.
+  assert!(
+    image.is_empty(),
+    "a writer that refuses nothing was still handed {} bytes of a refused render",
+    image.len()
+  );
+}
+
+#[test]
+fn the_capture_admits_exactly_the_ceiling_and_reports_what_it_refused() {
+  // The arithmetic, at the boundary and in one place, because the ceiling published to callers is
+  // only predictable if `exactly this many` is on the accepting side of it.
+  //
+  // What this test CANNOT see is whether the refusal came before or after the append: both orders
+  // refuse the same write and return the same error, and they differ only in what was allocated on
+  // the way. That is measured where allocation can be measured —
+  // `the_svg_capture_refuses_a_message_before_it_allocates_it`, in `tests/writer_discipline.rs`.
+  use super::Captured;
+
+  let mut captured = Captured::new(8);
+  fmt::Write::write_str(&mut captured, "abc").expect("three bytes fit under eight");
+  fmt::Write::write_str(&mut captured, "defgh").expect("eight bytes are not past eight");
+  assert_eq!(
+    captured.whole(),
+    Ok(String::from("abcdefgh")),
+    "a capture filled to the ceiling did not hand back what it took"
+  );
+
+  let mut captured = Captured::new(8);
+  fmt::Write::write_str(&mut captured, "abcdefgh").expect("eight bytes are not past eight");
+  fmt::Write::write_str(&mut captured, "i").expect_err("nine bytes are past eight");
+  assert_eq!(
+    captured.whole(),
+    Err(fmt::Error),
+    "a capture that refused a write handed back the truncation as a whole message"
+  );
+
+  // And the refusal is of the WRITE rather than of the byte past the ceiling: a fragment that
+  // would cross is not split, because half a message is the truncation this refuses to perform.
+  let mut captured = Captured::new(8);
+  fmt::Write::write_str(&mut captured, "abcdefghi").expect_err("nine bytes are past eight");
+  assert_eq!(
+    captured.whole(),
+    Err(fmt::Error),
+    "an oversized write was partly kept"
+  );
+}
+
+#[test]
+fn a_display_that_ignores_its_error_is_still_refused() {
+  // `core::fmt::write` returns what the `Display` returned, not what the writer under it did — so a
+  // `Display` that discards the error it is handed and returns `Ok` reports success over a capture
+  // that refused half of it. Trusting the `?` alone renders a SILENTLY TRUNCATED message, which is
+  // the failure the ceiling would otherwise have introduced in exchange for the one it fixed.
+  struct Deaf;
+
+  impl fmt::Display for Deaf {
+    fn fmt(&self, out: &mut fmt::Formatter<'_>) -> fmt::Result {
+      let ceiling = usize::try_from(Terminal::<Theme>::max_svg_message_bytes())
+        .expect("the ceiling fits this target's pointer");
+      let _ = out.write_str(&"x".repeat(ceiling));
+      // Refused, and ignored, and reported as success.
+      let _ = out.write_str("y");
+      Ok(())
+    }
+  }
+
+  let diagnostic = Diagnostic::new(
+    "code",
+    Severity::Error,
+    &Deaf,
+    Location::new(0, Span::new(0, 3)),
+  )
+  .with_primary_label("here");
+  static INPUTS: [Input<'static>; 1] = [Input::new(Source::new("let x = 1;\n"))];
+
+  let mut out = String::new();
+  assert!(
+    Terminal::plain()
+      .render_svg(&diagnostic, &INPUTS[..], &mut out)
+      .is_err(),
+    "a truncated message was rendered as though it were whole"
+  );
+  assert!(
+    out.is_empty(),
+    "the refused render still wrote {} bytes",
+    out.len()
+  );
+}

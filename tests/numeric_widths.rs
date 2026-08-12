@@ -838,6 +838,13 @@ fn pin<'a>(_witness: &'a ()) {
     // painty's own rendered geometry rather than an index into anything, and it is the number the
     // resource bound rests on.
     let _: fn() -> Ordinal = Terminal::<Theme>::max_source_bytes;
+
+    // The third of the renderer's resource ceilings, and rule 1 for the reason the second one is:
+    // a budget the renderer spends, denominated in bytes, rather than an index into anything. It
+    // is also the argument for not splitting the family across two widths — the three are read
+    // against one another, and a `usize` among two `u64`s is the seam the pin above warns about.
+    #[cfg(feature = "svg")]
+    let _: fn() -> Ordinal = Terminal::<Theme>::max_svg_message_bytes;
   }
 
   // `painty::tokora::Adapted` has no numeric member. It had two — exact overflow counts — and

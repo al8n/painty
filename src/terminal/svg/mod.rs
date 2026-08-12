@@ -94,6 +94,12 @@
 //! [`Terminal::render_svg`](super::Terminal::render_svg), which is also where what the first pass
 //! spends before the writer is consulted is written down.
 //!
+//! Asking once is not the same as spending once. The string is **held** while both passes run, and
+//! a `&dyn Display` is two words that can synthesize any amount of it, so the one input here that
+//! the caller did not have to allocate is also the one this surface cannot stream past a writer
+//! that would refuse it. [`Captured`] is the ceiling on that, and
+//! [`Terminal::max_svg_message_bytes`](super::Terminal::max_svg_message_bytes) is the number.
+//!
 //! # What it does not carry
 //!
 //! * **A background colour.** [`Style::background`](crate::Style::background) has no equivalent
@@ -633,6 +639,83 @@ impl fmt::Write for Representable<'_> {
       rest = characters.as_str();
     }
     self.0.write_str(rest)
+  }
+}
+
+/// The caller's message, formatted once and held for the second pass — and refused before it can
+/// be held unbounded.
+///
+/// # Why the message is the one input that needs a ceiling
+///
+/// [`Terminal::max_rendered_width`](super::Terminal::max_rendered_width) says painty does not bound
+/// the caller's own words, because they **pass through**: printed once, straight to the writer, so
+/// a writer unwilling to take them refuses them and the caller already spent the memory it is
+/// asking painty to spend. Both halves of that are false in this renderer, and only in this one.
+///
+/// They do not pass through. An SVG declares its size in its root element, so the render runs
+/// twice, and a [`fmt::Display`] may not be asked twice — so the message is formatted once and
+/// **retained** across both passes. Nothing about it streams, and `out` is not consulted until all
+/// of it is already in memory.
+///
+/// And it is not the caller's memory. Every other input a diagnostic carries is a `&str` the
+/// caller allocated, so supplying a megabyte cost the caller a megabyte. The message is a
+/// `&dyn Display` — two words that can synthesize a gigabyte, and the only input in the crate whose
+/// size is not bounded by memory the caller has already spent.
+///
+/// # It refuses before it appends, which is the whole of the property
+///
+/// A ceiling tested against what has already been pushed has already paid for it: the bytes are in
+/// the string by the time the test can see them, and the test is then a report rather than a bound.
+/// So the length is checked against what is left **before** `push_str`, and a write that would
+/// cross the ceiling appends nothing. Held bytes never exceed the ceiling, and what is allocated
+/// follows what was actually written — an ordinary message costs what an ordinary message is,
+/// because nothing here is reserved.
+///
+/// # A refusal has to survive a `Display` that ignores it
+///
+/// [`overflowed`](Self::overflowed) exists because the [`fmt::Error`] this returns is not enough on
+/// its own. A `Display` implementation is free to discard the error its formatter hands back and
+/// return `Ok`, and `core::fmt::write` reports what the `Display` returned — so a caller that
+/// ignores errors would leave this holding a **truncated** message that the render then draws as
+/// though it were whole. A diagnostic that silently drops the part its author wrote is the failure
+/// this crate exists to prevent, so the refusal is recorded here and read back by
+/// [`whole`](Self::whole) rather than trusted to propagate.
+pub(super) struct Captured {
+  text: String,
+  /// How many more bytes may be appended.
+  left: usize,
+  /// Whether a write was ever refused — see the type's documentation.
+  overflowed: bool,
+}
+
+impl Captured {
+  pub(super) const fn new(ceiling: usize) -> Self {
+    Self {
+      text: String::new(),
+      left: ceiling,
+      overflowed: false,
+    }
+  }
+
+  /// What was captured, or [`fmt::Error`] if any of it was refused.
+  pub(super) fn whole(self) -> Result<String, fmt::Error> {
+    if self.overflowed {
+      return Err(fmt::Error);
+    }
+    Ok(self.text)
+  }
+}
+
+impl fmt::Write for Captured {
+  fn write_str(&mut self, text: &str) -> fmt::Result {
+    // Before the append and not after it — see the type's documentation.
+    if text.len() > self.left {
+      self.overflowed = true;
+      return Err(fmt::Error);
+    }
+    self.left -= text.len();
+    self.text.push_str(text);
+    Ok(())
   }
 }
 
