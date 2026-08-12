@@ -222,13 +222,6 @@ fn span_of(place: Where, extent: Extent, lines: usize, ending: &str) -> Span {
 /// diagnoses, and a stopping assertion cannot tell them apart. Both rounds this file has caught a
 /// defect in, it was the shape of the failing REGION that named the cause.
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "three thousand points, half of them a terminal render, measured at 402s a cell when \
-            the grid was a fifth this size — and the question is whether two outputs agree about a \
-            line number, which the interpreter is not an instrument for. The renderers' own paths \
-            are interpreted by the tests below and by the whole of `src`'s unit suite."
-)]
 fn the_two_renderers_draw_the_same_rows() {
   const LINES: usize = 20;
 

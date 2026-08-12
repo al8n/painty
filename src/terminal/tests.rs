@@ -1707,11 +1707,6 @@ fn a_combining_mark_run_is_bounded_the_same_way() {
 }
 
 #[test]
-#[cfg_attr(
-  miri,
-  ignore = "an asymptotic measurement over sixteen megabytes of input, which Miri would take hours \
-            to walk and is not checking anyway"
-)]
 fn the_byte_budget_bounds_what_is_examined_and_not_only_what_is_drawn() {
   // The budget said "bytes examined" and checked a unit's end AFTER the segmenter had produced it.
   // A grapheme cluster has no length limit, so the first unit can be the whole line: the check

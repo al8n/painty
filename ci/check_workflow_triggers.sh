@@ -18,7 +18,7 @@
 # Four invariants:
 #
 #   1. Every workflow carrying an `on.push.branches` filter carries the SAME one. A post-merge
-#      lane that covers a branch in `ci.yml` but not in `miri.yml` is worse than one that covers
+#      lane that covers a branch in `ci.yml` but not in `macos.yml` is worse than one that covers
 #      it nowhere, because it looks fixed.
 #
 #   2. Every branch named still exists on the remote. This catches a typo and a deleted branch.

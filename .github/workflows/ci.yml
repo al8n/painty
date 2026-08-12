@@ -12,11 +12,8 @@ name: CI
 #     the WHOLE run, so a single queued macOS cell makes every other verdict in the run
 #     unreadable — smear merged two pull requests with no CI verdict at all because of it.
 #
-#   * `.github/workflows/miri.yml` — Miri. Not a queue problem but a clock one: Miri sets its
-#     own wall time regardless of how free the runners are.
-#
 # The contract is therefore: this workflow's conclusion is the one a merge waits for, and it is
-# answerable in tens of minutes. Adding a `runs-on: macos-*` or a Miri cell here gives that up.
+# answerable in tens of minutes. Adding a `runs-on: macos-*` cell here gives that up.
 # `painty` starts with the split already made rather than discovering it later.
 
 on:
@@ -54,13 +51,13 @@ on:
       - 'LICENSE-*'
       - '**.txt'
   workflow_dispatch:
-  # KEPT here and dropped from `macos.yml` and `miri.yml` — the one deliberate difference between
-  # the three trigger blocks, and the reason `ci/check_workflow_triggers.sh` locks
+  # KEPT here and dropped from `macos.yml` — the one deliberate difference between the two
+  # trigger blocks, and the reason `ci/check_workflow_triggers.sh` locks
   # `on.push.branches` across them rather than the whole `on:` block.
   #
   # A weekly build of unchanged code earns its runner time on THIS lane: it is where a new
   # nightly, a new clippy lint or a yanked dependency shows up between merges. It does not earn it
-  # on a lane whose cost is a multi-hour macOS queue or a Miri wall clock, re-proving what the
+  # on a lane whose cost is a multi-hour macOS queue, re-proving what the
   # push that produced the code already proved.
   schedule: [cron: "0 1 */7 * *"]
 
@@ -150,8 +147,8 @@ jobs:
   # without a leg would otherwise be covered by nothing. The same goes for the `no-tokora` job,
   # whose "every configuration except the adapter's" list is a literal for the same reason.
   #
-  # THE PACKAGE COUNT. `cross`, `msrv`, `no-std`, `publish-dry-run`, both Miri scripts and the
-  # sanitizer script all name `-p painty`. That is only as good as the claim that `painty` is the
+  # THE PACKAGE COUNT. `cross`, `msrv`, `no-std`, `publish-dry-run` and the sanitizer script all
+  # name `-p painty`. That is only as good as the claim that `painty` is the
   # whole shipping surface, and a second publishable member would simply never be built by any of
   # them, under a full page of green ticks. Keyed on the `publish` field cargo reports as `[]` for
   # `publish = false` and null otherwise.
