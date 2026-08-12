@@ -142,6 +142,11 @@ fn allocated() -> usize {
 ///
 /// The switch is turned off before `body`'s value is inspected, so an assertion that fails inside
 /// the caller can still allocate its own panic message.
+///
+/// Gated with its callers: both are `svg` tests, and CI builds a feature set that omits `svg`
+/// (`--no-default-features --features default,html,model,terminal,tokora`), where an ungated
+/// definition is a `never used` error under `-D warnings`. An `--all-features` run cannot see that.
+#[cfg(feature = "svg")]
 fn denying_above<T>(bytes: usize, body: impl FnOnce() -> T) -> T {
   DENY_ABOVE.with(|deny| deny.set(bytes));
   let outcome = body();
