@@ -669,7 +669,48 @@ impl fmt::Write for Representable<'_> {
 /// So the length is checked against what is left **before** `push_str`, and a write that would
 /// cross the ceiling appends nothing. Held bytes never exceed the ceiling, and what is allocated
 /// follows what was actually written — an ordinary message costs what an ordinary message is,
-/// because nothing here is reserved.
+/// because nothing here is reserved up front.
+///
+/// # Doubling, clamped, and fallible — three words answering three different things
+///
+/// A logical ceiling is not a bound on what a `String` *holds*, and `push_str` is not a bound on
+/// anything at all: it grows through the infallible path, so on a failed allocation the process
+/// aborts. Both matter more here than they would elsewhere, because painty is what runs while
+/// something is already reporting a failure — dying there loses the diagnostic that was being
+/// written as well as the one that caused it.
+///
+/// **Fallible** is [`String::try_reserve_exact`], so an allocation that cannot be served is a
+/// refusal rather than an abort. After it succeeds the capacity covers this write, so the
+/// `push_str` underneath cannot reallocate and cannot be the infallible path that aborts.
+///
+/// **Clamped** to the ceiling is what makes the published number true of the *allocation* and not
+/// only of the length. Unclamped doubling overshoots: fragments of 3000 bytes reach a capacity of
+/// 2,097,152 for a mebibyte of text, which is the ceiling retaining twice what it says.
+///
+/// **Doubling** is what keeps the refusal from being its own denial of service, and it is the one
+/// the obvious reading gets wrong. Reserving exactly each write's length leaves capacity equal to
+/// length every time, so every write reallocates and copies everything before it. That is
+/// quadratic in the number of fragments, and a `Display` writing a scalar at a time is ordinary —
+/// `Display for char` is one — so a mebibyte accumulated one byte at a time would copy **524 GiB**
+/// against the 1 MiB that doubling copies. A bound whose enforcement is worse than the hazard is
+/// not a bound.
+///
+/// The three compose to: capacity is at most the ceiling, total copying is linear in what was
+/// kept, and neither a message past the ceiling nor an allocator that says no can end the process.
+///
+/// # One error for two causes, deliberately
+///
+/// A message past the ceiling and an allocation that failed under it both return [`fmt::Error`]
+/// with nothing written to the writer, and they are not distinguished. [`fmt::Error`] carries no
+/// payload, so separating them means changing what
+/// [`Terminal::render_svg`](super::Terminal::render_svg) returns — a decision across the whole
+/// rendering surface rather than a property of this capture.
+///
+/// It is also the honest shape. The two causes have the same contract, the same remedy and the same
+/// discriminator: `out` untouched, nothing rendered, and a shorter message is what makes either one
+/// succeed. What the caller must not conclude is the converse — that a message under the ceiling
+/// always renders. The ceiling bounds what this will *attempt*; whether the allocator can serve it
+/// is the machine's answer, and that one arrives as the same `Err` rather than as a crash.
 ///
 /// # A refusal has to survive a `Display` that ignores it
 ///
@@ -682,24 +723,25 @@ impl fmt::Write for Representable<'_> {
 /// [`whole`](Self::whole) rather than trusted to propagate.
 pub(super) struct Captured {
   text: String,
-  /// How many more bytes may be appended.
-  left: usize,
-  /// Whether a write was ever refused — see the type's documentation.
-  overflowed: bool,
+  /// The most this may ever hold, and — because the growth below is clamped to it — the most it
+  /// may ever have reserved.
+  ceiling: usize,
+  /// Whether a write was ever refused, for either reason — see the type's documentation.
+  refused: bool,
 }
 
 impl Captured {
   pub(super) const fn new(ceiling: usize) -> Self {
     Self {
       text: String::new(),
-      left: ceiling,
-      overflowed: false,
+      ceiling,
+      refused: false,
     }
   }
 
   /// What was captured, or [`fmt::Error`] if any of it was refused.
   pub(super) fn whole(self) -> Result<String, fmt::Error> {
-    if self.overflowed {
+    if self.refused {
       return Err(fmt::Error);
     }
     Ok(self.text)
@@ -709,11 +751,34 @@ impl Captured {
 impl fmt::Write for Captured {
   fn write_str(&mut self, text: &str) -> fmt::Result {
     // Before the append and not after it — see the type's documentation.
-    if text.len() > self.left {
-      self.overflowed = true;
+    if text.len() > self.ceiling - self.text.len() {
+      self.refused = true;
       return Err(fmt::Error);
     }
-    self.left -= text.len();
+
+    let wanted = self.text.len() + text.len();
+    if wanted > self.text.capacity() {
+      // Doubling, clamped to the ceiling, and reserved through the FALLIBLE path. Each of those
+      // three words is answering a different thing and none of them is the other's tuning; see the
+      // type's documentation for what each one costs and buys. `wanted` is never above the ceiling
+      // — the guard above is what says so — so the clamp can never ask for less than this write
+      // needs, and `push_str` below therefore reallocates nothing.
+      let target = self
+        .text
+        .capacity()
+        .saturating_mul(2)
+        .max(wanted)
+        .min(self.ceiling);
+      if self
+        .text
+        .try_reserve_exact(target - self.text.len())
+        .is_err()
+      {
+        self.refused = true;
+        return Err(fmt::Error);
+      }
+    }
+
     self.text.push_str(text);
     Ok(())
   }

@@ -595,8 +595,13 @@ impl<P: Palette> Terminal<P> {
   ///
   /// # What it costs a caller nowhere near it
   ///
-  /// Nothing. This is a ceiling and not a size: the capture allocates what was written and nothing
-  /// is reserved against this number, so an ordinary message costs an ordinary message.
+  /// Nothing. This is a ceiling and not a size: nothing is reserved against this number up front,
+  /// so an ordinary message costs an ordinary message.
+  ///
+  /// It bounds the **allocation** and not only the length. The capture grows geometrically, which
+  /// is what keeps a message accumulated one scalar at a time from costing a quadratic amount of
+  /// copying, and that growth is clamped here — so the capacity behind a message is at most this
+  /// number rather than the next power of two above it.
   ///
   /// # What a caller sees, and how it tells this apart from its own writer refusing
   ///
@@ -611,6 +616,16 @@ impl<P: Palette> Terminal<P> {
   /// The refusal is whole rather than partial. Truncating a message to fit would be the failure
   /// [`max_rendered_width`](Self::max_rendered_width) already refuses for a label: a diagnostic
   /// that silently drops the part its author wrote lies about what it was asked to report.
+  ///
+  /// # What it does not promise, said plainly
+  ///
+  /// That a message under this number renders. It bounds what the capture will *attempt*; whether
+  /// the machine can serve the attempt is the allocator's answer, and under memory pressure it may
+  /// be no. That arrives as **the same `Err`, with `out` untouched**, rather than as the process
+  /// aborting — which is what an ordinary `String` would have done, in the middle of reporting a
+  /// failure that had already happened. The two causes are deliberately not distinguished; the
+  /// reasoning is on `Captured`, and the short form is that they have the same contract, the same
+  /// remedy and the same discriminator.
   ///
   /// # The number
   ///
