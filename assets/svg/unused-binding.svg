@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 432 118" width="432" height="118">
+<style>
+text{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,"DejaVu Sans Mono","Liberation Mono",monospace;font-size:13px}
+.painty-error{fill:#ff0000;font-weight:bold}
+.painty-warning{fill:#ffff00;font-weight:bold}
+.painty-advice{fill:#00ffff;font-weight:bold}
+.painty-primary{fill:#ff0000}
+.painty-secondary{fill:#0000ff}
+.painty-gutter{fill:#808080}
+.painty-number{fill:#808080}
+.painty-help{fill:#00ff00}
+.painty-code{fill:#808080}
+</style>
+<text xml:space="preserve" y="21"><tspan class="painty-warning"><tspan x="8">w</tspan><tspan x="16">a</tspan><tspan x="24">r</tspan><tspan x="32">n</tspan><tspan x="40">i</tspan><tspan x="48">n</tspan><tspan x="56">g</tspan></tspan><tspan class="painty-code"><tspan x="64">[</tspan></tspan><tspan class="painty-code"><tspan x="72">m</tspan><tspan x="80">y</tspan><tspan x="88">l</tspan><tspan x="96">a</tspan><tspan x="104">n</tspan><tspan x="112">g</tspan><tspan x="120">:</tspan><tspan x="128">:</tspan><tspan x="136">l</tspan><tspan x="144">i</tspan><tspan x="152">n</tspan><tspan x="160">t</tspan><tspan x="168">:</tspan><tspan x="176">:</tspan><tspan x="184">u</tspan><tspan x="192">n</tspan><tspan x="200">u</tspan><tspan x="208">s</tspan><tspan x="216">e</tspan><tspan x="224">d</tspan></tspan><tspan class="painty-code"><tspan x="232">]</tspan></tspan><tspan x="240">:</tspan><tspan x="248"> </tspan><tspan x="256">`</tspan><tspan x="264">t</tspan><tspan x="272">o</tspan><tspan x="280">t</tspan><tspan x="288">a</tspan><tspan x="296">l</tspan><tspan x="304">`</tspan><tspan x="312"> </tspan><tspan x="320">i</tspan><tspan x="328">s</tspan><tspan x="336"> </tspan><tspan x="344">n</tspan><tspan x="352">e</tspan><tspan x="360">v</tspan><tspan x="368">e</tspan><tspan x="376">r</tspan><tspan x="384"> </tspan><tspan x="392">r</tspan><tspan x="400">e</tspan><tspan x="408">a</tspan><tspan x="416">d</tspan></text>
+<text xml:space="preserve" y="38"><tspan x="8"> </tspan><tspan x="16">-</tspan><tspan x="24">-</tspan><tspan x="32">&gt;</tspan><tspan x="40"> </tspan><tspan x="48">1</tspan><tspan x="56">:</tspan><tspan x="64">5</tspan></text>
+<text xml:space="preserve" y="55"><tspan x="8"> </tspan><tspan x="16"> </tspan><tspan class="painty-gutter"><tspan x="24">|</tspan></tspan></text>
+<text xml:space="preserve" y="72"><tspan class="painty-number"><tspan x="8">1</tspan></tspan><tspan x="16"> </tspan><tspan class="painty-gutter"><tspan x="24">|</tspan></tspan><tspan x="32"> </tspan><tspan class="painty-text"><tspan x="40">l</tspan><tspan x="48">e</tspan><tspan x="56">t</tspan><tspan x="64"> </tspan><tspan x="72">t</tspan><tspan x="80">o</tspan><tspan x="88">t</tspan><tspan x="96">a</tspan><tspan x="104">l</tspan><tspan x="112"> </tspan><tspan x="120">=</tspan><tspan x="128"> </tspan><tspan x="136">c</tspan><tspan x="144">o</tspan><tspan x="152">u</tspan><tspan x="160">n</tspan><tspan x="168">t</tspan><tspan x="176"> </tspan><tspan x="184">+</tspan><tspan x="192"> </tspan><tspan x="200">1</tspan><tspan x="208">;</tspan></tspan></text>
+<text xml:space="preserve" y="89"><tspan x="8"> </tspan><tspan x="16"> </tspan><tspan class="painty-gutter"><tspan x="24">|</tspan></tspan><tspan x="32"> </tspan><tspan x="40"> </tspan><tspan x="48"> </tspan><tspan x="56"> </tspan><tspan x="64"> </tspan><tspan class="painty-primary"><tspan x="72">^</tspan><tspan x="80">^</tspan><tspan x="88">^</tspan><tspan x="96">^</tspan><tspan x="104">^</tspan></tspan><tspan x="112"> </tspan><tspan class="painty-primary"><tspan x="120">a</tspan><tspan x="128">s</tspan><tspan x="136">s</tspan><tspan x="144">i</tspan><tspan x="152">g</tspan><tspan x="160">n</tspan><tspan x="168">e</tspan><tspan x="176">d</tspan><tspan x="184"> </tspan><tspan x="192">h</tspan><tspan x="200">e</tspan><tspan x="208">r</tspan><tspan x="216">e</tspan></tspan></text>
+<text xml:space="preserve" y="106"><tspan x="8"> </tspan><tspan x="16"> </tspan><tspan class="painty-gutter"><tspan x="24">|</tspan></tspan></text>
+</svg>
