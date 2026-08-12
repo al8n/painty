@@ -13,6 +13,19 @@ mod diagnostic;
 mod source;
 mod style;
 
+// Every renderer that reads source text takes the caller's inputs the same way, so the type that
+// carries one sits below all of them rather than inside the first. The same goes for deciding which
+// lines are left out: two copies of that rule produced a diagnostic whose two renderings disagreed
+// about which source a reader was shown.
+#[cfg(any(feature = "terminal", feature = "html"))]
+mod elide;
+#[cfg(any(feature = "terminal", feature = "html"))]
+mod input;
+
+#[cfg(feature = "html")]
+#[cfg_attr(docsrs, doc(cfg(feature = "html")))]
+pub mod html;
+
 #[cfg(feature = "terminal")]
 #[cfg_attr(docsrs, doc(cfg(feature = "terminal")))]
 pub mod terminal;
@@ -22,5 +35,8 @@ pub mod terminal;
 pub mod tokora;
 
 pub use diagnostic::{Diagnostic, Label, Location, PathSegment, Severity, Span};
+#[cfg(any(feature = "terminal", feature = "html"))]
+#[cfg_attr(docsrs, doc(cfg(any(feature = "terminal", feature = "html"))))]
+pub use input::Input;
 pub use source::{Line, LineBreak, Lines, Position, Region, RegionLine, RegionLines, Source};
 pub use style::{Ansi16, Color, Palette, Role, Style, Theme};

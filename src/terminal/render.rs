@@ -17,53 +17,9 @@ use super::{
   width::{Budget, Mark},
 };
 use crate::{
-  Diagnostic, Line, Palette, RegionLine, Role, Source, Span, Theme,
+  Diagnostic, Input, Line, Palette, RegionLine, Role, Span, Theme, elide,
   source::{Opening, Walk},
 };
-
-/// One of the caller's inputs: its text, and whatever the caller calls it.
-///
-/// A [`Location`](crate::Location) carries a `source: u32` that indexes the list the producer was
-/// numbering, so a renderer needs that same list to resolve a span. Mapping an index to a *name*
-/// stays with the caller — painty is not a source-file manager — which is why the name comes in
-/// here rather than being looked up.
-#[derive(Debug, Clone, Copy)]
-pub struct Input<'a> {
-  source: Source<'a>,
-  origin: Option<&'a str>,
-}
-
-impl<'a> Input<'a> {
-  /// An input with no name.
-  #[inline]
-  #[must_use]
-  pub const fn new(source: Source<'a>) -> Self {
-    Self {
-      source,
-      origin: None,
-    }
-  }
-
-  /// Names the input — a path, a URL, whatever the caller has.
-  #[inline]
-  #[must_use]
-  pub const fn with_origin(mut self, origin: &'a str) -> Self {
-    self.origin = Some(origin);
-    self
-  }
-
-  /// Returns the text.
-  #[inline]
-  pub const fn source(&self) -> Source<'a> {
-    self.source
-  }
-
-  /// Returns the caller's name for it, if it gave one.
-  #[inline]
-  pub const fn origin(&self) -> Option<&'a str> {
-    self.origin
-  }
-}
 
 /// One position a diagnostic named that this render can actually draw.
 ///
@@ -621,7 +577,7 @@ impl<P: Palette> Terminal<P> {
   ///
   /// # Why a list, and not one source
   ///
-  /// This took a single [`Source`] and resolved every span against it, ignoring
+  /// This took a single [`Source`](crate::Source) and resolved every span against it, ignoring
   /// [`Location::source`](crate::Location::source) entirely. A diagnostic whose label points into
   /// a *different* input — "first defined here", in another file, which is the commonest
   /// multi-file diagnostic there is — was rendered against the wrong text, with a confident line
@@ -872,13 +828,6 @@ impl Measure {
   }
 }
 
-/// How many lines after a multi-line span's opening are shown before the rest are elided.
-///
-/// Three, and the number is a layout rule rather than a budget — see [`Terminal`]'s note on what a
-/// span covering a million lines costs. It is what makes a span of six lines or fewer render whole
-/// once the one-line gap below is filled, and what keeps every longer one to the same six rows.
-const CONTEXT: u64 = 3;
-
 /// Everything a render works out before it writes anything.
 ///
 /// Four flat runs and no tree: an excerpt names its slice of the marks, and a block names its slice
@@ -1014,7 +963,7 @@ impl<'a> Plan<'a> {
     let Some(leading) = drawable.first() else {
       return;
     };
-    let source = leading.from.source;
+    let source = leading.from.source();
 
     // ── Both ends of every span, in ONE forward walk ────────────────────────────────────────
     //
@@ -1033,6 +982,15 @@ impl<'a> Plan<'a> {
     // The order the one-pass claim rests on, checked where it is produced. A stop behind the cursor
     // would still render CORRECTLY — `Walk` restarts rather than answering from where it is — so no
     // test that reads output can see this go wrong, and a timer at this resolution cannot either.
+    //
+    // The three `debug_assert!`s below were re-examined in the review round that removed every
+    // other one in this crate, and they STAY. The rule that round settled is that a `debug_assert`
+    // is wrong wherever its violation is a wrong ANSWER, because it then chooses wrong output in
+    // release and a panic in debug. These three violate nothing about the answer: `Walk` is total
+    // against any order, so a stop out of sequence costs a second pass over the input and changes
+    // no byte of the render. They guard a RESOURCE claim, which is exactly the kind of property a
+    // debug-only check is the right instrument for — there is nothing for a release build to do
+    // differently, and nothing for it to get wrong.
     let mut reached = 0;
     for position in drawable {
       let start = walk.clamped(position.span).start();
@@ -1223,24 +1181,23 @@ impl<'a> Plan<'a> {
     // so the primary leads whether or not it is the leftmost thing there.
     self.marks[marks_from..].sort_by_key(|mark| (mark.payload().line, mark.payload().at));
 
-    let mut reaches: Vec<(u64, u64)> = placements
+    // Whether any BRACKET opens at a line, which is the only thing about the spans that the elision
+    // rule needs — see [`elide::shown_between`] for why the context reach each of them computes is
+    // always dominated by the next anchor and therefore drops out.
+    //
+    // This was a sorted `Vec<(first, reach)>` searched for the maximum reach at a line. The reach
+    // half is gone with the term that made it necessary; what is left is a set of line numbers, and
+    // the search over it is what keeps this renderer's cost `O(k log k)` in the caller's label count
+    // — the bound its own resource audit fixed. The HTML renderer answers the same question by
+    // scanning, because it has nowhere to put a sorted set; that is the price of no allocator and it
+    // is stated where it is paid, rather than charged to this file as well.
+    let mut opens: Vec<u64> = placements
       .iter()
-      .filter_map(|placement| {
-        placement.closing?;
-        let first = placement.first();
-        Some((first, (first + CONTEXT).min(placement.last() - 1)))
-      })
+      .filter(|placement| placement.closing.is_some())
+      .map(Placement::first)
       .collect();
-    reaches.sort_unstable();
-    let reach_of = |line: u64| {
-      let from = reaches.partition_point(|&(first, _)| first < line);
-      let to = reaches.partition_point(|&(first, _)| first <= line);
-      reaches[from..to]
-        .iter()
-        .map(|&(_, reach)| reach)
-        .max()
-        .unwrap_or(line)
-    };
+    opens.sort_unstable();
+    let opens_a_bracket = |line: u64| opens.binary_search(&line).is_ok();
 
     let excerpts_from = self.excerpts.len();
     let mut cursor = marks_from;
@@ -1249,12 +1206,11 @@ impl<'a> Plan<'a> {
       let mut after = None;
       if let Some(previous) = above {
         let number = anchor.number();
-        let mut shown = reach_of(previous.number()).clamp(previous.number(), number - 1);
-        // One line left over reads worse as `...` than as the line itself, and it is the shape a
-        // span of exactly six lines leaves behind.
-        if number - shown == 2 {
-          shown = number - 1;
-        }
+        let shown = elide::shown_between(
+          previous.number(),
+          number,
+          opens_a_bracket(previous.number()),
+        );
         let mut line = previous;
         while line.number() < shown {
           let Some(next) = source.line_after(line) else {
@@ -1298,7 +1254,7 @@ impl<'a> Plan<'a> {
       .min_by_key(|placement| placement.at)
       .expect("a block is built from at least one drawable position");
     self.blocks.push(Block {
-      origin: leading.from.origin,
+      origin: leading.from.origin(),
       line: earliest.first(),
       column: earliest.opening.at().column(),
       at: earliest.at,

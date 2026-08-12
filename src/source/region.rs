@@ -122,11 +122,12 @@ impl<'a> Region<'a> {
 /// break that ended a line — a span naming the newline itself does — and a start clamped only from
 /// below would then sit past the text it indexes into.
 ///
-/// One function rather than one expression per caller: [`RegionLines`] walks every line of a region
-/// and `Walk` answers only the first, and two clipping rules for one question is how a walk that
-/// skipped the far end came to exist in the first place. Unlinked deliberately — `Walk` is behind
-/// the `terminal` feature, so a link to it is broken in every build that does not enable one.
-pub(super) fn clip<'a>(line: Line<'a>, span: Span) -> RegionLine<'a> {
+/// One function rather than one expression per caller: [`RegionLines`] walks every line of a region,
+/// `Walk` answers only the first, and the HTML renderer answers the ones in between for itself —
+/// and three clipping rules for one question is how a walk that skipped the far end came to exist
+/// in the first place. Unlinked deliberately — `Walk` and the HTML renderer are behind features, so
+/// a link to either is broken in every build that does not enable it.
+pub(crate) fn clip<'a>(line: Line<'a>, span: Span) -> RegionLine<'a> {
   let content = line.span();
   let start = span.start().max(content.start()).min(content.end());
   let end = span.end().min(content.end()).max(start);
@@ -134,6 +135,41 @@ pub(super) fn clip<'a>(line: Line<'a>, span: Span) -> RegionLine<'a> {
     line,
     covered: Span::new(start, end),
   }
+}
+
+/// Whether `span` is drawn on `line` — [`Region::lines`]'s membership rule, asked of one line
+/// instead of answered by walking all of them.
+///
+/// # Why the question is put this way round
+///
+/// A renderer that visits an input's drawn lines in one forward pass — which is what a renderer
+/// with no allocator has to do — holds a [`Line`] and a set of spans, not a [`Region`] per span. It
+/// needs "does this span appear here", and deriving that from a line NUMBER means resolving every
+/// span first and remembering the answers.
+///
+/// The three clauses are the same three [`Region::lines`] applies from the other direction. A span
+/// starting past this line's content is not here; a span whose exclusive end is this line's start
+/// **swallowed the break above** and has nothing of itself to draw here; and an empty span is a
+/// caret, which is on the line it sits on even though it covers none of it.
+///
+/// `every_line_a_region_draws_is_a_line_it_says_it_draws_on` holds this against
+/// [`Region::lines`] over the whole resolution corpus, so the two are one rule rather than two.
+#[cfg(feature = "html")]
+pub(crate) fn draws_on(line: Line<'_>, span: Span) -> bool {
+  let content = line.span();
+  span.start() <= content.end()
+    && (span.end() > content.start() || (span.is_empty() && span.start() >= content.start()))
+}
+
+/// Whether `line` is the LAST line `span` is drawn on, which is where its label is said.
+///
+/// The break that ended the line is inside the test, not outside it: a span reaching exactly past
+/// it swallowed it and closes here, which is [`Region::lines`]'s rule and the reason
+/// `advance_to_drawn_end` stops on a break rather than crossing it.
+#[cfg(feature = "html")]
+pub(crate) fn ends_on(line: Line<'_>, span: Span) -> bool {
+  let ended = line.span().end() + line.line_break().map_or(0, |broken| broken.byte_len());
+  draws_on(line, span) && span.end() <= ended
 }
 
 /// One line of a [`Region`], with the part of the region that falls on it.

@@ -40,6 +40,14 @@ syn = { version = "3", features = ["full", "visit"] }
 name = "tokora_adapter"
 required-features = ["tokora"]
 
+[[test]]
+name = "html_escaping"
+required-features = ["html"]
+
+[[test]]
+name = "html_and_terminal"
+required-features = ["html", "terminal"]
+
 [package.metadata.docs.rs]
 all-features = true
 rustdoc-args = ["--cfg", "docsrs"]

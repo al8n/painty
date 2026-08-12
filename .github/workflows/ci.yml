@@ -314,6 +314,19 @@ jobs:
         run: cargo install cargo-hack
       - name: cargo hack test -p painty --feature-powerset
         run: cargo hack test -p painty --feature-powerset
+      # The profile users actually ship, which nothing above was running.
+      #
+      # `debug_assertions` is what separates the two, and this repository leans on it: overflow
+      # panics in debug and wraps in release, and `debug_assert!` compiles to nothing. A suite that
+      # only runs in debug therefore cannot see the one class of defect that is defined by the two
+      # profiles differing — and it did not: a guard added to catch an unmarked row was a
+      # `debug_assert`, so the builds that ship kept emitting the row while every CI job was green.
+      #
+      # `--all-features` rather than the powerset, and once rather than per-OS-and-feature-set:
+      # the axis being covered is the PROFILE, and a second full powerset would buy a slower matrix
+      # rather than a wider one.
+      - name: cargo test -p painty --all-features --release
+        run: cargo test -p painty --all-features --release
 
   # ── Gate: the declared MSRV is the one that builds ──────────────────────────
   #
