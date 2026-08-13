@@ -1,9 +1,21 @@
-//! The four diagnostics the SVG gallery draws.
+//! The four diagnostics the galleries draw.
 //!
-//! One definition, reached from two places by `#[path]`: `examples/svg_gallery.rs` writes them to
-//! `assets/svg/`, and `tests/svg_gallery.rs` re-renders them and compares. Two copies of these
-//! literals would drift, and the drift would be invisible — the test would pass against its own
-//! copy while the committed image described the other one.
+//! One definition, reached from four places by `#[path]`: `examples/svg_gallery.rs` and
+//! `examples/html_gallery.rs` write them to `assets/svg/` and `assets/html/`, and
+//! `tests/svg_gallery.rs` and `tests/html_gallery.rs` re-render them and compare. Two copies of
+//! these literals would drift, and the drift would be invisible — the test would pass against its
+//! own copy while the committed image described the other one.
+//!
+//! **One corpus and two surfaces, deliberately.** The two renderers share only layer 2 and the
+//! elision rule, so the same four diagnostics drawn twice are the only direct evidence a reader
+//! has that they agree about what they are showing — and a fifth specimen gets both galleries for
+//! free rather than being added to one of them.
+//!
+//! Nothing here is terminal-shaped, which is why the HTML gallery could take the corpus as it
+//! stands: `Input` is gated on `any(terminal, html)` because both renderers take the caller's
+//! inputs the same way, and every other name below is unconditional. The SVG surface reaches these
+//! through `Terminal::render_svg` and so needs `terminal`; that requirement is `svg`'s, not the
+//! corpus's.
 //!
 //! Each specimen names the thing it is here to show, because a gallery whose entries differ only
 //! decoratively is four pictures of one case.

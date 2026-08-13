@@ -36,6 +36,14 @@ unicode-segmentation = { version = "1.13", optional = true }
 unicode-width = { version = "0.2", optional = true }
 
 [dev-dependencies]
+# The HTML gallery's structural gate. painty must not be the thing that certifies painty's markup
+# is markup, and `tests/html_escaping.rs`'s hand-written tokeniser — deliberately intolerant, and
+# written by the same hand as the renderer — is not an independent opinion either. html5ever is the
+# WHATWG tokeniser and tree builder Servo ships, so "no parse errors" is the specification's own
+# verdict rather than this repository's. Dev-only: `cargo tree --edges normal` is unchanged, and
+# the `no-tokora` job's "no dependencies at all" invariant still holds.
+html5ever = "0.39"
+markup5ever_rcdom = "0.39"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "3", features = ["full", "visit"] }
 
@@ -55,12 +63,28 @@ required-features = ["html", "terminal"]
 name = "svg_gallery"
 required-features = ["svg"]
 
+[[test]]
+name = "html_gallery"
+required-features = ["html"]
+
 # The example writes the goldens the test above compares against, so the two carry the same
 # requirement. Without it, a feature set that omits `svg` still builds the example and fails on a
 # `render_svg` that is not there — which is how CI first went red on this branch.
 [[example]]
 name = "svg_gallery"
 required-features = ["svg"]
+
+# `html` alone, and deliberately not `["html", "terminal"]` as the SVG pair effectively is. The
+# shared specimens name `Diagnostic`, `Input`, `Location`, `Severity`, `Source` and `Span`, and
+# every one of those resolves under `html` on its own — `Input` is gated on
+# `any(terminal, html)` exactly because both renderers take the caller's inputs the same way. So
+# nothing had to be widened and nothing had to be carved out of the corpus. Widening would have
+# been the worse of the two anyway: it would leave the HTML gallery unbuildable in
+# `--no-default-features --features html`, which is the configuration this surface exists for and
+# the one the no-std job checks.
+[[example]]
+name = "html_gallery"
+required-features = ["html"]
 
 [package.metadata.docs.rs]
 all-features = true
