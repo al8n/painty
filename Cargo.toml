@@ -6,7 +6,7 @@ rust-version = "1.95"
 repository = "https://github.com/al8n/painty"
 homepage = "https://github.com/al8n/painty"
 documentation = "https://docs.rs/painty"
-description = "Renders a diagnostic and its source text to a terminal, to HTML, or to an exportable model."
+description = "Renders a diagnostic and its source text to a terminal or HTML."
 license = "MIT OR Apache-2.0"
 readme = "README.md"
 keywords = ["diagnostics", "error", "renderer", "terminal", "no-std"]
@@ -32,8 +32,10 @@ tokora = ["dep:tokora"]
 [dependencies]
 anstyle = { version = "1", optional = true }
 tokora = { version = "0.9", default-features = false, optional = true }
-unicode-segmentation = { version = "1.13", optional = true }
-unicode-width = { version = "0.2", optional = true }
+# Exact because both releases carry Unicode 17.0.0, the data surveyed by the placement tests.
+# Update them together only after re-deriving `DIVERGENCE` and `PLACEMENTS`.
+unicode-segmentation = { version = "=1.13.3", optional = true }
+unicode-width = { version = "=0.2.2", optional = true }
 
 [dev-dependencies]
 # The HTML gallery's structural gate. painty must not be the thing that certifies painty's markup

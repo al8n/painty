@@ -861,9 +861,12 @@ fn a_refused_write_is_reported_and_leaves_no_style_open() {
 /// How long the renderer's own geometry takes on a line of `megabytes`, with the span placed past
 /// the drawable window so that the answer is an elision marker either way.
 ///
-/// Repeated, because one call at this size is a few hundred microseconds and a single sample of
-/// that is mostly timer.
+/// Repeated in three batches, because one call at this size is a few hundred microseconds and a
+/// single sample of that is mostly timer. The line is built before the batches, and their minimum
+/// drops a one-sided scheduling delay rather than turning it into apparent geometry growth.
 fn geometry_cost(megabytes: usize) -> core::time::Duration {
+  const BATCHES: usize = 3;
+
   let text = format!("{}\n", "a".repeat(megabytes * 1_000_000));
   let source = Source::new(&text);
   let far = megabytes * 1_000_000 - 10;
@@ -872,11 +875,16 @@ fn geometry_cost(megabytes: usize) -> core::time::Duration {
   let terminal = Terminal::plain();
   let _ = terminal.underline(line);
 
-  let started = std::time::Instant::now();
-  for _ in 0..20 {
-    core::hint::black_box(terminal.underline(core::hint::black_box(line)));
-  }
-  started.elapsed()
+  (0..BATCHES)
+    .map(|_| {
+      let started = std::time::Instant::now();
+      for _ in 0..20 {
+        core::hint::black_box(terminal.underline(core::hint::black_box(line)));
+      }
+      started.elapsed()
+    })
+    .min()
+    .expect("three batches")
 }
 
 #[test]

@@ -3,7 +3,7 @@
 </div>
 <div align="center">
 
-Renders a diagnostic and its source text to a terminal, to HTML, or to an exportable model.
+Renders a diagnostic and its source text to a terminal or HTML.
 
 [<img alt="github" src="https://img.shields.io/badge/github-al8n/painty-8da0cb?style=for-the-badge&logo=Github" height="22">][Github-url]
 <img alt="LoC" src="https://img.shields.io/endpoint?url=https%3A%2F%2Fgist.githubusercontent.com%2Fal8n%2F327b2a8aef9003246e45c6e47fe63937%2Fraw%2Fpainty" height="22">
@@ -26,9 +26,7 @@ colour, in whichever of `rustc`, `miette`, `ariadne` and `codespan`'s idioms the
 HTML renderer writes the same thing as elements and CSS classes, with every byte of the caller's
 text escaped; it is a **peer** of the terminal rather than another of its styles, because the seam
 the styles are written against sits below the conversion into display cells and HTML has no cell.
-The model export is declared as a feature and is not written.
-
-Nothing here is published to crates.io.
+The `model` feature is reserved and unimplemented.
 
 ### Caller text never steers the terminal
 
@@ -119,7 +117,7 @@ Layer 2 — resolution          byte offset -> (line, column); excerpt extractio
 
 Layer 3 — outputs             terminal (ANSI) — landed, four styles
                               HTML (elements and classes) — landed, a PEER of the terminal
-                              model export for native UIs — declared as a feature; not written
+                              model export for native UIs — reserved and unimplemented
 ```
 
 The two text outputs are peers rather than a renderer and a style of it, and that is a finding
@@ -230,8 +228,8 @@ and an API shape the one mechanism already covers. The API moved.
 
 ## Features
 
-Every output is independently selectable, and the default configuration selects none of them — the
-crate is `no_std` and dependency-free until a caller asks for something.
+Each implemented output is independently selectable, and the default configuration selects none of
+them — the crate is `no_std` and dependency-free until a caller asks for something.
 
 | feature     | implies | pulls in                   | what it turns on                                    |
 | ----------- | ------- | -------------------------- | --------------------------------------------------- |
@@ -240,12 +238,12 @@ crate is `no_std` and dependency-free until a caller asks for something.
 | `terminal`  | `std`   | `unicode-width`, `unicode-segmentation`, `anstyle` | the terminal renderer: cell arithmetic, colour detection, ANSI |
 | `html`      | —       | —                          | the HTML renderer: escaping and CSS classes, still `no_std` and allocation-free |
 | `svg`       | `terminal` | —                       | `Terminal::render_svg`: the same render, as an SVG image of a terminal |
-| `model`     | —       | —                          | a stable C-ABI export of the resolved model         |
+| `model`     | —       | —                          | reserved; unimplemented                             |
 | `tokora`    | —       | `tokora`                   | an adapter from `tokora::diagnostic::Diagnose`      |
 
 ```toml
 [dependencies]
-painty = { version = "0", features = ["terminal"] }
+painty = { version = "0.0.0", features = ["terminal"] }
 ```
 
 `unicode-width` is taken rather than hand-narrowed because correct terminal alignment is impossible
@@ -257,7 +255,7 @@ a variation-selector emoji one cell early. A rule that has to be tuned a third t
 model, so the question goes to the crate that implements the standard, exactly as `syn` and not a
 line scanner decides what a public item is. `anstyle` is what `clap` and `cargo` already use, so a
 consumer's `--color` flag and this crate's theme interoperate without a conversion layer. All three
-sit behind `terminal`; the HTML and model outputs pull in none of them.
+sit behind `terminal`; the HTML output and reserved `model` feature pull in none of them.
 
 `html` implies nothing at all, which is load-bearing rather than tidy: CI builds it for
 `thumbv6m-none-eabi`, so the renderer has no `std`, no `alloc` and no heap. That is why it does not
@@ -309,8 +307,8 @@ emoji sequence more cells than its cluster width.
 diagnostic contract the adapter reads — `--features tokora` is one of the bare-metal legs the
 `no-std` job builds.
 
-SwiftUI and Flutter bindings are deliberately not features. They are separate repositories
-consuming the `model` export, so this crate never needs to know Swift or Dart exist.
+SwiftUI and Flutter bindings are deliberately not features. They remain separate-repository
+concerns; the reserved `model` feature does not yet provide bindings or an export.
 
 ## Minimum supported Rust version
 
