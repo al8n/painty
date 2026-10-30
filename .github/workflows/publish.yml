@@ -1,0 +1,715 @@
+name: Publish
+
+# v0.0.0 is bootstrapped manually because crates.io cannot configure a trusted publisher before a
+# crate exists. It is excluded here and checked again at job level so that moving one guard cannot
+# turn the bootstrap tag into an OIDC publication.
+on:
+  push:
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+      - '!v0.0.0'
+
+permissions: {}
+
+# Publishing a version is irreversible. Never cancel one upload in favour of another, and never
+# let two release decisions overlap.
+concurrency:
+  group: crates-io-${{ github.repository }}
+  cancel-in-progress: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  RUSTUP_TOOLCHAIN: '1.95'
+
+jobs:
+  prepare:
+    name: Prepare immutable inputs
+    if: >-
+      github.repository == 'al8n/painty' &&
+      github.ref_type == 'tag' &&
+      github.ref_name != 'v0.0.0'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CARGO_TARGET_DIR: /tmp/painty-prepare-${{ github.run_id }}-${{ github.run_attempt }}
+    outputs:
+      lock_base64: ${{ steps.package.outputs.lock_base64 }}
+      lock_sha256: ${{ steps.package.outputs.lock_sha256 }}
+      package: ${{ steps.package.outputs.package }}
+      package_sha256: ${{ steps.package.outputs.package_sha256 }}
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the declared Rust release
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          case "$(rustc --version)" in
+            'rustc 1.95.'*) ;;
+            *)
+              echo "::error::RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN did not select Rust 1.95"
+              exit 1
+              ;;
+          esac
+
+      - name: The remote annotated tag and main are this event
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          read_ref() {
+            local line=$1
+            local expected_ref=$2
+            local sha ref extra
+            read -r sha ref extra <<< "$line"
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ || "$ref" != "$expected_ref" || -n "${extra:-}" ]]; then
+              echo "::error::expected exactly one remote ref $expected_ref, got: ${line:-<nothing>}"
+              exit 1
+            fi
+            printf '%s\n' "$sha"
+          }
+
+          tag_object=$(read_ref \
+            "$(git ls-remote --refs origin "refs/tags/$TAG")" \
+            "refs/tags/$TAG")
+          tag_commit=$(read_ref \
+            "$(git ls-remote origin "refs/tags/$TAG^{}")" \
+            "refs/tags/$TAG^{}")
+          main_commit=$(read_ref \
+            "$(git ls-remote --refs origin refs/heads/main)" \
+            refs/heads/main)
+
+          [[ "$tag_object" != "$tag_commit" ]] || {
+            echo "::error::$TAG is lightweight; releases require an annotated tag"
+            exit 1
+          }
+          [[ "$tag_commit" == "$EVENT_SHA" ]] || {
+            echo "::error::$TAG peels to $tag_commit, not event commit $EVENT_SHA"
+            exit 1
+          }
+          [[ "$main_commit" == "$EVENT_SHA" ]] || {
+            echo "::error::origin/main is $main_commit, not event commit $EVENT_SHA"
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$EVENT_SHA" ]] || {
+            echo "::error::checkout is not event commit $EVENT_SHA"
+            exit 1
+          }
+          [[ "$(git cat-file -t "refs/tags/$TAG")" == tag ]] || {
+            echo "::error::the local $TAG ref is not an annotated tag object"
+            exit 1
+          }
+          [[ "$(git rev-parse "refs/tags/$TAG^{}")" == "$EVENT_SHA" ]] || {
+            echo "::error::the local $TAG ref does not peel to event commit $EVENT_SHA"
+            exit 1
+          }
+
+      - name: Freeze the lockfile and package
+        id: package
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          cargo generate-lockfile
+          [[ -f Cargo.lock ]] || {
+            echo "::error::cargo did not generate Cargo.lock"
+            exit 1
+          }
+
+          release=$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python3 -c '
+          import json, sys
+          packages = [p for p in json.load(sys.stdin)["packages"] if p.get("publish") != []]
+          if len(packages) != 1:
+              raise SystemExit(f"expected one publishable package, found {len(packages)}")
+          package = packages[0]
+          print(package["name"] + "\t" + package["version"])
+          '
+          )
+          IFS=$'\t' read -r package version extra <<< "$release"
+          [[ -n "$package" && -n "$version" && -z "${extra:-}" ]] || {
+            echo "::error::could not read one package name and version"
+            exit 1
+          }
+          [[ "$package" == painty ]] || {
+            echo "::error::the only publishable package is $package, not painty"
+            exit 1
+          }
+          [[ "$version" != 0.0.0 ]] || {
+            echo "::error::v0.0.0 is a manual bootstrap and may not use this workflow"
+            exit 1
+          }
+          [[ "$TAG" == "v$version" ]] || {
+            echo "::error::tag $TAG does not name manifest version $version"
+            exit 1
+          }
+
+          cargo package --locked -p "$package"
+          archive="$CARGO_TARGET_DIR/package/$package-$version.crate"
+          vcs_info="$CARGO_TARGET_DIR/package/$package-$version/.cargo_vcs_info.json"
+          [[ -f "$archive" && -f "$vcs_info" ]] || {
+            echo "::error::cargo package did not leave its archive and VCS provenance"
+            exit 1
+          }
+          python3 - "$vcs_info" "$EVENT_SHA" <<'PY'
+          import json, sys
+
+          with open(sys.argv[1], encoding="utf-8") as file:
+              vcs = json.load(file).get("git", {})
+          if vcs.get("sha1") != sys.argv[2] or vcs.get("dirty", False):
+              raise SystemExit(f"package VCS provenance is not clean event commit {sys.argv[2]}: {vcs}")
+          PY
+
+          lock_sha256=$(sha256sum Cargo.lock | cut -d' ' -f1)
+          package_sha256=$(sha256sum "$archive" | cut -d' ' -f1)
+          lock_base64=$(base64 -w 0 Cargo.lock)
+          [[ "$lock_sha256" =~ ^[0-9a-f]{64}$ && "$package_sha256" =~ ^[0-9a-f]{64}$ ]] || {
+            echo "::error::a release input did not produce a SHA-256 digest"
+            exit 1
+          }
+          if (( ${#lock_base64} > 400000 )); then
+            echo "::error::the encoded lockfile is too large for a guarded job output"
+            exit 1
+          fi
+
+          {
+            echo "lock_base64=$lock_base64"
+            echo "lock_sha256=$lock_sha256"
+            echo "package=$package"
+            echo "package_sha256=$package_sha256"
+            echo "version=$version"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: The registry is absent or this run already published it
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          PACKAGE: ${{ steps.package.outputs.package }}
+          PACKAGE_SHA256: ${{ steps.package.outputs.package_sha256 }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          VERSION: ${{ steps.package.outputs.version }}
+        run: |
+          set -euo pipefail
+          status=$(curl --silent --show-error \
+            --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 \
+            --header 'Accept: application/json' \
+            --user-agent "painty-release/$RUN_ID" \
+            --output registry.json --write-out '%{http_code}' \
+            "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
+
+          case "$status" in
+            404)
+              echo "registry version $PACKAGE $VERSION is absent"
+              ;;
+            200)
+              python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+                "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
+          import json, sys
+
+          path, package, version, checksum, repository, run_id, sha = sys.argv[1:]
+          with open(path, encoding="utf-8") as file:
+              record = json.load(file).get("version")
+          expected_trustpub = {
+              "provider": "github",
+              "repository": repository,
+              "run_id": run_id,
+              "sha": sha,
+          }
+          valid = (
+              isinstance(record, dict)
+              and record.get("crate") == package
+              and record.get("num") == version
+              and record.get("checksum") == checksum
+              and record.get("yanked") is False
+              and "published_by" in record
+              and record["published_by"] is None
+              and record.get("trustpub_data") == expected_trustpub
+          )
+          if not valid:
+              raise SystemExit(f"existing registry version is not this run's trusted publication: {record}")
+          PY
+              echo "registry version already belongs to this workflow run"
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $status while checking $PACKAGE $VERSION"
+              exit 1
+              ;;
+          esac
+
+  publish:
+    name: Publish through OIDC
+    needs: prepare
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment: crates-io
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      CARGO_TARGET_DIR: /tmp/painty-publish-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Install the declared Rust release
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          case "$(rustc --version)" in
+            'rustc 1.95.'*) ;;
+            *)
+              echo "::error::RUSTUP_TOOLCHAIN=$RUSTUP_TOOLCHAIN did not select Rust 1.95"
+              exit 1
+              ;;
+          esac
+
+      # This is deliberately the first Cargo input in the protected job. The environment approval
+      # covers the lockfile hash and package hash prepared by the unprivileged job, not a fresh
+      # dependency resolution performed afterwards.
+      - name: Restore the approved lockfile before Cargo runs
+        env:
+          LOCK_BASE64: ${{ needs.prepare.outputs.lock_base64 }}
+          LOCK_SHA256: ${{ needs.prepare.outputs.lock_sha256 }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$LOCK_BASE64" | base64 --decode > Cargo.lock
+          restored=$(sha256sum Cargo.lock | cut -d' ' -f1)
+          [[ "$restored" == "$LOCK_SHA256" ]] || {
+            echo "::error::restored lockfile is $restored, not approved lockfile $LOCK_SHA256"
+            exit 1
+          }
+
+      - name: Revalidate the tag and main after approval
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          read_ref() {
+            local line=$1
+            local expected_ref=$2
+            local sha ref extra
+            read -r sha ref extra <<< "$line"
+            if [[ ! "$sha" =~ ^[0-9a-f]{40}$ || "$ref" != "$expected_ref" || -n "${extra:-}" ]]; then
+              echo "::error::expected exactly one remote ref $expected_ref, got: ${line:-<nothing>}"
+              exit 1
+            fi
+            printf '%s\n' "$sha"
+          }
+
+          tag_object=$(read_ref \
+            "$(git ls-remote --refs origin "refs/tags/$TAG")" \
+            "refs/tags/$TAG")
+          tag_commit=$(read_ref \
+            "$(git ls-remote origin "refs/tags/$TAG^{}")" \
+            "refs/tags/$TAG^{}")
+          main_commit=$(read_ref \
+            "$(git ls-remote --refs origin refs/heads/main)" \
+            refs/heads/main)
+          [[ "$tag_object" != "$tag_commit" && "$tag_commit" == "$EVENT_SHA" && "$main_commit" == "$EVENT_SHA" ]] || {
+            echo "::error::the annotated tag, event commit, and current origin/main no longer agree"
+            exit 1
+          }
+          [[ "$(git rev-parse HEAD)" == "$EVENT_SHA" ]] || {
+            echo "::error::checkout is not event commit $EVENT_SHA"
+            exit 1
+          }
+
+      - name: Reproduce the approved package
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          PACKAGE: ${{ needs.prepare.outputs.package }}
+          PACKAGE_SHA256: ${{ needs.prepare.outputs.package_sha256 }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          release=$(
+            cargo metadata --locked --no-deps --format-version 1 |
+              python3 -c '
+          import json, sys
+          packages = [p for p in json.load(sys.stdin)["packages"] if p.get("publish") != []]
+          if len(packages) != 1:
+              raise SystemExit(f"expected one publishable package, found {len(packages)}")
+          package = packages[0]
+          print(package["name"] + "\t" + package["version"])
+          '
+          )
+          IFS=$'\t' read -r package version extra <<< "$release"
+          [[ "$package" == "$PACKAGE" && "$version" == "$VERSION" && -z "${extra:-}" ]] || {
+            echo "::error::package identity changed after approval"
+            exit 1
+          }
+
+          cargo package --locked -p "$PACKAGE"
+          archive="$CARGO_TARGET_DIR/package/$PACKAGE-$VERSION.crate"
+          vcs_info="$CARGO_TARGET_DIR/package/$PACKAGE-$VERSION/.cargo_vcs_info.json"
+          reproduced=$(sha256sum "$archive" | cut -d' ' -f1)
+          [[ "$reproduced" == "$PACKAGE_SHA256" ]] || {
+            echo "::error::package is $reproduced after approval, not approved package $PACKAGE_SHA256"
+            exit 1
+          }
+          python3 - "$vcs_info" "$EVENT_SHA" <<'PY'
+          import json, sys
+
+          with open(sys.argv[1], encoding="utf-8") as file:
+              vcs = json.load(file).get("git", {})
+          if vcs.get("sha1") != sys.argv[2] or vcs.get("dirty", False):
+              raise SystemExit(f"package VCS provenance is not clean event commit {sys.argv[2]}: {vcs}")
+          PY
+
+      - name: Close the registry and ref race
+        id: registry
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          PACKAGE: ${{ needs.prepare.outputs.package }}
+          PACKAGE_SHA256: ${{ needs.prepare.outputs.package_sha256 }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          read_ref() {
+            local line=$1
+            local expected_ref=$2
+            local sha ref extra
+            read -r sha ref extra <<< "$line"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ && "$ref" == "$expected_ref" && -z "${extra:-}" ]] || return 1
+            printf '%s\n' "$sha"
+          }
+          tag_commit=$(read_ref \
+            "$(git ls-remote origin "refs/tags/$TAG^{}")" \
+            "refs/tags/$TAG^{}")
+          main_commit=$(read_ref \
+            "$(git ls-remote --refs origin refs/heads/main)" \
+            refs/heads/main)
+          [[ "$tag_commit" == "$EVENT_SHA" && "$main_commit" == "$EVENT_SHA" ]] || {
+            echo "::error::the remote tag or main moved before registry authentication"
+            exit 1
+          }
+
+          status=$(curl --silent --show-error \
+            --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 \
+            --header 'Accept: application/json' \
+            --user-agent "painty-release/$RUN_ID" \
+            --output registry.json --write-out '%{http_code}' \
+            "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
+          case "$status" in
+            404)
+              echo 'present=false' >> "$GITHUB_OUTPUT"
+              ;;
+            200)
+              python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+                "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
+          import json, sys
+
+          path, package, version, checksum, repository, run_id, sha = sys.argv[1:]
+          with open(path, encoding="utf-8") as file:
+              record = json.load(file).get("version")
+          expected = {"provider": "github", "repository": repository, "run_id": run_id, "sha": sha}
+          valid = (
+              isinstance(record, dict)
+              and record.get("crate") == package
+              and record.get("num") == version
+              and record.get("checksum") == checksum
+              and record.get("yanked") is False
+              and "published_by" in record
+              and record["published_by"] is None
+              and record.get("trustpub_data") == expected
+          )
+          if not valid:
+              raise SystemExit(f"registry race produced a different version: {record}")
+          PY
+              echo 'present=true' >> "$GITHUB_OUTPUT"
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $status while closing the publish race"
+              exit 1
+              ;;
+          esac
+
+      # The OIDC permission belongs only to this job, and the exchange is skipped when an exact
+      # same-run record already exists. A rerun after a successful upload therefore mints nothing.
+      - name: Exchange OIDC for a temporary crates.io token
+        if: steps.registry.outputs.present == 'false'
+        id: auth
+        uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+
+      - name: Publish only while the version is still absent
+        if: steps.registry.outputs.present == 'false'
+        id: upload
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
+          EVENT_SHA: ${{ github.sha }}
+          PACKAGE: ${{ needs.prepare.outputs.package }}
+          PACKAGE_SHA256: ${{ needs.prepare.outputs.package_sha256 }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          read_ref() {
+            local line=$1
+            local expected_ref=$2
+            local sha ref extra
+            read -r sha ref extra <<< "$line"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ && "$ref" == "$expected_ref" && -z "${extra:-}" ]] || return 1
+            printf '%s\n' "$sha"
+          }
+          tag_commit=$(read_ref \
+            "$(git ls-remote origin "refs/tags/$TAG^{}")" \
+            "refs/tags/$TAG^{}")
+          main_commit=$(read_ref \
+            "$(git ls-remote --refs origin refs/heads/main)" \
+            refs/heads/main)
+          [[ "$tag_commit" == "$EVENT_SHA" && "$main_commit" == "$EVENT_SHA" ]] || {
+            echo "::error::the remote tag or main moved after OIDC authentication"
+            exit 1
+          }
+
+          status=$(curl --silent --show-error \
+            --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 \
+            --header 'Accept: application/json' \
+            --user-agent "painty-release/$RUN_ID" \
+            --output registry.json --write-out '%{http_code}' \
+            "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
+          case "$status" in
+            404)
+              set +e
+              cargo publish --locked --registry crates-io -p "$PACKAGE"
+              cargo_status=$?
+              set -e
+              echo "cargo_status=$cargo_status" >> "$GITHUB_OUTPUT"
+              ;;
+            200)
+              python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+                "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
+          import json, sys
+
+          path, package, version, checksum, repository, run_id, sha = sys.argv[1:]
+          with open(path, encoding="utf-8") as file:
+              record = json.load(file).get("version")
+          expected = {"provider": "github", "repository": repository, "run_id": run_id, "sha": sha}
+          valid = (
+              isinstance(record, dict)
+              and record.get("crate") == package
+              and record.get("num") == version
+              and record.get("checksum") == checksum
+              and record.get("yanked") is False
+              and "published_by" in record
+              and record["published_by"] is None
+              and record.get("trustpub_data") == expected
+          )
+          if not valid:
+              raise SystemExit(f"version appeared after OIDC from a different publisher: {record}")
+          PY
+              echo 'cargo_status=0' >> "$GITHUB_OUTPUT"
+              echo 'the exact same-run publication appeared before Cargo; not uploading again'
+              ;;
+            *)
+              echo "::error::crates.io returned HTTP $status immediately before Cargo"
+              exit 1
+              ;;
+          esac
+
+      - name: Poll the authoritative version record
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          PACKAGE: ${{ needs.prepare.outputs.package }}
+          PACKAGE_SHA256: ${{ needs.prepare.outputs.package_sha256 }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          for attempt in $(seq 1 60); do
+            status=$(curl --silent --show-error \
+              --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 30 \
+              --header 'Accept: application/json' \
+              --user-agent "painty-release/$RUN_ID" \
+              --output registry.json --write-out '%{http_code}' \
+              "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
+            case "$status" in
+              200)
+                python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+                  "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
+          import json, sys
+
+          path, package, version, checksum, repository, run_id, sha = sys.argv[1:]
+          with open(path, encoding="utf-8") as file:
+              record = json.load(file).get("version")
+          expected = {"provider": "github", "repository": repository, "run_id": run_id, "sha": sha}
+          valid = (
+              isinstance(record, dict)
+              and record.get("crate") == package
+              and record.get("num") == version
+              and record.get("checksum") == checksum
+              and record.get("yanked") is False
+              and "published_by" in record
+              and record["published_by"] is None
+              and record.get("trustpub_data") == expected
+          )
+          if not valid:
+              raise SystemExit(f"published registry provenance is wrong: {record}")
+          PY
+                echo "verified $PACKAGE $VERSION in the authoritative registry API"
+                exit 0
+                ;;
+              404 | 429 | 500 | 502 | 503 | 504)
+                if [[ "$attempt" -lt 60 ]]; then
+                  sleep 5
+                  continue
+                fi
+                ;;
+              *)
+                echo "::error::crates.io returned non-retryable HTTP $status while polling"
+                exit 1
+                ;;
+            esac
+          done
+          echo "::error::the authoritative registry record did not appear after five minutes"
+          exit 1
+
+  release:
+    name: Create GitHub Release
+    needs:
+      - prepare
+      - publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Final registry, tag, and main check
+        env:
+          EVENT_SHA: ${{ github.sha }}
+          PACKAGE: ${{ needs.prepare.outputs.package }}
+          PACKAGE_SHA256: ${{ needs.prepare.outputs.package_sha256 }}
+          REPOSITORY: ${{ github.repository }}
+          RUN_ID: ${{ github.run_id }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          read_ref() {
+            local line=$1
+            local expected_ref=$2
+            local sha ref extra
+            read -r sha ref extra <<< "$line"
+            [[ "$sha" =~ ^[0-9a-f]{40}$ && "$ref" == "$expected_ref" && -z "${extra:-}" ]] || return 1
+            printf '%s\n' "$sha"
+          }
+          tag_object=$(read_ref \
+            "$(git ls-remote --refs origin "refs/tags/$TAG")" \
+            "refs/tags/$TAG")
+          tag_commit=$(read_ref \
+            "$(git ls-remote origin "refs/tags/$TAG^{}")" \
+            "refs/tags/$TAG^{}")
+          main_commit=$(read_ref \
+            "$(git ls-remote --refs origin refs/heads/main)" \
+            refs/heads/main)
+          [[ "$tag_object" != "$tag_commit" && "$tag_commit" == "$EVENT_SHA" && "$main_commit" == "$EVENT_SHA" ]] || {
+            echo "::error::final remote tag, event commit, and origin/main do not agree"
+            exit 1
+          }
+
+          status=$(curl --silent --show-error \
+            --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 \
+            --header 'Accept: application/json' \
+            --user-agent "painty-release/$RUN_ID" \
+            --output registry.json --write-out '%{http_code}' \
+            "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
+          [[ "$status" == 200 ]] || {
+            echo "::error::final crates.io lookup returned HTTP $status"
+            exit 1
+          }
+          python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+            "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
+          import json, sys
+
+          path, package, version, checksum, repository, run_id, sha = sys.argv[1:]
+          with open(path, encoding="utf-8") as file:
+              record = json.load(file).get("version")
+          expected = {"provider": "github", "repository": repository, "run_id": run_id, "sha": sha}
+          valid = (
+              isinstance(record, dict)
+              and record.get("crate") == package
+              and record.get("num") == version
+              and record.get("checksum") == checksum
+              and record.get("yanked") is False
+              and "published_by" in record
+              and record["published_by"] is None
+              and record.get("trustpub_data") == expected
+          )
+          if not valid:
+              raise SystemExit(f"final registry provenance is wrong: {record}")
+          PY
+
+      - name: Create or verify the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PACKAGE: ${{ needs.prepare.outputs.package }}
+          REPOSITORY: ${{ github.repository }}
+          TAG: ${{ github.ref_name }}
+          VERSION: ${{ needs.prepare.outputs.version }}
+        run: |
+          set -euo pipefail
+          title="$PACKAGE $VERSION"
+
+          set +e
+          gh api "repos/$REPOSITORY/releases/tags/$TAG" > release.json 2> release.error
+          lookup_status=$?
+          set -e
+
+          if [[ "$lookup_status" -ne 0 ]]; then
+            if ! grep -qF '(HTTP 404)' release.error; then
+              cat release.error >&2
+              echo "::error::could not determine whether the GitHub Release already exists"
+              exit 1
+            fi
+            gh release create "$TAG" --repo "$REPOSITORY" --verify-tag \
+              --title "$title" --generate-notes
+            gh api "repos/$REPOSITORY/releases/tags/$TAG" > release.json
+          fi
+
+          python3 - release.json "$TAG" "$title" <<'PY'
+          import json, sys
+
+          with open(sys.argv[1], encoding="utf-8") as file:
+              release = json.load(file)
+          valid = (
+              release.get("tag_name") == sys.argv[2]
+              and release.get("name") == sys.argv[3]
+              and release.get("draft") is False
+              and release.get("prerelease") is False
+          )
+          if not valid:
+              raise SystemExit(f"existing GitHub Release is not the expected final release: {release}")
+          PY
