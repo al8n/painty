@@ -203,11 +203,12 @@ jobs:
           VERSION: ${{ steps.package.outputs.version }}
         run: |
           set -euo pipefail
+          registry_response="$RUNNER_TEMP/painty-registry-before-approval.json"
           status=$(curl --silent --show-error \
             --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 \
             --header 'Accept: application/json' \
             --user-agent "painty-release/$RUN_ID" \
-            --output registry.json --write-out '%{http_code}' \
+            --output "$registry_response" --write-out '%{http_code}' \
             "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
 
           case "$status" in
@@ -215,7 +216,7 @@ jobs:
               echo "registry version $PACKAGE $VERSION is absent"
               ;;
             200)
-              python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+              python3 - "$registry_response" "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
                 "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
           import json, sys
 
@@ -386,6 +387,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
+          registry_response="$RUNNER_TEMP/painty-registry-after-approval.json"
 
           read_ref() {
             local line=$1
@@ -410,14 +412,14 @@ jobs:
             --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 \
             --header 'Accept: application/json' \
             --user-agent "painty-release/$RUN_ID" \
-            --output registry.json --write-out '%{http_code}' \
+            --output "$registry_response" --write-out '%{http_code}' \
             "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
           case "$status" in
             404)
               echo 'present=false' >> "$GITHUB_OUTPUT"
               ;;
             200)
-              python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+              python3 - "$registry_response" "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
                 "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
           import json, sys
 
@@ -467,6 +469,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
+          registry_response="$RUNNER_TEMP/painty-registry-before-upload.json"
 
           read_ref() {
             local line=$1
@@ -491,7 +494,7 @@ jobs:
             --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 \
             --header 'Accept: application/json' \
             --user-agent "painty-release/$RUN_ID" \
-            --output registry.json --write-out '%{http_code}' \
+            --output "$registry_response" --write-out '%{http_code}' \
             "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
           case "$status" in
             404)
@@ -502,7 +505,7 @@ jobs:
               echo "cargo_status=$cargo_status" >> "$GITHUB_OUTPUT"
               ;;
             200)
-              python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+              python3 - "$registry_response" "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
                 "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
           import json, sys
 
@@ -542,16 +545,17 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
+          registry_response="$RUNNER_TEMP/painty-registry-poll.json"
           for attempt in $(seq 1 60); do
             status=$(curl --silent --show-error \
               --retry 2 --retry-delay 1 --connect-timeout 10 --max-time 30 \
               --header 'Accept: application/json' \
               --user-agent "painty-release/$RUN_ID" \
-              --output registry.json --write-out '%{http_code}' \
+              --output "$registry_response" --write-out '%{http_code}' \
               "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
             case "$status" in
               200)
-                python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+                python3 - "$registry_response" "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
                   "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
           import json, sys
 
@@ -617,6 +621,7 @@ jobs:
           VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           set -euo pipefail
+          registry_response="$RUNNER_TEMP/painty-registry-final.json"
 
           read_ref() {
             local line=$1
@@ -644,13 +649,13 @@ jobs:
             --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 30 \
             --header 'Accept: application/json' \
             --user-agent "painty-release/$RUN_ID" \
-            --output registry.json --write-out '%{http_code}' \
+            --output "$registry_response" --write-out '%{http_code}' \
             "https://crates.io/api/v1/crates/$PACKAGE/$VERSION")
           [[ "$status" == 200 ]] || {
             echo "::error::final crates.io lookup returned HTTP $status"
             exit 1
           }
-          python3 - registry.json "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
+          python3 - "$registry_response" "$PACKAGE" "$VERSION" "$PACKAGE_SHA256" \
             "$REPOSITORY" "$RUN_ID" "$EVENT_SHA" <<'PY'
           import json, sys
 
@@ -682,24 +687,26 @@ jobs:
         run: |
           set -euo pipefail
           title="$PACKAGE $VERSION"
+          release_error="$RUNNER_TEMP/painty-github-release.error"
+          release_response="$RUNNER_TEMP/painty-github-release.json"
 
           set +e
-          gh api "repos/$REPOSITORY/releases/tags/$TAG" > release.json 2> release.error
+          gh api "repos/$REPOSITORY/releases/tags/$TAG" > "$release_response" 2> "$release_error"
           lookup_status=$?
           set -e
 
           if [[ "$lookup_status" -ne 0 ]]; then
-            if ! grep -qF '(HTTP 404)' release.error; then
-              cat release.error >&2
+            if ! grep -qF '(HTTP 404)' "$release_error"; then
+              cat "$release_error" >&2
               echo "::error::could not determine whether the GitHub Release already exists"
               exit 1
             fi
             gh release create "$TAG" --repo "$REPOSITORY" --verify-tag \
               --title "$title" --generate-notes
-            gh api "repos/$REPOSITORY/releases/tags/$TAG" > release.json
+            gh api "repos/$REPOSITORY/releases/tags/$TAG" > "$release_response"
           fi
 
-          python3 - release.json "$TAG" "$title" <<'PY'
+          python3 - "$release_response" "$TAG" "$title" <<'PY'
           import json, sys
 
           with open(sys.argv[1], encoding="utf-8") as file:
