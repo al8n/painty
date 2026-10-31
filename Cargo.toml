@@ -31,7 +31,7 @@ tokora = ["dep:tokora"]
 
 [dependencies]
 anstyle = { version = "1", optional = true }
-tokora = { version = "0.9", default-features = false, optional = true }
+tokora = { version = "0.11", default-features = false, optional = true }
 # Exact because both releases carry Unicode 17.0.0, the data surveyed by the placement tests.
 # Update them together only after re-deriving `DIVERGENCE` and `PLACEMENTS`.
 unicode-segmentation = { version = "=1.13.3", optional = true }
