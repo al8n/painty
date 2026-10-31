@@ -44,7 +44,7 @@ unicode-width = { version = "=0.2.2", optional = true }
 # WHATWG tokeniser and tree builder Servo ships, so "no parse errors" is the specification's own
 # verdict rather than this repository's. Dev-only: `cargo tree --edges normal` is unchanged, and
 # the `no-tokora` job's "no dependencies at all" invariant still holds.
-html5ever = "0.39"
+html5ever = "0.40"
 markup5ever_rcdom = "0.39"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "3", features = ["full", "visit"] }
