@@ -19,40 +19,45 @@ Renders a diagnostic and its source text to a terminal or HTML.
 
 ## Status
 
-**Layer 2, a terminal renderer in four styles, and HTML.** Resolution has landed: a diagnostic and
-the source text it points into go in, and lines, character columns, excerpts and the lines a
-multi-line span is drawn on come out. The terminal renderer draws them with box characters and ANSI
-colour, in whichever of `rustc`, `miette`, `ariadne` and `codespan`'s idioms the caller picks. The
-HTML renderer writes the same thing as elements and CSS classes, with every byte of the caller's
-text escaped; it is a **peer** of the terminal rather than another of its styles, because the seam
-the styles are written against sits below the conversion into display cells and HTML has no cell.
-The `model` feature is reserved and unimplemented.
+Resolution has landed: a diagnostic and the source text it points into go in, and lines, character
+columns, excerpts and the lines a multi-line span covers come out. On top of it sit the terminal
+renderer in four styles (`rustc`, `miette`, `ariadne` and `codespan`), an HTML renderer, and an SVG
+surface for the terminal render. The `model` feature, an export of the resolved model for native
+UIs, is reserved and implements nothing.
 
 ### Caller text never steers the terminal
 
-Diagnostic text is caller-supplied and so is the source it points into, so every control character
-in either — the message, the code, the origin, a label, the excerpt — is replaced by a visible
-stand-in before it is written. An ESC reads as `␛`, DEL as `␡`, and C1, which has no pictures, as
-the replacement character.
-
-Not cosmetic. `\x1b[38;5;196m` sitting in a source file would otherwise colour the rest of the
-frame, and it would do it under `ColorCapability::None`, which is the one guarantee the capability
-gate exists to make; U+009B is a single-byte CSI on terminals that honour C1, and a bare newline
-needs no escape at all to break the frame. Substituted rather than dropped, because a reader has to
-be able to see that something was there, and every stand-in is one cell wide so no marker moves.
+Diagnostic text and the source it points into are caller-supplied, so every control character in
+either — the message, the code, the origin, a label, the help line, the excerpt — is replaced by a
+visible stand-in before it is written: ESC reads as `␛`, DEL as `␡`, and C1, which has no picture,
+as the replacement character. (A tab in source text is expanded to its tab stop instead.) This holds
+in every style and at every colour capability, including `ColorCapability::None`, which promises no
+escape sequences at all. A stand-in is one cell wide, so no marker moves.
 
 ## Overview
 
-A diagnostic is worth more when it does not know how it will be displayed. Producers —
-[smear](https://github.com/al8n/smear), [pql](https://github.com/al8n/pql), and
-[tokora](https://github.com/al8n/tokora)'s coming SQL, Yul and Solidity frontends — describe what
-went wrong as structure: a code, a severity, positions, labels, a help line. `painty` is the other
-half of that split: give it such a description and the text it points into, and it produces
-something a human, a browser or a native UI can read.
+A diagnostic is worth more when it does not know how it will be displayed. A producer — a parser, a
+validator, a linter — describes what went wrong as structure: a code, a severity, positions, labels
+and a help line. `painty` is the other half of that split: give it such a description and the text
+it points into, and it produces something a human, a browser or a native UI can read.
 
-Existing renderers do not fit that shape. `miette` and `ariadne` both require `std`, both own their
-strings, and both bake a rendering strategy into the error type — which is the coupling worth
-avoiding in the first place.
+`miette` and `ariadne` are renderers too, but both require `std`, both own their strings, and both
+tie how a diagnostic is drawn to the type that carries it. `painty` takes plain borrowed data over
+`core`, so the producer does not choose a renderer and the renderer does not choose the producer.
+
+## Quick start
+
+```toml
+[dependencies]
+painty = { version = "0.0.0", features = ["terminal", "html"] }
+```
+
+### Describe a diagnostic
+
+A `Diagnostic` is borrowed data: a code, a severity, a message, a primary position, and optionally
+labels and a help line. A `Location` is an input number and a byte span (or `Location::entire`, for
+a whole input); the number indexes the list of inputs a renderer is given. Resolving a span against
+a `Source` needs no feature.
 
 ```rust
 use painty::{Diagnostic, Label, Location, Severity, Source, Span};
@@ -77,247 +82,299 @@ assert_eq!(region.text(), "width");
 assert_eq!((region.start().line(), region.start().column()), (3, 3));
 ```
 
+### Render it to a terminal
+
+With the `terminal` feature, `Terminal::render` writes a diagnostic against the inputs its locations
+point into. `Terminal::plain()` draws in the `rustc` style with no colour.
+
+```rust
+# #[cfg(feature = "terminal")] {
+use painty::{Diagnostic, Input, Location, Severity, Source, Span, terminal::Terminal};
+
+let text = "type Widget {\n  width: Int\n  width: Int\n}\n";
+let message = "`width` is defined twice";
+let diagnostic = Diagnostic::new(
+  "mylang::schema::duplicate-field",
+  Severity::Error,
+  &message,
+  Location::new(0, Span::new(29, 34)),
+)
+.with_primary_label("redefined here")
+.with_help("rename one of the two definitions");
+
+let inputs = [Input::new(Source::new(text)).with_origin("widget.graphql")];
+
+let mut out = String::new();
+Terminal::plain().render(&diagnostic, &inputs, &mut out).unwrap();
+assert!(out.starts_with("error[mylang::schema::duplicate-field]: `width` is defined twice\n"));
+assert!(out.contains("  |   ^^^^^ redefined here\n"));
+
+// The same diagnostic in another style.
+let mut boxed = String::new();
+Terminal::plain().like_miette().render(&diagnostic, &inputs, &mut boxed).unwrap();
+assert!(boxed.contains("┗━━ redefined here"));
+# }
+```
+
+```text
+error[mylang::schema::duplicate-field]: `width` is defined twice
+ --> widget.graphql:3:3
+  |
+3 |   width: Int
+  |   ^^^^^ redefined here
+  |
+  = help: rename one of the two definitions
+```
+
+`like_rustc()`, `like_miette()`, `like_ariadne()` and `like_codespan()` pick the style. A style
+changes glyphs and layout; which source is marked is the same in all four.
+
+Colour is opt-in. `Terminal::plain()` writes no escape sequences, and `with_capability` turns on as
+much colour as the output can carry. `ColorChoice` resolves the usual `NO_COLOR`, `CLICOLOR_FORCE`,
+`CLICOLOR`, `TERM` and `COLORTERM` into a `ColorCapability`, so a `--color` flag maps straight onto
+it.
+
+```rust
+# #[cfg(feature = "terminal")] {
+use painty::terminal::{CapturedEnvironment, ColorCapability, ColorChoice, Environment, Terminal};
+
+let captured = CapturedEnvironment::from_process();
+let environment = Environment::from_process(&std::io::stderr(), &captured);
+let terminal = Terminal::plain().with_capability(ColorChoice::Auto.resolve(&environment));
+
+// A caller's `--color=never` is not overruled by the environment.
+assert_eq!(ColorChoice::Never.resolve(&environment), ColorCapability::None);
+# }
+```
+
+### Render it as HTML
+
+With the `html` feature, `Html::render` takes the same arguments and writes elements and CSS
+classes instead of cells. The markup carries `painty-` classes and no styling, so the page that
+embeds it decides what it looks like.
+
+```rust
+# #[cfg(feature = "html")] {
+use painty::{Diagnostic, Input, Location, Severity, Source, Span, html::Html};
+
+let text = "type Widget {\n  width: Int\n  width: Int\n}\n";
+let message = "`width` is defined twice";
+let diagnostic = Diagnostic::new(
+  "mylang::schema::duplicate-field",
+  Severity::Error,
+  &message,
+  Location::new(0, Span::new(29, 34)),
+)
+.with_primary_label("redefined here")
+.with_help("rename one of the two definitions");
+
+let mut out = String::new();
+Html::new()
+  .render(&diagnostic, &[Input::new(Source::new(text))], &mut out)
+  .unwrap();
+
+assert!(out.contains(r#"<span class="painty-code">mylang::schema::duplicate-field</span>"#));
+assert!(out.contains(r#"<span class="painty-covered painty-primary">width</span>"#));
+assert!(out.contains(r#"<p class="painty-help">rename one of the two definitions</p>"#));
+# }
+```
+
+The caller's text is escaped, so none of it reaches the page as markup. With the `svg` feature,
+`Terminal::render_svg` takes the arguments `render` does and writes the same render as an SVG
+image.
+
+## Rendering tokora diagnostics
+
+With the `tokora` feature, `painty::tokora::adapt` reads a `&dyn tokora::diagnostic::Diagnose`
+(tokora 0.12) into a `Diagnostic`, so any front end whose errors implement that contract renders
+through the same renderers. `painty` allocates nothing, so the labels and the result path land in
+buffers you supply, usually arrays on the stack.
+
+```rust
+# #[cfg(all(feature = "tokora", feature = "terminal"))] {
+use painty::{Input, Label, Location, PathSegment, Source, terminal::Terminal, tokora::adapt};
+use tokora::diagnostic::Diagnose;
+
+fn report(error: &dyn Diagnose, text: &str) -> (String, bool) {
+  let mut labels = [Label::new(Location::entire(0), ""); 4];
+  let mut path: [PathSegment<'_>; 4] = [PathSegment::Index(0); 4];
+  let adapted = adapt(error, &mut labels, &mut path);
+
+  let mut out = String::new();
+  Terminal::plain()
+    .render(&adapted.diagnostic(), &[Input::new(Source::new(text))], &mut out)
+    .expect("a `String` never fails to be written to");
+  (out, adapted.is_complete())
+}
+# }
+```
+
+A diagnostic carries nought to five labels in practice, so a small array is the expected shape.
+Anything past the end of a buffer is dropped, and the adapter says so rather than dropping it
+silently: `Adapted::is_complete` is `false` when either buffer was too small, and
+`labels_dropped` and `path_segments_dropped` say which. A caller with no labels or path passes
+`&mut []`.
+
+The adapter's work is bounded by your buffers and not by the diagnostic: it calls the label accessor
+at most `labels.len() + 1` times and the path accessor at most `path.len() + 1`, and it never calls
+`Diagnose::labels` or `Diagnose::path_segments`, because those counts come from caller code and are
+not trusted. That is also why it reports whether something was dropped rather than how many. A
+severity tokora adds later maps to `Severity::Error`, so a new rung is shown rather than demoted.
+
 ## The seam is data, not a trait
 
 `painty` takes a `Diagnostic`, a borrowed view it defines itself over nothing but `core`. It does
-not ask a caller to implement a trait, and it does not require a diagnostic contract from any
-particular crate.
-
-That is the point rather than an omission. A renderer must not force a GraphQL library on a project
-that wanted an underline drawn — and the same argument does not stop at GraphQL. A Rust project
-with its own error type should not have to adopt a parser-combinator library either. So the
-`tokora` feature is an *adapter*, one small module of conversions, and the crate is useful with
+not ask a caller to implement a trait, and it requires a diagnostic contract from no particular
+crate. A renderer must not force a GraphQL library on a project that wanted an underline drawn, and
+a Rust project with its own error type should not have to adopt a parser-combinator library either.
+So the `tokora` feature is an adapter, one small module of conversions, and the crate is useful with
 nothing enabled at all.
 
-The alternative — declaring a trait here and blanket-implementing it for tokora's — is rejected
-deliberately. Two structurally identical traits maintained in two repositories drift, and a trait
-that has fallen behind its twin keeps compiling. A conversion function does not.
-
-The claim is checked rather than stated: the consumer suites in `tests/` are written against a
-hand-rolled local error type, they run in a build whose dependency graph is empty, and the
-`no-tokora` CI job reads `cargo tree` over every other configuration to prove the dependency is not
-quietly there.
+`painty` does not declare a `Diagnose`-shaped trait of its own and blanket-implement it for
+tokora's. Two structurally identical traits in two repositories drift silently, because a trait that
+has fallen behind its twin keeps compiling, where a conversion function stops building when the
+contract changes. CI checks the claim rather than stating it: the consumer suites in `tests/` are
+written against a hand-rolled error type and run in a build with no dependencies, and the
+`no-tokora` job reads `cargo tree` for every configuration that leaves the feature off.
 
 ## Three layers
-
-The layer boundary is where the design does its real work, and it is not the obvious one. A
-terminal renderer and an HTML renderer both emit text, so their shared work could live inside
-either of them. A SwiftUI or Flutter front end emits a widget tree, on the far side of an FFI
-boundary, in another language — it cannot consume a string, it needs the structure. So resolution
-becomes a public layer of its own rather than an implementation detail of the text renderers:
 
 ```text
 Layer 1 — the description     a Diagnostic: code, severity, primary position, labels,
                               result path, help. Borrowed data, no trait, no dependency.
 
-Layer 2 — resolution          byte offset -> (line, column); excerpt extraction; ordering;
-                              the lines a region is drawn on
-                              borrows from the source, still allocation-free
-                              THE PUBLIC DATA MODEL — landed
+Layer 2 — resolution          byte offset -> (line, column); excerpt extraction;
+                              the lines a region is drawn on.
+                              Borrows from the source, allocation-free.
+                              THE PUBLIC DATA MODEL
 
-Layer 3 — outputs             terminal (ANSI) — landed, four styles
-                              HTML (elements and classes) — landed, a PEER of the terminal
-                              model export for native UIs — reserved and unimplemented
+Layer 3 — outputs             terminal (ANSI) — four styles
+                              HTML (elements and classes) — a peer of the terminal
+                              SVG — the terminal render, written to a second surface
+                              model export for native UIs — reserved, unimplemented
 ```
 
-The two text outputs are peers rather than a renderer and a style of it, and that is a finding
-rather than a preference. The seam the four terminal styles are written against sits *below* the
-character-column-to-display-column conversion: one of its hooks returns a `char` to stand in a cell
-and four more position a mark by display column, and HTML has no cell. It also draws the line in
-the wrong place — a terminal style marks a row from *underneath*, and an HTML mark is an element
-*inside* the row, so the source row itself changes hands.
+Resolution is a public layer rather than an implementation detail of the text renderers because a
+SwiftUI or Flutter front end emits a widget tree across an FFI boundary: it cannot consume a string,
+it needs the structure. Layer 2 also makes the hard part assertable structurally instead of by
+snapshot. Every reported column lies within its line, an excerpt re-sliced from the source by the
+reported offsets equals the span it came from, and a multi-line region opens and closes on the lines
+it covers. Golden files are left covering appearance only. Bindings for SwiftUI and Flutter are
+separate-repository concerns, not features of this crate.
 
-What the two share is **layer 2**, which is stated in lines and byte spans and which every medium
-has. Not the terminal's plan: that is private to its own module, it is built by putting questions
-to a style and a cell budget, and it is four `Vec`s in a renderer that has no allocator.
+The terminal and HTML are peers, not a renderer and a style of it. The seam the four terminal styles
+are written against is denominated in display cells: one hook returns the `char` that stands in a
+cell and four more position a mark by display column, and HTML has no cell. A terminal style also
+marks a row from underneath, where an HTML mark is an element inside the row. What the two share is
+layer 2 and the elision rule below, not the terminal's plan, which is private to its module and is
+built from `Vec`s that a renderer with no allocator does not have.
 
-Layer 2 earns its keep twice. Beyond serving outputs that are not text, it is what makes the hard
-part assertable structurally instead of by snapshot: every reported column lies within its line's
-width, an excerpt re-sliced from the source by the reported offsets equals the span it came from,
-and a multi-line region opens and closes on the lines it actually covers. Golden files are then
-left covering only appearance, where re-blessing one is cheap and correct.
-
-Grouping labels by line and eliding distant ones are layer 2's too, and are deliberately not here
-yet: whether elision stays allocation-free is a measurement, and it is taken when the first
-renderer can say what shape it needs.
+Grouping labels by line and leaving out distant lines are not part of layer 2's public model. They
+live in the renderers. Both draw one row per line that a span's end falls on, with every label on
+that line attached to its row, and both decide which lines between two such rows are shown with one
+crate-private function, so the two cannot disagree about what a reader is shown. The rule: a line
+where a multi-line span opens is followed by up to three lines of context, and the rest of the gap
+becomes one gap row (`...` in the `rustc` style, `⋮` in HTML). A gap that would stand for exactly
+one line shows that line instead. A two-byte span across a ten-megabyte file therefore draws a
+handful of rows, not millions.
 
 ## Numeric widths
 
-A published model's integer widths cannot be changed later without breaking every consumer, and
-this one is meant to cross a C ABI as well as a Rust API. So the width of a numeric member is not
-a local choice — it follows from what the number *is*, by five rules read in order. The first that
-matches wins, and the last matches everything, so there is no member the rule fails to place.
+A published model's integer widths cannot be changed later without breaking every consumer, and this
+one is meant to cross a C ABI as well as a Rust API. So the width of a numeric member is not a local
+choice: it follows from what the number *is*, by five rules read in order. The first that matches
+wins, and the last matches everything, so there is no member the rules fail to place.
 
-| # | what the number is | width | why |
-| - | ------------------ | ----- | --- |
-| 1 | a line or column in painty's own geometry, resolved **or rendered** — including a count of lines, which is the last line's own number | `u64` | it crosses a C ABI, so not `usize`; and it must not imply a ceiling the domain does not have, so not `u32` |
-| 2 | an ordinal in data the **producer** built, that painty neither computes nor bounds | `u64` | same ceiling argument, and there is no protocol cap to point at instead |
-| 3 | a key into a structure painty does not own and never computes | that contract's width | it has to round-trip; matching the width is what makes it lossless in both directions |
-| 4 | a value painty itself **emits into a wire format** that fixes its width | that format's width | the format is not negotiable and the value has to be legal in it |
-| 5 | anything else — an index or a count of things in memory | `usize` | exactly as `slice::len` is |
+| # | what the number is | width | examples | why |
+| - | ------------------ | ----- | -------- | --- |
+| 1 | a line or column in painty's own geometry, resolved **or rendered** — including a count of lines, which is the last line's own number | `u64` | `Position::line`, `Position::column`, `Source::line_count` | it crosses a C ABI, so not `usize`; and it must not imply a ceiling the domain does not have, so not `u32` |
+| 2 | an ordinal in data the **producer** built, that painty neither computes nor bounds | `u64` | `PathSegment::Index` | same ceiling argument, and there is no protocol cap to point at instead |
+| 3 | a key into a structure painty does not own and never computes | that contract's width | `Location::source` (`u32`) | it has to round-trip; matching the width is what makes it lossless in both directions |
+| 4 | a value painty itself **emits into a wire format** that fixes its width | that format's width | `Color::Rgb`, `Color::Ansi256` (`u8`) | the format is not negotiable and the value has to be legal in it |
+| 5 | anything else — an index or a count of things in memory | `usize` | `Position::offset`, `Span::start`, `Source::len` | exactly as `slice::len` is |
 
-Worked through the whole public surface, that gives:
+The order is what resolves overlaps: a line count is both a count of things in memory and a line
+ordinal, and rule 1 comes first, so it is a `u64`. And nothing on the path a position is built by
+saturates or casts. A clamped ordinal is indistinguishable from a real one, which is a number that
+lies rather than one that fails.
 
-- **rule 1** — `Position::line`, `Position::column`, `Line::number`, `Line::char_count`,
-  `Line::column_at`, `Source::line_count`, `Source::line`, `Region::line_count`,
-  `RegionLine::columns`, and every member of `LineCells` — `column_at`, `width`, `columns_for`,
-  `cells_between`, `default_tab_width`, `max_tab_width` — display columns being painty's own
-  geometry just as character columns are;
-- **rule 2** — `PathSegment::Index`, a position in a *result* the producer assembled;
-- **rule 3** — `Location::source`, a `u32` index into the caller's own list of inputs, which is
-  what every producer of one already spells it;
-- **rule 4** — `Color::Ansi256`, `Color::Rgb`, `Ansi16::{index, from_index, to_rgb}`: a colour
-  channel painty writes into an SGR escape sequence, which fixes it at one byte;
-- **rule 5** — `Position::offset`, `Span::{new, empty, start, end, len, contains}`,
-  `LineBreak::byte_len`, and `Source::{len, line_at, position}`.
-
-The adapter's overflow reports used to be here, as exact `usize` counts. They are booleans now and
-have left the numeric surface entirely: an exact count of what did not fit can only be had by
-looking at everything that did not fit, and those are answers from a caller-implemented trait, so
-the count was buying an unbounded walk through somebody else's code to fill a four-element array.
-`painty::tokora::Adapted` documents the trade.
-
-Rule 4 was added when the terminal renderer arrived, and it is the residual this document had been
-carrying — *the rule set itself being wrong* — actually firing. A colour channel is not an ordinal,
-and rule 3 excludes it on its own terms because painty **does** compute it: narrowing `Rgb → 256 →
-16` is painty's arithmetic. The catch-all then claimed it and gave a pointer-sized colour channel,
-which is absurd. The alternative considered was widening rule 3 from *authorship of the value* to
-*ownership of the contract*, which covers both with one rule instead of two; it was rejected because
-dropping rule 3's "never computes" clause lets it also claim every byte offset — Rust's slicing
-contract fixes those at `usize` — which would leave rule 3 swallowing rule 5 and the procedure with
-nothing to discriminate on. Five rules that each decide something beat four where one decides
-everything.
-
-Rule 1's wording widened at the same time, from *the resolved model* to *painty's own geometry,
-resolved or rendered*, so that a renderer's display column is placed. Checked against all
-twenty-four members that existed before: none is re-placed, and the near misses — `Source::line_at`,
-`LineBreak::byte_len`, `PathSegment::Index`, `Location::source`, `Position::offset` — are byte
-offsets and foreign indices rather than lines or columns.
-
-Two consequences worth stating, because they are why the rules are ordered rather than merely
-listed. A line count is *both* a count of things in memory and a line ordinal; rule 1 comes first,
-so it is a `u64`. And nothing on the path a position is built by may saturate or cast: a clamped
-ordinal is indistinguishable from a real one, which is a number that lies rather than one that
-fails.
-
-**A parameter's width is as frozen as a return's**, so both are pinned — and so is the lifetime a
-borrow comes back on. Three things enforce this, and it is worth knowing which one decides.
-
-`ci/public_numeric_surface.py`, run by the `public-surface` CI job, **is the decider**. It asks
-rustdoc for the *resolved* public API and recurses over it looking for primitive integers, so it
-names no syntactic position and there is no case in it to forget: a width in a const-generic
-parameter, behind a type alias, or produced by a macro expansion is found by the same three lines
-that find one in a return type. Every member above is recorded there with its widths.
-
-`tests/numeric_widths.rs` is a **fast early warning** that says so in its own header, and it is
-also where each member is pinned by function pointer under the rule that placed it — so the rule is
-a fact in the code, and a member carrying a width its rule does not give fails mechanically.
-
-`tests/source_borrows.rs` covers the other half: everything resolution returns borrows the source
-text rather than the `&Source` it came through.
-
-What is left is a member placed under a rule that gives the *same* width — rules 1 and 2 both give
-`u64`, and they differ in where the number came from rather than in what it is — and the rule set
-itself being wrong. No check reads intent. That is what the ordering above is for, and what review
-is for.
-
-Two of those are associated functions where a constant would read more naturally —
-`LineCells::default_tab_width` and `LineCells::max_tab_width`. A `pub const` cannot be pinned by
-ascribing a function pointer, and the choice was between a second pinning mechanism for two members
-and an API shape the one mechanism already covers. The API moved.
+`ci/public_numeric_surface.py`, run by the `public-surface` CI job, decides. It asks rustdoc for the
+resolved public API and looks for primitive integers anywhere in it, so a width behind a type alias,
+a const-generic parameter or a macro expansion is found the same way as one in a return type, and
+every member is recorded there with its widths. `tests/numeric_widths.rs` runs in `cargo test` and
+pins each member by function pointer under the rule that placed it, so a member carrying a width its
+rule does not give fails to compile, and a parameter's width is as frozen as a return's.
+`tests/source_borrows.rs` pins the lifetime a borrow comes back on: everything resolution returns
+borrows the source text, not the `&Source` it came through. None of these reads intent. A member
+placed under a rule that gives the same width, as rules 1 and 2 both give `u64`, is caught only by
+review.
 
 ## Features
 
-Each implemented output is independently selectable, and the default configuration selects none of
-them — the crate is `no_std` and dependency-free until a caller asks for something.
+Each implemented output has a feature of its own, and the default configuration selects none of
+them: the crate is `no_std` and dependency-free until a caller asks for something.
 
-| feature     | implies | pulls in                   | what it turns on                                    |
-| ----------- | ------- | -------------------------- | --------------------------------------------------- |
-| *(default)* | —       | —                          | layer 2: resolution, `no_std`, no dependencies      |
-| `std`       | —       | —                          | anything needing the standard library               |
-| `terminal`  | `std`   | `unicode-width`, `unicode-segmentation`, `anstyle` | the terminal renderer: cell arithmetic, colour detection, ANSI |
-| `html`      | —       | —                          | the HTML renderer: escaping and CSS classes, still `no_std` and allocation-free |
-| `svg`       | `terminal` | —                       | `Terminal::render_svg`: the same render, as an SVG image of a terminal |
-| `model`     | —       | —                          | reserved; unimplemented                             |
-| `tokora`    | —       | `tokora`                   | an adapter from `tokora::diagnostic::Diagnose`      |
+| feature     | implies    | pulls in                                           | what it turns on                                                                 |
+| ----------- | ---------- | -------------------------------------------------- | -------------------------------------------------------------------------------- |
+| *(default)* | —          | —                                                  | layer 2: resolution, `no_std`, no dependencies                                    |
+| `std`       | —          | —                                                  | anything needing the standard library                                             |
+| `terminal`  | `std`      | `unicode-width`, `unicode-segmentation`, `anstyle` | the terminal renderer: cell arithmetic, colour detection, ANSI                    |
+| `html`      | —          | —                                                  | the HTML renderer: escaping and CSS classes, still `no_std` and allocation-free   |
+| `svg`       | `terminal` | —                                                  | `Terminal::render_svg`: the same render, as an SVG image of a terminal            |
+| `model`     | —          | —                                                  | reserved; unimplemented                                                           |
+| `tokora`    | —          | `tokora`                                           | `painty::tokora`: an adapter from `tokora::diagnostic::Diagnose`                  |
 
-```toml
-[dependencies]
-painty = { version = "0.0.0", features = ["terminal"] }
-```
+`terminal` takes `unicode-width` for display width and `unicode-segmentation` for UAX #29 grapheme
+clusters, because owning a Unicode table means owning a class of alignment bug for no gain. Both are
+pinned exactly, since the two releases carry the same Unicode data (17.0.0) that the placement tests
+were surveyed against, so `terminal` constrains their versions in your dependency graph. `anstyle`
+writes the SGR escape sequences.
 
-`unicode-width` is taken rather than hand-narrowed because correct terminal alignment is impossible
-without display width, and owning a Unicode table means owning a class of alignment bug for no
-gain. `unicode-segmentation` is taken for a sharper version of the same reason: where a *placement
-unit* ends is UAX#29 grapheme segmentation, and two rounds of review found two different home-grown
-answers that each inferred it from incremental prefix width — the second placing every marker after
-a variation-selector emoji one cell early. A rule that has to be tuned a third time is a wrong
-model, so the question goes to the crate that implements the standard, exactly as `syn` and not a
-line scanner decides what a public item is. `anstyle` is what `clap` and `cargo` already use, so a
-consumer's `--color` flag and this crate's theme interoperate without a conversion layer. All three
-sit behind `terminal`; the HTML output and reserved `model` feature pull in none of them.
+`html` implies nothing at all: CI builds it for `thumbv6m-none-eabi`, so the renderer uses no `std`,
+no `alloc` and no heap. It orders a diagnostic's labels with selection scans over the caller's own
+byte offsets, which is `O(k²)` integer comparisons in the label count `k` against the terminal's
+`O(k log k)`, measured at 31 ms for a thousand labels.
 
-`html` implies nothing at all, which is load-bearing rather than tidy: CI builds it for
-`thumbv6m-none-eabi`, so the renderer has no `std`, no `alloc` and no heap. That is why it does not
-consume the terminal's plan — a plan is four `Vec`s — and orders the caller's labels with selection
-scans over their own byte offsets instead. The price is stated where it is paid: `O(k²)` integer
-comparisons in the label count, against the terminal's `O(k log k)`, measured at 31 ms for a
-thousand labels. What the two renderers do share is layer 2 and the elision rule, which is one
-function both call rather than one rule each keeps — the first thing two copies of it did was
-disagree about which lines a reader is shown.
+`svg` is the terminal render painted to a second surface, not a third renderer. The plan, the style,
+the elision and the geometry are the terminal's, so every style has an SVG and its rows are
+character for character the rows the terminal writes. It is an image of a terminal, a monospace
+grid, because SVG has no layout engine: each grapheme cluster is drawn at an absolute coordinate
+computed from the cell it was assigned, so no font metric enters the placement and a caret is under
+its glyph in any face. Roles become CSS classes with `painty::html`'s names, and the document
+carries a `<style>` element generated from the palette, so it stands alone while an outer stylesheet
+still overrides it.
 
-`svg` is the odd one, and its shape is the finding rather than a convenience: it is **not a third
-renderer**. Every byte of a terminal render goes through one painter, and every byte that means
-anything goes through a hook that knows its `Role` — so an SVG is that painter writing to a second
-surface, and the plan, the style, the elision and the geometry are the same call. Every style
-therefore has an SVG at no cost, the document's rows are character for character the rows the
-terminal writes, and the invariant that a style changes appearance and never changes which source is
-marked is inherited rather than restated. It is an image of a *terminal*: a monospace grid, because
-SVG has no layout engine and placing a label under variable-width text needs that text's advance in
-a font this crate has no business owning. What the crate does have is the cell each grapheme cluster
-was assigned, so every cluster is drawn at an absolute coordinate computed from that — no font
-metric enters the placement, and a caret is under its glyph in any face at all. Roles become CSS
-classes with `painty::html`'s own names, and the document carries a `<style>` element generated from
-the palette so it stands alone in a README while an outer sheet still overrides it.
+`tokora` is taken with `default-features = false`, so it stays `no_std`; `--features tokora` is one
+of the bare-metal legs the `no-std` CI job builds.
 
 ### The placement model
 
-A line is its sequence of UAX#29 extended grapheme clusters, after sanitization. Each cluster
-occupies exactly `unicode-width`'s width of that cluster **measured in isolation**. A byte offset's
-column is one plus the cells of the whole clusters before it, and a span widens outward to cluster
-boundaries.
+A line is its sequence of UAX #29 extended grapheme clusters, after sanitization, and a tab expands
+to its next stop (`Terminal::with_tab_width`). Each cluster occupies exactly `unicode-width`'s width
+of that cluster **measured in isolation**. A byte offset's column is one plus the cells of the whole
+clusters before it, and a span widens outward to cluster boundaries.
 
-`unicode-width` also applies rules *across* cluster boundaries — Arabic lam followed by alef scores
-1 for the pair where the clusters score 1 + 1 — and painty **rejects those by specification**. Not
-an omission: no cursor-addressable terminal can implement them. A grid device must have a definite
-cursor position between any two characters it receives, `CSI 6n` can be issued between the lam and
-the alef, and the lam's cluster has closed before the alef arrives. For the pair to occupy one cell
-the alef would have to advance zero cells into a cell the terminal may already have reported past.
-Every real terminal advances two. The cluster boundary is the maximum lookahead a cursor-addressable
-device can hold without contradicting its own cursor reports, which is why it is the unit.
+The cluster is the unit because it is the most lookahead a cursor-addressable terminal can hold
+without contradicting its own cursor reports. `unicode-width` also applies rules *across* cluster
+boundaries (Arabic lam followed by alef scores 1 for the pair where the clusters score 1 + 1), and
+painty rejects those by specification: no terminal that reports its cursor between two characters
+can implement them.
 
 So painty promises exact cell alignment on a grapheme-aware terminal, and declines four things:
-agreement with whole-string width (six families differ on Unicode 17 data, each pinned in the tests
-at *both* values); visual alignment under bidi reordering, since columns are logical; font shaping,
-so underlining half a ligature marks half the span — deliberately, because those are two addressable
-source positions; and legacy per-codepoint cell counts, where a wcwidth-era terminal gives a ZWJ
-emoji sequence more cells than its cluster width.
 
-`tokora` is taken with `default-features = false`, so it stays `no_std` and brings only the
-diagnostic contract the adapter reads — `--features tokora` is one of the bare-metal legs the
-`no-std` job builds.
-
-SwiftUI and Flutter bindings are deliberately not features. They remain separate-repository
-concerns; the reserved `model` feature does not yet provide bindings or an export.
+- agreement with whole-string width: six families differ on Unicode 17 data, each pinned in the
+  tests at both values;
+- visual alignment under bidi reordering, since columns are logical;
+- font shaping: underlining half a ligature marks half the span, because those are two addressable
+  source positions;
+- legacy per-codepoint cell counts, where a wcwidth-era terminal gives a ZWJ emoji sequence more
+  cells than its cluster width.
 
 ## Minimum supported Rust version
 
-`1.95`, matching `tokora` — the crate whose diagnostic contract `painty`'s optional adapter reads.
-Keeping the floor no lower than the contract's is what makes it a floor a caller can stand on. The
-`msrv` CI job reads `rust-version` out of `Cargo.toml` rather than hardcoding a toolchain, so the
-declared value and the tested value cannot drift.
-
-Raising the floor is not treated as a breaking change.
+`1.95`, matching `tokora`, whose diagnostic contract the optional adapter reads. The `msrv` CI job
+reads `rust-version` out of `Cargo.toml` rather than hardcoding a toolchain, so the declared and
+tested values cannot drift. Raising the floor is not treated as a breaking change.
 
 ## License
 
