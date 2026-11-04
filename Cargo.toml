@@ -42,10 +42,12 @@ unicode-width = { version = "=0.2.2", optional = true }
 # is markup, and `tests/html_escaping.rs`'s hand-written tokeniser — deliberately intolerant, and
 # written by the same hand as the renderer — is not an independent opinion either. html5ever is the
 # WHATWG tokeniser and tree builder Servo ships, so "no parse errors" is the specification's own
-# verdict rather than this repository's. Dev-only: `cargo tree --edges normal` is unchanged, and
-# the `no-tokora` job's "no dependencies at all" invariant still holds.
-html5ever = "0.39"
-markup5ever_rcdom = "0.39"
+# verdict rather than this repository's. The tree goes into the gallery's own sink in
+# `tests/common/dom.rs`, not into `markup5ever_rcdom`: that is published as an unofficial crate
+# that trails html5ever, and it would pin this line to the html5ever it was built against.
+# Dev-only: `cargo tree --edges normal` is unchanged, and the `no-tokora` job's
+# "no dependencies at all" invariant still holds.
+html5ever = "0.40"
 proc-macro2 = { version = "1", features = ["span-locations"] }
 syn = { version = "3", features = ["full", "visit"] }
 

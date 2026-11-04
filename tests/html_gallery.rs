@@ -39,15 +39,15 @@
 //! the tree that comes back out of it is the tree a browser would build rather than the one painty
 //! believes it wrote.
 //!
-//! [`markup5ever_rcdom`] holds the tree html5ever builds. It is the smallest thing that does, and
-//! its own README is worth quoting rather than paraphrasing: it "is built for the express purpose
-//! of writing automated tests for the `html5ever` and `xml5ever` crates", is unsupported, and "has
-//! not been fuzzed or tested against arbitrary, malicious, or nontrivial inputs". That is the
-//! express purpose it is put to here, and every input is a document this repository generated, so
-//! the warning is about a use nobody is making of it. The judgement that matters —
-//! `errors.is_empty()` — is html5ever's either way; `RcDom` only stores what it is handed.
+//! The tree html5ever builds goes into a sink of the gallery's own, in `tests/common/dom.rs`,
+//! rather than into html5ever's test DOM, [`markup5ever_rcdom`]. That is published as an
+//! unofficial crate that trails html5ever, and a sink built against one html5ever's `TreeSink`
+//! cannot be handed to another's parser, so depending on it would hold this gate to whichever
+//! html5ever it was last published for. The sink keeps rcdom's shape and merges adjacent text where
+//! rcdom does, and it decides nothing: the judgement that matters — `errors.is_empty()` — is
+//! html5ever's, and the sink only stores what it is handed.
 //!
-//! Both are `[dev-dependencies]`, so painty's own graph is untouched: the `no-tokora` job's
+//! html5ever is a dev-dependency, so painty's own graph is untouched: the `no-tokora` job's
 //! `cargo tree --edges normal` still reports no dependencies at all in the default configuration.
 //!
 //! # The hostile document is not a fifth specimen
@@ -80,13 +80,15 @@
 
 #![cfg(feature = "html")]
 
+use dom::{Dom, Handle, NodeData};
 use html5ever::{
   ParseOpts, QualName, local_name, ns, parse_fragment, tendril::TendrilSink,
   tokenizer::TokenizerOpts, tree_builder::TreeBuilderOpts,
 };
-use markup5ever_rcdom::{Handle, NodeData, RcDom};
 use painty::{Diagnostic, Input, Label, Location, Severity, Source, Span, html::Html};
 
+#[path = "common/dom.rs"]
+mod dom;
 #[path = "common/specimens.rs"]
 mod specimens;
 
@@ -269,7 +271,7 @@ struct Certified {
 /// observations about a document painty never claimed to have written.
 fn certify(what: &str, document: &str) -> Certified {
   let dom = parse_fragment(
-    RcDom::default(),
+    Dom::default(),
     ParseOpts {
       // Both halves report through `TreeSink::parse_error` either way; this only decides whether
       // the message says which token, which is the difference between a useful failure and a
