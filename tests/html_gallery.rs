@@ -322,8 +322,7 @@ fn certify(what: &str, document: &str) -> Certified {
       NodeData::Element { name, .. } => {
         roots += 1;
         assert_eq!(
-          name.local.as_ref(),
-          "div",
+          &*name.local, "div",
           "{what}: a document is one `<div class=\"painty ..\">` and this one is rooted in a \
            `<{}>`",
           name.local
@@ -350,7 +349,7 @@ fn walk(what: &str, node: &Handle, out: &mut Certified) {
     NodeData::Text { contents } => out.text.push_str(&contents.borrow()),
     NodeData::Element { name, attrs, .. } => {
       out.elements += 1;
-      let element = name.local.as_ref();
+      let element = &*name.local;
       assert!(
         ELEMENTS.contains(&element),
         "{what}: `<{element}>` is not an element painty writes, so the caller's text became \
@@ -364,8 +363,7 @@ fn walk(what: &str, node: &Handle, out: &mut Certified) {
         );
       };
       assert_eq!(
-        class.name.local.as_ref(),
-        "class",
+        &*class.name.local, "class",
         "{what}: `<{element}>` carries a `{}` attribute, and painty writes only `class`",
         class.name.local
       );
