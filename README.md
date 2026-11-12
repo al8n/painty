@@ -186,7 +186,7 @@ image.
 ## Rendering tokora diagnostics
 
 With the `tokora` feature, `painty::tokora::adapt` reads a `&dyn tokora::diagnostic::Diagnose`
-(tokora 0.12) into a `Diagnostic`, so any front end whose errors implement that contract renders
+(tokora 0.13) into a `Diagnostic`, so any front end whose errors implement that contract renders
 through the same renderers. `painty` allocates nothing, so the labels and the result path land in
 buffers you supply, usually arrays on the stack.
 

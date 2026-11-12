@@ -31,7 +31,7 @@ tokora = ["dep:tokora"]
 
 [dependencies]
 anstyle = { version = "1", optional = true }
-tokora = { version = "0.12", default-features = false, optional = true }
+tokora = { version = "0.13", default-features = false, optional = true }
 # Exact because both releases carry Unicode 17.0.0, the data surveyed by the placement tests.
 # Update them together only after re-deriving `DIVERGENCE` and `PLACEMENTS`.
 unicode-segmentation = { version = "=1.13.3", optional = true }
@@ -106,9 +106,3 @@ unexpected_cfgs = { level = "warn", check-cfg = [
 
 [workspace.lints.clippy]
 cast_possible_truncation = "warn"
-
-# TEMPORARY, never to be merged: tokora 0.13.0 is not on crates.io yet. This points the build at
-# the commit that will become it, so that CI exercises the new contract first. It is replaced by
-# `version = "0.13"` above, and removed, once 0.13.0 is published.
-[patch.crates-io]
-tokora = { git = "https://github.com/al8n/tokora", rev = "d4648189a812bfcd663168c0630d9a6edd4b7323" }
