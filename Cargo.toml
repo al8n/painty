@@ -35,7 +35,7 @@ tokora = { version = "0.13", default-features = false, optional = true }
 # Exact because both releases carry Unicode 17.0.0, the data surveyed by the placement tests.
 # Update them together only after re-deriving `DIVERGENCE` and `PLACEMENTS`.
 unicode-segmentation = { version = "=1.13.3", optional = true }
-unicode-width = { version = "=0.2.2", optional = true }
+unicode-width = { version = "=0.2.3", optional = true }
 
 [dev-dependencies]
 # The HTML gallery's structural gate. painty must not be the thing that certifies painty's markup
