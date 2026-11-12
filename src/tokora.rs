@@ -37,7 +37,7 @@
 //! #   fn primary(&self) -> Location { Location::new(0, SimpleSpan::new(29, 34)) }
 //! #   fn primary_label(&self) -> Option<&'static str> { Some("redefined here") }
 //! #   fn labels(&self) -> usize { 1 }
-//! #   fn label(&self, index: usize) -> Option<tokora::diagnostic::Label> {
+//! #   fn label(&self, index: usize) -> Option<tokora::diagnostic::Label<'_>> {
 //! #     (index == 0).then(|| tokora::diagnostic::Label::new(Location::new(0, SimpleSpan::new(16, 21)), "first defined here"))
 //! #   }
 //! #   fn path_segments(&self) -> usize { 0 }
@@ -101,9 +101,9 @@ impl From<::tokora::diagnostic::Location> for Location {
   }
 }
 
-impl From<::tokora::diagnostic::Label> for Label<'static> {
+impl<'a> From<::tokora::diagnostic::Label<'a>> for Label<'a> {
   #[inline]
-  fn from(label: ::tokora::diagnostic::Label) -> Self {
+  fn from(label: ::tokora::diagnostic::Label<'a>) -> Self {
     Self::new(label.location().into(), label.text())
   }
 }
@@ -236,16 +236,7 @@ where
   // Indexed accessors, not `DiagnoseExt`'s iterators: those read the declared count when they are
   // constructed, and a count of zero over an accessor that has data made this report a complete
   // diagnostic with its labels missing.
-  //
-  // The return type is spelled out because a `&mut [T]` is invariant in `T`. tokora's label text is
-  // `&'static str`, so `Label::from` produces a `Label<'static>` and the buffer's element type
-  // would have to equal that exactly — which would demand `'a: 'static` of the diagnostic. Naming
-  // the closure's result puts the (perfectly ordinary) shortening coercion on the value instead.
-  let (labels, labels_dropped) = fill(labels, |index| {
-    diagnose
-      .label(index)
-      .map(|label| -> Label<'a> { label.into() })
-  });
+  let (labels, labels_dropped) = fill(labels, |index| diagnose.label(index).map(Label::from));
   let (path, path_segments_dropped) = fill(path, |index| {
     diagnose.path_segment(index).map(PathSegment::from)
   });

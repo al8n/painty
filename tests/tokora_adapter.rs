@@ -65,7 +65,7 @@ impl Diagnose for Redefined {
     self.labels
   }
 
-  fn label(&self, index: usize) -> Option<tokora::diagnostic::Label> {
+  fn label(&self, index: usize) -> Option<tokora::diagnostic::Label<'_>> {
     (index < self.labels).then(|| {
       tokora::diagnostic::Label::new(
         tokora::diagnostic::Location::new(0, SimpleSpan::new(16, 21)),
@@ -177,6 +177,103 @@ fn a_result_path_crosses_intact() {
   );
 }
 
+/// A tokora diagnostic whose texts name something from the input, so each is composed at
+/// construction instead of being written as a literal.
+///
+/// The value owns the strings and the contract lends them, which is the one case a `&'static str`
+/// signature could not express and a literal never exercises.
+struct Composed {
+  primary_label: String,
+  label: String,
+  help: String,
+}
+
+impl Composed {
+  fn new(expected: &str, found: &str, suggestion: &str) -> Self {
+    Self {
+      primary_label: format!("expected `{expected}`"),
+      label: format!("`{found}` is declared here"),
+      help: format!("did you mean `{suggestion}`?"),
+    }
+  }
+}
+
+impl fmt::Display for Composed {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("mismatched types")
+  }
+}
+
+impl Diagnose for Composed {
+  fn code(&self) -> Code {
+    Code::new("mylang::schema::type-mismatch")
+  }
+
+  fn severity(&self) -> tokora::diagnostic::Severity {
+    tokora::diagnostic::Severity::Error
+  }
+
+  fn primary(&self) -> tokora::diagnostic::Location {
+    tokora::diagnostic::Location::new(0, SimpleSpan::new(29, 34))
+  }
+
+  fn primary_label(&self) -> Option<&str> {
+    Some(self.primary_label.as_str())
+  }
+
+  fn labels(&self) -> usize {
+    1
+  }
+
+  fn label(&self, index: usize) -> Option<tokora::diagnostic::Label<'_>> {
+    (index == 0).then(|| {
+      tokora::diagnostic::Label::new(
+        tokora::diagnostic::Location::new(0, SimpleSpan::new(16, 21)),
+        self.label.as_str(),
+      )
+    })
+  }
+
+  fn path_segments(&self) -> usize {
+    0
+  }
+
+  fn path_segment(&self, _: usize) -> Option<tokora::diagnostic::PathSegment<'_>> {
+    None
+  }
+
+  fn help(&self) -> Option<&str> {
+    Some(self.help.as_str())
+  }
+}
+
+#[test]
+fn text_a_diagnostic_composed_reaches_the_view_like_a_literal_one() {
+  let error = Composed::new("HashSet<String>", "Vec<String>", "MainDb");
+  let mut labels = empty_labels::<4>();
+  let mut path: [PathSegment<'_>; 0] = [];
+
+  // `painty` allocates nothing, so what arrives here is the strings `error` owns, lent.
+  let adapted = adapt(&error, &mut labels, &mut path);
+  assert!(adapted.is_complete());
+
+  let diagnostic = adapted.diagnostic();
+  assert_eq!(
+    diagnostic.primary_label(),
+    Some("expected `HashSet<String>`")
+  );
+  assert_eq!(diagnostic.labels().len(), 1);
+  assert_eq!(
+    diagnostic.labels()[0].text(),
+    "`Vec<String>` is declared here"
+  );
+  assert_eq!(
+    diagnostic.labels()[0].location(),
+    Location::new(0, Span::new(16, 21))
+  );
+  assert_eq!(diagnostic.help(), Some("did you mean `MainDb`?"));
+}
+
 #[test]
 fn overflow_is_reported_rather_than_dropped_in_silence() {
   let error = Redefined {
@@ -268,7 +365,7 @@ impl Diagnose for Lying {
   fn labels(&self) -> usize {
     1_000_000
   }
-  fn label(&self, index: usize) -> Option<tokora::diagnostic::Label> {
+  fn label(&self, index: usize) -> Option<tokora::diagnostic::Label<'_>> {
     self.answered.set(self.answered.get() + 1);
     (index == 0).then(|| {
       tokora::diagnostic::Label::new(
@@ -339,7 +436,7 @@ impl Diagnose for Endless {
     // the same either way.
     1_000_000
   }
-  fn label(&self, _: usize) -> Option<tokora::diagnostic::Label> {
+  fn label(&self, _: usize) -> Option<tokora::diagnostic::Label<'_>> {
     self.answered.set(self.answered.get() + 1);
     Some(tokora::diagnostic::Label::new(
       tokora::diagnostic::Location::new(0, SimpleSpan::new(0, 1)),
@@ -403,7 +500,7 @@ impl Diagnose for UnderReports {
     self.counts_read.set(self.counts_read.get() + 1);
     0
   }
-  fn label(&self, index: usize) -> Option<tokora::diagnostic::Label> {
+  fn label(&self, index: usize) -> Option<tokora::diagnostic::Label<'_>> {
     self.labels_read.set(self.labels_read.get() + 1);
     (index < 3).then(|| {
       tokora::diagnostic::Label::new(
